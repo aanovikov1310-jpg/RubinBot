@@ -41,13 +41,14 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 
-BOT_TOKEN = "9153206613:AAH6yeSZv2lYd-FT1sc3cjyK47rcLoO1uik"   # <<< токен от @BotFather
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9153206613:AAH6yeSZv2lYd-FT1sc3cjyK47rcLoO1uik")  # Render: Env BOT_TOKEN
 BOT_USERNAME = os.getenv("BOT_USERNAME", "RubinCoinBot")
 BOT_NAME = "Рубин Бот"
 CUR = "rCoin"
 CUSTOM_EMOJI = True
 
 OWNER_ID = int(os.getenv("OWNER_ID", "5251635454041675257"))
+# Render: переменные ADMIN_IDS, WEBAPP_URL, BOT_USERNAME
 
 ADMIN_IDS = {OWNER_ID, *{
     int(x) for x in os.getenv("ADMIN_IDS", "5257618084").replace(";", ",").split(",") if x.strip().isdigit()
@@ -174,6 +175,14 @@ WEBAPP_URL = os.getenv('WEBAPP_URL', '').strip()
 
 
 # =============================== КОМПАТ-СЛОЙ ===============================
+config = sys.modules[__name__]
+
+# =============================== ALIASES (до первого использования) ========
+E = sys.modules[__name__]
+M = sys.modules[__name__]
+G = sys.modules[__name__]
+K = sys.modules[__name__]
+nft_image = sys.modules[__name__]
 config = sys.modules[__name__]
 
 # =============================== database/emoji.py ================
@@ -1568,7 +1577,6 @@ def render_leaderboard(rows: list, title: str = "МИРОВОЙ РЕЙТИНГ",
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
-from database import emoji as E
 
 
 def _btn(text: str, data: str | None = None, url: str | None = None,
@@ -1871,9 +1879,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from database import emoji as E
-from database import models as M
-from services import nft_image
 
 router = Router(name="rc_core")
 
@@ -2246,7 +2251,6 @@ async def parse_ru_command(message: Message, db, state: FSMContext) -> bool:
         return True
     if head in ("мины", "лесенка", "краш"):
         # "мины 10000 3" / "лесенка 50к"
-        from handlers import rc_games
 
         if head == "мины":
             await rc_games.start_mines_text(message, db, tail)
@@ -2270,15 +2274,12 @@ async def parse_ru_command(message: Message, db, state: FSMContext) -> bool:
         await message.answer(await daily_answer(message, db, message.from_user.id),
                              reply_markup=K.back())
     elif action == "lottery":
-        from handlers import rc_lottery
 
         await rc_lottery.lottery_screen(message, db)
     elif action == "cases":
-        from handlers import rc_lottery
 
         await rc_lottery.cases_screen(message, db)
     elif action == "tickets":
-        from handlers import rc_lottery
 
         await rc_lottery.tickets_screen(message, db)
     elif action == "top":
@@ -2288,15 +2289,12 @@ async def parse_ru_command(message: Message, db, state: FSMContext) -> bool:
     elif action == "topimg":
         await top_image_answer(message, db, await M.leaderboard(db))
     elif action == "market":
-        from handlers import rc_market
 
         await rc_market.market_screen(message, db)
     elif action == "inventory":
-        from handlers import rc_market
 
         await rc_market.inventory_screen(message, db)
     elif action == "gifts":
-        from handlers import rc_market
 
         await rc_market.gifts_screen(message, db)
     elif action == "games":
@@ -2322,25 +2320,20 @@ async def parse_ru_command(message: Message, db, state: FSMContext) -> bool:
     elif action == "exchange":
         await message.answer(await render_exchange(), reply_markup=K.back())
     elif action == "donate":
-        from handlers import rc_misc
 
         await rc_misc.donate_screen(message, db)
     elif action == "earn":
-        from handlers import rc_misc
 
         await rc_misc.earn_screen(message, db)
     elif action == "referral":
         await ref_answer(message)
     elif action == "warehouse":
-        from handlers import rc_misc
 
         await rc_misc.warehouse_screen(message, db)
     elif action == "santa":
-        from handlers import rc_misc
 
         await rc_misc.santa_screen(message, db)
     elif action == "bonus":
-        from handlers import rc_misc
 
         await rc_misc.bonus_screen(message, db)
     return True
@@ -2454,9 +2447,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from database import emoji as E
-from database import models as M
-from services import rc_engine as G
 
 router = Router(name="rc_games")
 
@@ -3079,9 +3069,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from database import emoji as E
-from database import models as M
-from services import nft_image
 
 router = Router(name="rc_market")
 
@@ -3402,8 +3389,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from database import emoji as E
-from database import models as M
 
 router = Router(name="rc_lottery")
 
@@ -3654,8 +3639,6 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
-from database import emoji as E
-from database import models as M
 
 router = Router(name="rc_misc")
 
@@ -4025,9 +4008,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from database import emoji as E
-from database import models as M
-from services import nft_image
 
 router = Router(name="rc_admin")
 
@@ -4540,13 +4520,6 @@ class SessionStore:
         return len(dead)
 
 
-# =============================== ALIASES ====================================
-E = sys.modules[__name__]      # эмодзи-функции td/te/plain
-M = sys.modules[__name__]      # модели БД
-G = sys.modules[__name__]      # движки игр
-K = sys.modules[__name__]      # клавиатуры
-nft_image = sys.modules[__name__]
-sessions = SessionStore()
 # =============================== bot_rc.py ================
 # file: bot.py
 """«Рубин Бот» — точка входа: aiogram 3 + aiosqlite + aiohttp (mini app)."""
@@ -4562,8 +4535,6 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import MenuButtonWebApp, WebAppInfo
 
-from database import models as M
-from handlers import core, rc_admin, rc_games, rc_lottery, rc_market, rc_misc
 
 log = logging.getLogger("rubin")
 
@@ -4763,9 +4734,10 @@ async def web_server(db):
     app.router.add_get("/app", index)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("WEBAPP_PORT", "8080")))
+    port = int(os.getenv("PORT") or os.getenv("WEBAPP_PORT") or "8080")
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    log.info("Мини-апп http://localhost:%s", os.getenv("WEBAPP_PORT", "8080"))
+    log.info("Мини-апп слушает порт %s", port)
     return runner
 
 
