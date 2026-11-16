@@ -41,7 +41,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9153206613:AAH6yeSZv2lYd-FT1sc3cjyK47rcLoO1uik")  # Render: Env BOT_TOKEN
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or os.getenv("9153206613:AAH6yeSZv2lYd-FT1sc3cjyK47rcLoO1uik") or "").strip()
 BOT_USERNAME = os.getenv("BOT_USERNAME", "RubinCoinBot")
 BOT_NAME = "Рубин Бот"
 CUR = "rCoin"
@@ -1880,7 +1880,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 
-router = Router(name="rc_core")
+router_rc_core = Router(name="rc_core")
 
 
 class CoreFSM(StatesGroup):
@@ -1907,7 +1907,7 @@ def status_line(user: M.RCUser) -> str:
 # ---------------------------------------------------------------------------
 # /start
 # ---------------------------------------------------------------------------
-@router.message(CommandStart())
+@router_rc_core.message(CommandStart())
 async def start(message: Message, db, command: CommandObject, state: FSMContext):
     await state.clear()
     ref = None
@@ -1942,7 +1942,7 @@ async def start(message: Message, db, command: CommandObject, state: FSMContext)
 # ---------------------------------------------------------------------------
 # Главное меню
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "m:back")
+@router_rc_core.callback_query(F.data == "m:back")
 async def menu_back(call: CallbackQuery, db):
     user = await M.get_user(db, call.from_user.id)
     text = (
@@ -1977,7 +1977,7 @@ async def render_balance(db, uid: int) -> str:
     )
 
 
-@router.callback_query(F.data == "m:balance")
+@router_rc_core.callback_query(F.data == "m:balance")
 async def cb_balance(call: CallbackQuery, db):
     await call.message.edit_text(await render_balance(db, call.from_user.id),
                                  reply_markup=K.balance_kb())
@@ -2008,7 +2008,7 @@ async def render_profile(db, uid: int) -> str:
     )
 
 
-@router.callback_query(F.data == "m:profile")
+@router_rc_core.callback_query(F.data == "m:profile")
 async def cb_profile(call: CallbackQuery, db):
     await call.message.edit_text(await render_profile(db, call.from_user.id),
                                  reply_markup=K.back())
@@ -2033,14 +2033,14 @@ async def render_bank(db, uid: int, note: str = "") -> tuple[str, object]:
     return text, K.bank_kb()
 
 
-@router.callback_query(F.data == "m:bank")
+@router_rc_core.callback_query(F.data == "m:bank")
 async def cb_bank(call: CallbackQuery, db):
     text, markup = await render_bank(db, call.from_user.id)
     await call.message.edit_text(text, reply_markup=markup)
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("b:"))
+@router_rc_core.callback_query(F.data.startswith("b:"))
 async def bank_action(call: CallbackQuery, db):
     action = call.data.split(":")[1]
     uid = call.from_user.id
@@ -2096,7 +2096,7 @@ EMOJI_BY_GAME = {
 }
 
 
-@router.callback_query(F.data == "m:history")
+@router_rc_core.callback_query(F.data == "m:history")
 async def cb_history(call: CallbackQuery, db):
     await show_history(call.message, db, call.from_user.id)
     await call.answer()
@@ -2137,7 +2137,7 @@ async def render_top(rows: list, title: str = "МИРОВОЙ РЕЙТИНГ") -
     return "\n".join(lines)
 
 
-@router.callback_query(F.data == "m:top")
+@router_rc_core.callback_query(F.data == "m:top")
 async def cb_top(call: CallbackQuery, db):
     rows = await M.leaderboard(db)
     await call.message.edit_text(await render_top(rows), reply_markup=K.back())
@@ -2182,7 +2182,7 @@ async def daily_answer(message_or_call, db, uid: int) -> str:
     )
 
 
-@router.callback_query(F.data == "m:daily")
+@router_rc_core.callback_query(F.data == "m:daily")
 async def cb_daily(call: CallbackQuery, db):
     text = await daily_answer(call, db, call.from_user.id)
     await call.message.edit_text(text, reply_markup=K.back())
@@ -2206,7 +2206,7 @@ async def ref_answer(message: Message) -> None:
 # ---------------------------------------------------------------------------
 # Команды
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "m:commands")
+@router_rc_core.callback_query(F.data == "m:commands")
 async def cb_commands(call: CallbackQuery):
     lines = [f"{E.td('bulb')} <b>КОМАНДЫ</b> (пиши без слэша)", "━━━━━━━━━━━━━━━━━━━━"]
     for word in sorted(set(config.RU_COMMANDS)):
@@ -2386,7 +2386,7 @@ async def start_give(message: Message, db, state: FSMContext, tail: list[str]) -
     await do_give(message, db, target_id, amount, message)
 
 
-@router.message(CoreFSM.give_amount)
+@router_rc_core.message(CoreFSM.give_amount)
 async def give_amount_step(message: Message, db, state: FSMContext):
     amount = parse_amount(message.text)
     data = await state.get_data()
@@ -2427,6 +2427,9 @@ def register_text_router(dp) -> None:
 
     @dp.message(_F.text)
     async def ru_commands(message: _Msg, db, state: FSMContext):
+        # если пользователь в FSM-состоянии (ввод суммы, имени и т.п.) — не трогаем
+        if await state.get_state() is not None:
+            return
         try:
             handled = await parse_ru_command(message, db, state)
         except Exception:
@@ -2448,7 +2451,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 
-router = Router(name="rc_games")
+router_rc_games = Router(name="rc_games")
 
 
 class GameFSM(StatesGroup):
@@ -2505,7 +2508,7 @@ def _result_block(title: str, detail: str, bet: int, payout: int, balance: int) 
 # ---------------------------------------------------------------------------
 # Каталог
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "m:games")
+@router_rc_games.callback_query(F.data == "m:games")
 async def games_menu(call: CallbackQuery, db):
     user = await _user(call, db)
     _edit(
@@ -2522,7 +2525,7 @@ async def games_menu(call: CallbackQuery, db):
 # ---------------------------------------------------------------------------
 # Dice-игры (Telegram-анимация)
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data.startswith("g:dice:"))
+@router_rc_games.callback_query(F.data.startswith("g:dice:"))
 async def dice_choose(call: CallbackQuery, db):
     game = call.data.split(":")[2]
     conf = config.DICE_GAMES[game]
@@ -2538,7 +2541,7 @@ async def dice_choose(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("bet:dice_"))
+@router_rc_games.callback_query(F.data.startswith("bet:dice_"))
 async def dice_play(call: CallbackQuery, db, bot):
     game = call.data.split("_", 1)[1]
     bet = int(call.data.split(":")[2])
@@ -2566,7 +2569,7 @@ async def dice_play(call: CallbackQuery, db, bot):
 # ---------------------------------------------------------------------------
 # Мины
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "g:mines")
+@router_rc_games.callback_query(F.data == "g:mines")
 async def mines_menu(call: CallbackQuery, db):
     _edit(
         call.message,
@@ -2580,7 +2583,7 @@ async def mines_menu(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("bet:mines"))
+@router_rc_games.callback_query(F.data.startswith("bet:mines"))
 async def mines_bets(call: CallbackQuery, db):
     bet = int(call.data.split(":")[2])
     rows = []
@@ -2595,7 +2598,7 @@ async def mines_bets(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("mn:new:"))
+@router_rc_games.callback_query(F.data.startswith("mn:new:"))
 async def mines_new(call: CallbackQuery, db):
     _, _, bet_s, mines_s = call.data.split(":")
     bet, mines_count = int(bet_s), int(mines_s)
@@ -2623,7 +2626,7 @@ def mines_text(game: G.MinesRound) -> str:
     )
 
 
-@router.callback_query(F.data.startswith("mn:"))
+@router_rc_games.callback_query(F.data.startswith("mn:"))
 async def mines_open(call: CallbackQuery, db):
     parts = call.data.split(":")
     if len(parts) < 3 or parts[1] == "new":
@@ -2659,7 +2662,7 @@ async def mines_open(call: CallbackQuery, db):
     await call.answer(f"Безопасно · ×{game.multiplier():.2f}")
 
 
-@router.callback_query(F.data.startswith("mnc:"))
+@router_rc_games.callback_query(F.data.startswith("mnc:"))
 async def mines_cash(call: CallbackQuery, db):
     sid = call.data.split(":")[1]
 
@@ -2684,7 +2687,7 @@ async def mines_cash(call: CallbackQuery, db):
 # ---------------------------------------------------------------------------
 # Лесенка
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "g:ladder")
+@router_rc_games.callback_query(F.data == "g:ladder")
 async def ladder_menu(call: CallbackQuery, db):
     _edit(call.message,
           f"🪜 <b>ЛЕСЕНКА</b>\n━━━━━━━━━━━━━━━━━━━━\n"
@@ -2694,7 +2697,7 @@ async def ladder_menu(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("bet:ladder"))
+@router_rc_games.callback_query(F.data.startswith("bet:ladder"))
 async def ladder_bets(call: CallbackQuery, db):
     bet = int(call.data.split(":")[2])
     if not await _check_bet(call, db, bet):
@@ -2721,7 +2724,7 @@ def ladder_text(game: G.LadderRound) -> str:
     )
 
 
-@router.callback_query(F.data.startswith("ld:"))
+@router_rc_games.callback_query(F.data.startswith("ld:"))
 async def ladder_step(call: CallbackQuery, db):
     parts = call.data.split(":")
     if len(parts) < 3:
@@ -2756,7 +2759,7 @@ async def ladder_step(call: CallbackQuery, db):
     await call.answer(f"Уровень {game.level}")
 
 
-@router.callback_query(F.data.startswith("ldc:"))
+@router_rc_games.callback_query(F.data.startswith("ldc:"))
 async def ladder_cash(call: CallbackQuery, db):
     sid = call.data.split(":")[1]
 
@@ -2780,7 +2783,7 @@ async def ladder_cash(call: CallbackQuery, db):
 # ---------------------------------------------------------------------------
 # Краш
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "g:crash")
+@router_rc_games.callback_query(F.data == "g:crash")
 async def crash_menu(call: CallbackQuery, db):
     _edit(call.message,
           f"{E.td('up')} <b>КРАШ</b>\n━━━━━━━━━━━━━━━━━━━━\n"
@@ -2789,7 +2792,7 @@ async def crash_menu(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("bet:crash"))
+@router_rc_games.callback_query(F.data.startswith("bet:crash"))
 async def crash_bets(call: CallbackQuery, db):
     bet = int(call.data.split(":")[2])
     if not await _check_bet(call, db, bet):
@@ -2809,7 +2812,7 @@ async def crash_bets(call: CallbackQuery, db):
     await call.answer("Взлёт!")
 
 
-@router.callback_query(F.data.startswith("cr:tick:"))
+@router_rc_games.callback_query(F.data.startswith("cr:tick:"))
 async def crash_tick(call: CallbackQuery, db):
     sid = call.data.split(":")[2]
 
@@ -2839,7 +2842,7 @@ async def crash_tick(call: CallbackQuery, db):
     await call.answer(f"×{value:.2f}")
 
 
-@router.callback_query(F.data.startswith("cr:cash:"))
+@router_rc_games.callback_query(F.data.startswith("cr:cash:"))
 async def crash_cash(call: CallbackQuery, db):
     sid = call.data.split(":")[2]
 
@@ -2880,7 +2883,7 @@ SIMPLE_GAMES = {
 }
 
 
-@router.callback_query(F.data.startswith("g:") & ~F.data.startswith("g:dice"))
+@router_rc_games.callback_query(F.data.startswith("g:") & ~F.data.startswith("g:dice"))
 async def simple_menu(call: CallbackQuery, db):
     key = call.data.split(":")[1]
     if key not in SIMPLE_GAMES:
@@ -2895,7 +2898,7 @@ async def simple_menu(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("bet:") & ~F.data.startswith("bet:dice_"))
+@router_rc_games.callback_query(F.data.startswith("bet:") & ~F.data.startswith("bet:dice_"))
 async def simple_bets(call: CallbackQuery, db):
     key = call.data.split(":")[1]
     bet = int(call.data.split(":")[2])
@@ -2913,7 +2916,7 @@ async def simple_bets(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("s:"))
+@router_rc_games.callback_query(F.data.startswith("s:"))
 async def simple_play(call: CallbackQuery, db, state: FSMContext):
     _, key, value = call.data.split(":")
     data = await state.get_data()
@@ -2960,7 +2963,7 @@ async def simple_play(call: CallbackQuery, db, state: FSMContext):
     await call.answer("Победа!" if win else "Не повезло")
 
 
-@router.callback_query(F.data.startswith("betcustom:"))
+@router_rc_games.callback_query(F.data.startswith("betcustom:"))
 async def custom_bet_start(call: CallbackQuery, state: FSMContext):
     game = call.data.split(":")[1]
     await state.update_data(game=game)
@@ -2972,7 +2975,7 @@ async def custom_bet_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.message(GameFSM.custom_bet)
+@router_rc_games.message(GameFSM.custom_bet)
 async def custom_bet_value(message: Message, db, state: FSMContext):
     data = await state.get_data()
     await state.clear()
@@ -3070,7 +3073,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 
-router = Router(name="rc_market")
+router_rc_market = Router(name="rc_market")
 
 
 class SendFSM(StatesGroup):
@@ -3107,14 +3110,14 @@ async def market_screen(message: Message, db) -> None:
                          reply_markup=K.market_kb(templates))
 
 
-@router.callback_query(F.data == "m:market")
+@router_rc_market.callback_query(F.data == "m:market")
 async def cb_market(call: CallbackQuery, db):
     templates = await M.templates(db)
     _edit(call.message, await market_text(db, call.from_user.id), K.market_kb(templates))
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("mk:view:"))
+@router_rc_market.callback_query(F.data.startswith("mk:view:"))
 async def view_template(call: CallbackQuery, db):
     slug = call.data.split(":")[2]
     t = await M.template_by_slug(db, slug)
@@ -3147,7 +3150,7 @@ def fmt_next(t) -> str:
     return str(t["minted"] + 1)
 
 
-@router.callback_query(F.data.startswith("mk:buy:"))
+@router_rc_market.callback_query(F.data.startswith("mk:buy:"))
 async def buy_template(call: CallbackQuery, db):
     slug = call.data.split(":")[2]
     t = await M.template_by_slug(db, slug)
@@ -3208,14 +3211,14 @@ async def inventory_text(db, uid: int) -> str:
     return "\n".join(lines)
 
 
-@router.callback_query(F.data == "m:inventory")
+@router_rc_market.callback_query(F.data == "m:inventory")
 async def cb_inventory(call: CallbackQuery, db):
     items = await M.inventory(db, call.from_user.id)
     _edit(call.message, await inventory_text(db, call.from_user.id), K.inventory_kb(items))
     await call.answer()
 
 
-@router.callback_query(F.data == "inv:bind")
+@router_rc_market.callback_query(F.data == "inv:bind")
 async def bind_value(call: CallbackQuery, db):
     total = await M.inventory_value(db, call.from_user.id)
     user = await M.get_user(db, call.from_user.id)
@@ -3225,7 +3228,7 @@ async def bind_value(call: CallbackQuery, db):
     )
 
 
-@router.callback_query(F.data.startswith("inv:open:"))
+@router_rc_market.callback_query(F.data.startswith("inv:open:"))
 async def open_item(call: CallbackQuery, db):
     item_id = int(call.data.split(":")[2])
     item = await M.nft_item(db, item_id)
@@ -3245,7 +3248,7 @@ async def open_item(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("inv:image:"))
+@router_rc_market.callback_query(F.data.startswith("inv:image:"))
 async def send_image(call: CallbackQuery, db):
     item_id = int(call.data.split(":")[2])
     item = await M.nft_item(db, item_id)
@@ -3263,7 +3266,7 @@ async def send_image(call: CallbackQuery, db):
     await call.answer("Фото отправлено")
 
 
-@router.callback_query(F.data.startswith("inv:upgrade:"))
+@router_rc_market.callback_query(F.data.startswith("inv:upgrade:"))
 async def upgrade_item(call: CallbackQuery, db):
     item_id = int(call.data.split(":")[2])
     item = await M.nft_item(db, item_id)
@@ -3316,7 +3319,7 @@ async def upgrade_item(call: CallbackQuery, db):
 # ---------------------------------------------------------------------------
 # Подарить NFT (с картинкой и цитатой)
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data.startswith("inv:give:"))
+@router_rc_market.callback_query(F.data.startswith("inv:give:"))
 async def give_start(call: CallbackQuery, db, state: FSMContext):
     item_id = int(call.data.split(":")[2])
     item = await M.nft_item(db, item_id)
@@ -3331,7 +3334,7 @@ async def give_start(call: CallbackQuery, db, state: FSMContext):
     await call.answer()
 
 
-@router.message(SendFSM.username)
+@router_rc_market.message(SendFSM.username)
 async def give_apply(message: Message, db, state: FSMContext):
     data = await state.get_data()
     await state.clear()
@@ -3373,7 +3376,7 @@ async def give_apply(message: Message, db, state: FSMContext):
         pass
 
 
-@router.callback_query(F.data == "m:gifts")
+@router_rc_market.callback_query(F.data == "m:gifts")
 async def gifts_screen(call: CallbackQuery, db):
     await cb_market(call, db)
 
@@ -3390,7 +3393,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 
-router = Router(name="rc_lottery")
+router_rc_lottery = Router(name="rc_lottery")
 
 
 class CheckFSM(StatesGroup):
@@ -3427,14 +3430,14 @@ async def lottery_screen(message: Message, db) -> None:
     await message.answer(lottery_text(user.balance), reply_markup=K.lottery_kb(config.DEFAULT_TICKET_PRICE))
 
 
-@router.callback_query(F.data == "m:lottery")
+@router_rc_lottery.callback_query(F.data == "m:lottery")
 async def cb_lottery(call: CallbackQuery, db):
     user = await M.get_user(db, call.from_user.id)
     _edit(call.message, lottery_text(user.balance), K.lottery_kb(config.DEFAULT_TICKET_PRICE))
     await call.answer()
 
 
-@router.callback_query(F.data == "lot:buy")
+@router_rc_lottery.callback_query(F.data == "lot:buy")
 async def buy_ticket(call: CallbackQuery, db):
     import random
 
@@ -3456,7 +3459,7 @@ async def buy_ticket(call: CallbackQuery, db):
     await call.answer("Билет куплен!")
 
 
-@router.callback_query(F.data == "lot:draw")
+@router_rc_lottery.callback_query(F.data == "lot:draw")
 async def draw(call: CallbackQuery, db):
     result = await M.draw_lottery(db)
     if not result.get("ok"):
@@ -3474,7 +3477,7 @@ async def draw(call: CallbackQuery, db):
     await call.answer("Розыгрыш проведён")
 
 
-@router.callback_query(F.data == "lot:mine")
+@router_rc_lottery.callback_query(F.data == "lot:mine")
 async def mine_tickets(call: CallbackQuery, db):
     async with db.execute(
         "SELECT numbers, draw_id FROM rc_lottery_tickets WHERE user_id=? ORDER BY id DESC LIMIT 10",
@@ -3513,7 +3516,7 @@ async def cases_screen(message: Message, db) -> None:
     await message.answer("\n".join(lines), reply_markup=K.cases_kb(cases))
 
 
-@router.callback_query(F.data == "m:cases")
+@router_rc_lottery.callback_query(F.data == "m:cases")
 async def cb_cases(call: CallbackQuery, db):
     cases = await M.case_list(db)
     lines = [f"{E.td('cool')} <b>КЕЙСЫ</b>", "━━━━━━━━━━━━━━━━━━━━"]
@@ -3523,7 +3526,7 @@ async def cb_cases(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("case:open:"))
+@router_rc_lottery.callback_query(F.data.startswith("case:open:"))
 async def open_case(call: CallbackQuery, db):
     case_id = int(call.data.split(":")[2])
     result = await M.open_case(db, call.from_user.id, case_id)
@@ -3547,7 +3550,7 @@ async def open_case(call: CallbackQuery, db):
 # ---------------------------------------------------------------------------
 # Чеки
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "chk:create")
+@router_rc_lottery.callback_query(F.data == "chk:create")
 async def check_create_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(CheckFSM.amount)
     _edit(call.message,
@@ -3557,7 +3560,7 @@ async def check_create_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.message(CheckFSM.amount)
+@router_rc_lottery.message(CheckFSM.amount)
 async def check_amount(message: Message, db, state: FSMContext):
     amount = parse_amount(message.text)
     if not amount or amount < config.MIN_BET:
@@ -3567,7 +3570,7 @@ async def check_amount(message: Message, db, state: FSMContext):
     await message.answer("Сколько человек смогут активировать чек? (1–100)")
 
 
-@router.message(CheckFSM.claims)
+@router_rc_lottery.message(CheckFSM.claims)
 async def check_claims(message: Message, db, state: FSMContext):
     data = await state.get_data()
     await state.clear()
@@ -3593,14 +3596,14 @@ async def check_claims(message: Message, db, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "chk:redeem")
+@router_rc_lottery.callback_query(F.data == "chk:redeem")
 async def redeem_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(CheckFSM.redeem)
     _edit(call.message, f"{E.td('gift')} Отправь код чека, например <code>RBABCD123456</code>")
     await call.answer()
 
 
-@router.message(CheckFSM.redeem)
+@router_rc_lottery.message(CheckFSM.redeem)
 async def redeem_apply(message: Message, db, state: FSMContext):
     await state.clear()
     ok, reason, amount = await M.redeem_check(db, message.text or "", message.from_user.id)
@@ -3615,7 +3618,7 @@ async def redeem_apply(message: Message, db, state: FSMContext):
     )
 
 
-@router.callback_query(F.data.startswith("check:claim:"))
+@router_rc_lottery.callback_query(F.data.startswith("check:claim:"))
 async def claim_from_link(call: CallbackQuery, db):
     code = call.data.split(":")[2]
     ok, reason, amount = await M.redeem_check(db, code, call.from_user.id)
@@ -3640,7 +3643,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 
-router = Router(name="rc_misc")
+router_rc_misc = Router(name="rc_misc")
 
 
 def _edit(message: Message, text: str, markup=None) -> None:
@@ -3684,7 +3687,7 @@ async def donate_screen(message: Message, db) -> None:
     )
 
 
-@router.callback_query(F.data == "m:donate")
+@router_rc_misc.callback_query(F.data == "m:donate")
 async def cb_donate(call: CallbackQuery, db):
     user = await M.get_user(db, call.from_user.id)
     _edit(
@@ -3701,7 +3704,7 @@ async def cb_donate(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("don:"))
+@router_rc_misc.callback_query(F.data.startswith("don:"))
 async def buy_status(call: CallbackQuery, db):
     key = call.data.split(":")[1]
     mapping = {"blue": "blue_verify", "black": "black_verify", "elite": "elite"}
@@ -3760,7 +3763,7 @@ async def earn_screen(message: Message, db) -> None:
     await message.answer("\n".join(lines), reply_markup=K.kb(*rows))
 
 
-@router.callback_query(F.data == "m:earn")
+@router_rc_misc.callback_query(F.data == "m:earn")
 async def cb_earn(call: CallbackQuery, db):
     lines = [f"{E.td('money_launch')} <b>ЗАРАБОТОК rCoin</b>", "━━━━━━━━━━━━━━━━━━━━"]
     for title, code, reward, desc in EARN_TASKS:
@@ -3772,7 +3775,7 @@ async def cb_earn(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data == "earn:ad")
+@router_rc_misc.callback_query(F.data == "earn:ad")
 async def earn_ad(call: CallbackQuery, db):
     day = M.today_key()
     async with db.execute(
@@ -3789,7 +3792,7 @@ async def earn_ad(call: CallbackQuery, db):
     await call.answer("Получено 150к rC (демо-реклама)", show_alert=True)
 
 
-@router.callback_query(F.data == "earn:sponsor")
+@router_rc_misc.callback_query(F.data == "earn:sponsor")
 async def earn_sponsor(call: CallbackQuery, db):
     day = M.today_key()
     async with db.execute(
@@ -3806,7 +3809,7 @@ async def earn_sponsor(call: CallbackQuery, db):
     await call.answer("Подписка подтверждена (демо). +500к rC", show_alert=True)
 
 
-@router.callback_query(F.data == "earn:ref")
+@router_rc_misc.callback_query(F.data == "earn:ref")
 async def earn_ref(call: CallbackQuery):
     link = f"https://t.me/{config.BOT_USERNAME}?start=ref_{call.from_user.id}"
     await call.message.edit_text(
@@ -3845,7 +3848,7 @@ async def bonus_screen(message: Message, db) -> None:
     )
 
 
-@router.callback_query(F.data == "m:bonus")
+@router_rc_misc.callback_query(F.data == "m:bonus")
 async def cb_bonus(call: CallbackQuery, db):
     user = await M.get_user(db, call.from_user.id)
     now = int(time.time())
@@ -3899,7 +3902,7 @@ async def warehouse_screen(message: Message, db) -> None:
     )
 
 
-@router.callback_query(F.data == "m:warehouse")
+@router_rc_misc.callback_query(F.data == "m:warehouse")
 async def cb_warehouse(call: CallbackQuery, db):
     day = M.today_key()
     async with db.execute(
@@ -3919,7 +3922,7 @@ async def cb_warehouse(call: CallbackQuery, db):
     await call.answer()
 
 
-@router.callback_query(F.data == "ev:warehouse")
+@router_rc_misc.callback_query(F.data == "ev:warehouse")
 async def warehouse_claim(call: CallbackQuery, db):
     result = await M.warehouse_claim(db, call.from_user.id)
     if not result.get("ok"):
@@ -3963,19 +3966,19 @@ async def santa_text(state: dict) -> str:
     )
 
 
-@router.callback_query(F.data == "m:santa")
+@router_rc_misc.callback_query(F.data == "m:santa")
 async def cb_santa(call: CallbackQuery, db):
     state = await M.santa_state(db)
     _edit(call.message, await santa_text(state), K.santa_kb())
     await call.answer()
 
 
-@router.callback_query(F.data == "ev:santa")
+@router_rc_misc.callback_query(F.data == "ev:santa")
 async def cb_santa2(call: CallbackQuery, db):
     await cb_santa(call, db)
 
 
-@router.callback_query(F.data == "ev:santa:hit")
+@router_rc_misc.callback_query(F.data == "ev:santa:hit")
 async def santa_hit(call: CallbackQuery, db):
     result = await M.santa_hit(db, call.from_user.id)
     if not result.get("ok"):
@@ -4009,7 +4012,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 
-router = Router(name="rc_admin")
+router_rc_admin = Router(name="rc_admin")
 
 
 class NftFSM(StatesGroup):
@@ -4057,7 +4060,7 @@ def _edit(message: Message, text: str, markup=None) -> None:
         pass
 
 
-@router.message(Command("admin"))
+@router_rc_admin.message(Command("admin"))
 async def admin_cmd(message: Message):
     if not is_admin(message.from_user.id):
         return
@@ -4067,7 +4070,7 @@ async def admin_cmd(message: Message):
     )
 
 
-@router.callback_query(F.data == "adm:menu")
+@router_rc_admin.callback_query(F.data == "adm:menu")
 @admin_only
 async def admin_menu(call: CallbackQuery, db):
     stats = await admin_stats_text(db)
@@ -4096,7 +4099,7 @@ async def admin_stats_text(db) -> str:
     )
 
 
-@router.callback_query(F.data == "adm:stats")
+@router_rc_admin.callback_query(F.data == "adm:stats")
 @admin_only
 async def admin_stats(call: CallbackQuery, db):
     _edit(call.message, f"{E.td('hundred')} <b>СТАТИСТИКА</b>\n━━━━━━━━━━━━━━━━━━━━\n"
@@ -4107,7 +4110,7 @@ async def admin_stats(call: CallbackQuery, db):
 # ---------------------------------------------------------------------------
 # Выдача rCoin
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "adm:give")
+@router_rc_admin.callback_query(F.data == "adm:give")
 @admin_only
 async def give_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.give_target)
@@ -4124,7 +4127,7 @@ async def resolve_user(db, raw: str):
     return M.RCUser.from_row(row) if row else None
 
 
-@router.message(AdminFSM.give_target)
+@router_rc_admin.message(AdminFSM.give_target)
 async def give_target(message: Message, db, state: FSMContext):
     target = await resolve_user(db, message.text or "")
     if not target:
@@ -4134,7 +4137,7 @@ async def give_target(message: Message, db, state: FSMContext):
     await message.answer(f"Игрок: <b>{target.name}</b>\nСумма rC (минус — списать):")
 
 
-@router.message(AdminFSM.give_amount)
+@router_rc_admin.message(AdminFSM.give_amount)
 async def give_amount(message: Message, db, state: FSMContext):
     data = await state.get_data()
     await state.clear()
@@ -4153,7 +4156,7 @@ async def give_amount(message: Message, db, state: FSMContext):
 # ---------------------------------------------------------------------------
 # Статусы и бан
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "adm:status")
+@router_rc_admin.callback_query(F.data == "adm:status")
 @admin_only
 async def status_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.status_target)
@@ -4161,7 +4164,7 @@ async def status_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.message(AdminFSM.status_target)
+@router_rc_admin.message(AdminFSM.status_target)
 async def status_target(message: Message, db, state: FSMContext):
     target = await resolve_user(db, message.text or "")
     if not target:
@@ -4175,7 +4178,7 @@ async def status_target(message: Message, db, state: FSMContext):
     await message.answer("\n".join(lines))
 
 
-@router.message(AdminFSM.status_kind)
+@router_rc_admin.message(AdminFSM.status_kind)
 async def status_kind(message: Message, db, state: FSMContext):
     data = await state.get_data()
     await state.clear()
@@ -4188,7 +4191,7 @@ async def status_kind(message: Message, db, state: FSMContext):
                          reply_markup=K.admin_back())
 
 
-@router.callback_query(F.data == "adm:ban")
+@router_rc_admin.callback_query(F.data == "adm:ban")
 @admin_only
 async def ban_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.ban_target)
@@ -4196,7 +4199,7 @@ async def ban_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.message(AdminFSM.ban_target)
+@router_rc_admin.message(AdminFSM.ban_target)
 async def ban_apply(message: Message, db, state: FSMContext):
     await state.clear()
     target = await resolve_user(db, message.text or "")
@@ -4216,7 +4219,7 @@ async def ban_apply(message: Message, db, state: FSMContext):
 # ---------------------------------------------------------------------------
 # Рассылка и промо
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "adm:broadcast")
+@router_rc_admin.callback_query(F.data == "adm:broadcast")
 @admin_only
 async def broadcast_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.broadcast)
@@ -4224,7 +4227,7 @@ async def broadcast_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.message(AdminFSM.broadcast)
+@router_rc_admin.message(AdminFSM.broadcast)
 async def broadcast_send(message: Message, db, state: FSMContext):
     await state.clear()
     text = message.html_text
@@ -4243,7 +4246,7 @@ async def broadcast_send(message: Message, db, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "adm:promo")
+@router_rc_admin.callback_query(F.data == "adm:promo")
 @admin_only
 async def promo_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.promo_code)
@@ -4251,7 +4254,7 @@ async def promo_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.message(AdminFSM.promo_code)
+@router_rc_admin.message(AdminFSM.promo_code)
 async def promo_code(message: Message, state: FSMContext):
     code = (message.text or "").strip().upper()
     if not code:
@@ -4261,7 +4264,7 @@ async def promo_code(message: Message, state: FSMContext):
     await message.answer("Сумма rC:")
 
 
-@router.message(AdminFSM.promo_amount)
+@router_rc_admin.message(AdminFSM.promo_amount)
 async def promo_amount(message: Message, db, state: FSMContext):
     data = await state.get_data()
     await state.clear()
@@ -4280,7 +4283,7 @@ async def promo_amount(message: Message, db, state: FSMContext):
 # ---------------------------------------------------------------------------
 # Создание NFT через FSM: имя → модель → редкость → цена → тираж → фото
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "adm:nft")
+@router_rc_admin.callback_query(F.data == "adm:nft")
 @admin_only
 async def nft_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(NftFSM.title)
@@ -4293,7 +4296,7 @@ async def nft_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.message(NftFSM.title)
+@router_rc_admin.message(NftFSM.title)
 async def nft_title(message: Message, state: FSMContext):
     title = (message.text or "").strip()[:40]
     if not title:
@@ -4303,7 +4306,7 @@ async def nft_title(message: Message, state: FSMContext):
     await message.answer("Шаг 2/6. Эмодзи-модель (например 🐻‍❄️):")
 
 
-@router.message(NftFSM.model)
+@router_rc_admin.message(NftFSM.model)
 async def nft_model(message: Message, state: FSMContext):
     model = (message.text or "🎁").strip()[:6]
     await state.update_data(model=model)
@@ -4313,7 +4316,7 @@ async def nft_model(message: Message, state: FSMContext):
     )
 
 
-@router.message(NftFSM.rarity)
+@router_rc_admin.message(NftFSM.rarity)
 async def nft_rarity(message: Message, state: FSMContext):
     rarity = (message.text or "").strip().lower()
     if rarity not in config.RARITY_ORDER:
@@ -4323,7 +4326,7 @@ async def nft_rarity(message: Message, state: FSMContext):
     await message.answer("Шаг 4/6. Цена в rC (можно <code>5kk</code>):")
 
 
-@router.message(NftFSM.floor)
+@router_rc_admin.message(NftFSM.floor)
 async def nft_floor(message: Message, state: FSMContext):
     price = parse_amount(message.text)
     if not price:
@@ -4333,7 +4336,7 @@ async def nft_floor(message: Message, state: FSMContext):
     await message.answer("Шаг 5/6. Тираж: число или <code>0</code> (без ограничения):")
 
 
-@router.message(NftFSM.supply)
+@router_rc_admin.message(NftFSM.supply)
 async def nft_supply(message: Message, state: FSMContext):
     raw = (message.text or "0").strip()
     supply = int(raw) if raw.isdigit() else 0
@@ -4344,7 +4347,7 @@ async def nft_supply(message: Message, state: FSMContext):
     )
 
 
-@router.message(NftFSM.photo)
+@router_rc_admin.message(NftFSM.photo)
 async def nft_create(message: Message, db, state: FSMContext, bot):
     data = await state.get_data()
     photo_path = None
@@ -4380,7 +4383,7 @@ async def nft_create(message: Message, db, state: FSMContext, bot):
     await state.clear()
 
 
-@router.message(NftFSM.photo_serial)
+@router_rc_admin.message(NftFSM.photo_serial)
 async def nft_mint_batch(message: Message, db, state: FSMContext, bot):
     data = await state.get_data()
     await state.clear()
@@ -4414,7 +4417,7 @@ async def _serial(db, item_id: int) -> int:
     return row[0] if row else 1
 
 
-@router.callback_query(F.data == "adm:nftlist")
+@router_rc_admin.callback_query(F.data == "adm:nftlist")
 @admin_only
 async def nft_list(call: CallbackQuery, db):
     rows = await M.templates(db, only_active=False)
@@ -4431,7 +4434,7 @@ async def nft_list(call: CallbackQuery, db):
 # ---------------------------------------------------------------------------
 # Быстрые команды
 # ---------------------------------------------------------------------------
-@router.message(Command("give"))
+@router_rc_admin.message(Command("give"))
 async def quick_give(message: Message, db, command: CommandObject):
     if not is_admin(message.from_user.id):
         return
@@ -4445,7 +4448,7 @@ async def quick_give(message: Message, db, command: CommandObject):
     await message.answer(f"{E.td('check')} Выдано {M.short_num(amount)} пользователю {args[0]}")
 
 
-@router.message(Command("promo"))
+@router_rc_admin.message(Command("promo"))
 async def quick_promo(message: Message, db, command: CommandObject):
     if not is_admin(message.from_user.id):
         return
@@ -4463,7 +4466,7 @@ async def quick_promo(message: Message, db, command: CommandObject):
     await message.answer(f"{E.td('check')} Промокод {args[0].upper()} на {M.short_num(amount)}")
 
 
-@router.message(Command("promocode"))
+@router_rc_admin.message(Command("promocode"))
 async def redeem_promo_cmd(message: Message, db, command: CommandObject):
     code = (command.args or "").strip()
     if not code:
@@ -4477,7 +4480,7 @@ async def redeem_promo_cmd(message: Message, db, command: CommandObject):
 # ---------------------------------------------------------------------------
 # Обработчик ссылки chek_ и приглашения
 # ---------------------------------------------------------------------------
-@router.callback_query(F.data == "unused")
+@router_rc_admin.callback_query(F.data == "unused")
 async def _noop(call: CallbackQuery):
     await call.answer()
 
@@ -4567,15 +4570,13 @@ def build_dispatcher(db) -> Dispatcher:
     for observer in (dp.message, dp.callback_query):
         observer.middleware(DbMiddleware(db))
         observer.middleware(BanMiddleware())
-    dp.include_router(rc_admin.router)
-    dp.include_router(rc_games.router)
-    dp.include_router(rc_market.router)
-    dp.include_router(rc_lottery.router)
-    dp.include_router(rc_misc.router)
-    dp.include_router(core.router)
-    core.register_text_router(dp)
+    # Порядок важен: сначала админка и игры (конкретные callback_data),
+    # затем маркет, лотерея, прочее и в конце общее меню.
+    for r in (router_rc_admin, router_rc_games, router_rc_market,
+              router_rc_lottery, router_rc_misc, router_rc_core):
+        dp.include_router(r)
+    register_text_router(dp)
     return dp
-
 
 
 # =============================== MINI APP ===================================
@@ -4746,11 +4747,11 @@ async def main() -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     db = await M.connect()
-    if not config.BOT_TOKEN or "TEST_TOKEN" in config.BOT_TOKEN:
-        log.error("BOT_TOKEN не задан в config.py/.env — выхожу")
-        print(config.MSG_NO_TOKEN)
+    if not BOT_TOKEN or "TEST_TOKEN" in BOT_TOKEN:
+        log.error("BOT_TOKEN не задан в Environment Render")
+        print(MSG_NO_TOKEN)
         return 1
-    bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     me = await bot.get_me()
     log.info("Рубин запущен: @%s", me.username)
     if config.BOT_USERNAME in ("", "RubinCoinBot"):
