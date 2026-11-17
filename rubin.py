@@ -56,8 +56,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9153206613:AAH6yeSZv2lYd-FT1sc3cjyK47rcLoO1uik")
-ADMIN_IDS = [5257618084]
+# Never store a live Telegram token in source control. Set BOT_TOKEN in the host environment.
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9153206613:AAH6yeSZv2lYd-FT1sc3cjyK47rcLoO1uik 5257618084").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "5257618084"))
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "5257618084").replace(" ", "").split(",") if x.isdigit()}
+if OWNER_ID > 0:
+    ADMIN_IDS.add(OWNER_ID)
 REQUIRED_CHANNEL = "@playhomemines"
 REQUIRED_CHAT = "@gamehomemines"
 BOT_USERNAME = "rubinupbot"
@@ -80,7 +84,9 @@ CRYPTO_PRICES = {
     "TON": 0.5
 }
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+# A deliberately invalid placeholder lets the module load so main() can print a clear setup error.
+_bot_token_for_init = BOT_TOKEN or "000000000:INVALID_TOKEN"
+bot = Bot(token=_bot_token_for_init, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -944,7 +950,15 @@ def get_roulette_emoji(number: int) -> str:
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+    """Owner, configured admins, and users explicitly promoted in the database."""
+    if (OWNER_ID > 0 and user_id == OWNER_ID) or user_id in ADMIN_IDS:
+        return True
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            row = conn.execute("SELECT is_admin_rank FROM users WHERE user_id=?", (user_id,)).fetchone()
+        return bool(row and row[0])
+    except sqlite3.Error:
+        return False
 
 
 def is_banned(user_id: int) -> Tuple[bool, str, int]:
@@ -1302,7 +1316,7 @@ class SubscriptionMiddleware:
     async def __call__(self, handler, event, data):
         if isinstance(event, types.Message):
             user_id = event.from_user.id
-            if user_id in ADMIN_IDS:
+            if is_admin(user_id):
                 return await handler(event, data)
             banned, reason, until = is_banned(user_id)
             if banned:
@@ -1319,9 +1333,13 @@ class SubscriptionMiddleware:
                 )
                 return
             text = event.text or ""
-            if text.startswith('/') or text.startswith(
-                    ('куб', 'рулетка', 'фортуна', 'кф', 'солнце', 'игры', 'профиль', 'баскет', 'мины', 'дартс', 'очко',
-                     'банк', 'барабан', 'краш', 'пирамида', 'майнер', 'хило', 'маркет', 'кн')):
+            command = text.split()[0].split("@", 1)[0].lower() if text.startswith("/") else ""
+            public_commands = {"/start", "/menu", "/help", "/помощь"}
+            protected_command = text.startswith("/") and command not in public_commands
+            protected_text = text.lower().startswith(
+                ('куб', 'рулетка', 'фортуна', 'кф', 'солнце', 'игры', 'профиль', 'баскет', 'мины', 'дартс', 'очко',
+                 'банк', 'барабан', 'краш', 'пирамида', 'майнер', 'хило', 'маркет', 'кн'))
+            if protected_command or protected_text:
                 sub_status = await check_required_subscription(user_id)
                 if not sub_status['channel'] or not sub_status['chat']:
                     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1380,10 +1398,16 @@ def get_balance_keyboard(user_id: int) -> Tuple[InlineKeyboardMarkup, str]:
             icon_custom_emoji_id=EMOJI_IDS["donate"]
         )])
     buttons.append([InlineKeyboardButton(
-        text="Заработать",
-        callback_data="go_earn",
+        text="Заработать", callback_data="go_earn",
         icon_custom_emoji_id=EMOJI_IDS["balance"]
     )])
+    buttons.extend([
+        [InlineKeyboardButton(text="🎮 Игры", callback_data="menu_games"),
+         InlineKeyboardButton(text="👤 Профиль", callback_data="menu_profile")],
+        [InlineKeyboardButton(text="❄️ Ивенты", callback_data="menu_events"),
+         InlineKeyboardButton(text="🎒 Склад", callback_data="menu_stash")],
+        [InlineKeyboardButton(text="❔ Помощь", callback_data="menu_help")]
+    ])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     bonus_text = ""
     if not available:
@@ -4791,7 +4815,13 @@ async def game_mines(message: Message, state: FSMContext):
 async def mines_open_cell(callback: CallbackQuery, state: FSMContext):
     data = callback.data.split('_')
     game_id = int(data[2])
-    cell_index = int(data[3])
+    try:
+        cell_index = int(data[3])
+        if not 0 <= cell_index < 25:
+            raise ValueError
+    except (ValueError, IndexError):
+        await callback.answer("Некорректная клетка.", show_alert=True)
+        return
     user_id = callback.from_user.id
 
     conn = sqlite3.connect(DB_FILE)
@@ -4878,64 +4908,41 @@ async def mines_open_cell(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("mines_cashout_"))
 async def mines_cashout(callback: CallbackQuery, state: FSMContext):
-    game_id = int(callback.data.split('_')[2])
+    try:
+        game_id = int(callback.data.rsplit("_", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректная игра", show_alert=True); return
     user_id = callback.from_user.id
-
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT user_id, bet_amount, multiplier, opened_cells, status, mines_count, grid FROM mines_games WHERE id = ?",
-        (game_id,))
-    game = cur.fetchone()
-    conn.close()
-
-    if not game:
-        await callback.answer(f"{PREMIUM_EMOJI_TEXT['lock']} Игра не найдена.", show_alert=True)
-        return
-
-    game_user_id, bet_amount, multiplier, opened_cells, status, mines_count, grid_json = game
-
-    if game_user_id != user_id:
-        await callback.answer(f"{PREMIUM_EMOJI_TEXT['lock']} Это не ваша игра.", show_alert=True)
-        return
-
-    if status != 'active':
-        await callback.answer(f"{PREMIUM_EMOJI_TEXT['lock']} Игра уже завершена.", show_alert=True)
-        return
-
-    if opened_cells == 0:
-        await callback.answer(f"{PREMIUM_EMOJI_TEXT['lock']} Откройте хотя бы одну клетку.", show_alert=True)
-        return
-
-    win_amount = int(bet_amount * multiplier)
-
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("UPDATE mines_games SET status = 'won' WHERE id = ?", (game_id,))
-    conn.commit()
-    conn.close()
-
-    user = get_user(user_id)
-    new_balance = user.get('balance_coin', 0) + win_amount
-    update_user(user_id, balance_coin=new_balance, total_wins=user.get('total_wins', 0) + 1)
-
+    with sqlite3.connect(DB_FILE, timeout=20) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT user_id, bet_amount, multiplier, opened_cells, status, mines_count, grid FROM mines_games WHERE id=?", (game_id,)).fetchone()
+        if not row:
+            conn.rollback(); await callback.answer("Игра не найдена", show_alert=True); return
+        game_user_id, bet, mult, opened, status, mines_count, grid_json = row
+        if game_user_id != user_id:
+            conn.rollback(); await callback.answer("Это не твоя игра", show_alert=True); return
+        if status != "active":
+            conn.rollback(); await callback.answer("Игра уже завершена", show_alert=True); return
+        if int(opened or 0) <= 0:
+            conn.rollback(); await callback.answer("Сначала открой хотя бы одну клетку", show_alert=True); return
+        win = int(int(bet) * float(mult))
+        changed = conn.execute("UPDATE mines_games SET status='won' WHERE id=? AND status='active'", (game_id,)).rowcount
+        if changed != 1:
+            conn.rollback(); await callback.answer("Игра уже завершена", show_alert=True); return
+        conn.execute("UPDATE users SET balance_coin=balance_coin+?, total_wins=total_wins+1 WHERE user_id=?", (win, user_id))
+        new_balance = conn.execute("SELECT balance_coin FROM users WHERE user_id=?", (user_id,)).fetchone()[0]
+        conn.commit()
     grid = json.loads(grid_json) if grid_json else []
-    kb = create_mines_keyboard(game_id, grid, opened_cells, True)
-
+    kb = create_mines_keyboard(game_id, grid, opened, True)
     await callback.message.edit_text(
-        f"<blockquote>💰 <b>Игра МИНЫ - ВЫИГРЫШ!</b>\n\n"
-        f"👤 <b>Игрок:</b> {user.get('display_name', callback.from_user.username or 'без_ника')}\n"
-        f"💸 <b>Ставка:</b> {format_number(bet_amount)} RCOIN\n"
-        f"📈 <b>Множитель:</b> {multiplier:.2f}x\n"
-        f"💎 <b>Открыто клеток:</b> {opened_cells}\n"
-        f"✅ <b>Итог:</b> ПОБЕДА! +{format_number(win_amount)} RCOIN\n\n"
-        f"📊 <b>Новый баланс:</b> {format_number(new_balance)} RCOIN</blockquote>",
-        reply_markup=kb
-    )
-
-    add_bet_history(user_id, "mines", bet_amount, win_amount, 1, f"mines={mines_count}, opened={opened_cells}")
-    await callback.answer("💰 Выигрыш получен!", show_alert=True)
+        f"<blockquote>💰 <b>Игра МИНЫ — ВЫИГРЫШ!</b>\n\n"
+        f"💸 Ставка: {format_number(bet)} RCOIN\n📈 Множитель: {float(mult):.2f}x\n"
+        f"💎 Открыто клеток: {opened}\n✅ Получено: +{format_number(win)} RCOIN\n"
+        f"📊 Новый баланс: {format_number(new_balance)} RCOIN</blockquote>", reply_markup=kb)
+    add_bet_history(user_id, "mines", bet, win, 1, f"mines={mines_count}, opened={opened}")
+    await callback.answer("Выигрыш зачислен", show_alert=True)
     await state.clear()
+
 
 
 @dp.callback_query(F.data.startswith("mines_cancel_"))
@@ -5164,45 +5171,39 @@ async def tower_pick(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("tower_cashout_"))
 async def tower_cashout(callback: CallbackQuery):
-    game_id = int(callback.data.split("_")[2])
+    try:
+        game_id = int(callback.data.rsplit("_", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректная игра", show_alert=True); return
     user_id = callback.from_user.id
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, bet_amount, level, mult, status, grid FROM tower_games WHERE id=?", (game_id,))
-    game = cur.fetchone()
-    conn.close()
-    if not game:
-        await callback.answer("Игра не найдена", show_alert=True)
-        return
-    gu, bet, level, mult, status, grid_json = game
-    if gu != user_id:
-        await callback.answer("Это не твоя игра", show_alert=True)
-        return
-    if status != 'active':
-        await callback.answer("Игра завершена", show_alert=True)
-        return
-    if level <= 0:
-        await callback.answer("Сначала открой клетку", show_alert=True)
-        return
-    win = int(bet * mult)
-    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
-    c.execute("UPDATE tower_games SET status='won' WHERE id=?", (game_id,))
-    conn.commit(); conn.close()
-    user = get_user(user_id)
-    new_bal = user.get('balance_coin', 0) + win
-    update_user(user_id, balance_coin=new_bal, total_wins=user.get('total_wins', 0) + 1)
+    with sqlite3.connect(DB_FILE, timeout=20) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT user_id, bet_amount, level, mult, status, grid FROM tower_games WHERE id=?", (game_id,)).fetchone()
+        if not row:
+            conn.rollback(); await callback.answer("Игра не найдена", show_alert=True); return
+        game_user_id, bet, level, mult, status, grid_json = row
+        if game_user_id != user_id:
+            conn.rollback(); await callback.answer("Это не твоя игра", show_alert=True); return
+        if status != "active":
+            conn.rollback(); await callback.answer("Игра уже завершена", show_alert=True); return
+        if int(level or 0) <= 0:
+            conn.rollback(); await callback.answer("Сначала открой клетку", show_alert=True); return
+        win = int(int(bet) * float(mult))
+        changed = conn.execute("UPDATE tower_games SET status='won' WHERE id=? AND status='active'", (game_id,)).rowcount
+        if changed != 1:
+            conn.rollback(); await callback.answer("Игра уже завершена", show_alert=True); return
+        conn.execute("UPDATE users SET balance_coin=balance_coin+?, total_wins=total_wins+1 WHERE user_id=?", (win, user_id))
+        new_balance = conn.execute("SELECT balance_coin FROM users WHERE user_id=?", (user_id,)).fetchone()[0]
+        conn.commit()
     grid = json.loads(grid_json) if grid_json else []
-    kb = tower_kb(grid, 5, game_id, 1)
     await callback.message.edit_text(
-        f"<blockquote>💰 <b>БАШНЯ - ВЫИГРЫШ!</b>\n\n"
-        f"👤 <b>Игрок:</b> {user.get('display_name', callback.from_user.username or 'без_ника')}\n"
-        f"💸 <b>Ставка:</b> {format_number(bet)} RCOIN\n"
-        f"📈 <b>Множитель:</b> x{mult:.2f}\n"
-        f"✅ <b>Итог:</b> ПОБЕДА! +{format_number(win)} RCOIN\n"
-        f"📊 <b>Новый баланс:</b> {format_number(new_bal)} RCOIN</blockquote>",
-        reply_markup=kb)
+        f"<blockquote>💰 <b>БАШНЯ — ВЫИГРЫШ!</b>\n\nСтавка: {format_number(bet)} RCOIN\n"
+        f"Уровень: {level}\nМножитель: x{float(mult):.2f}\n"
+        f"Получено: +{format_number(win)} RCOIN\nНовый баланс: {format_number(new_balance)} RCOIN</blockquote>",
+        reply_markup=tower_kb(grid, 5, game_id, 1))
     add_bet_history(user_id, "tower", bet, win, 1, f"level={level}")
-    await callback.answer("💰 Выигрыш получен!", show_alert=True)
+    await callback.answer("Выигрыш зачислен", show_alert=True)
+
 
 
 @dp.callback_query(F.data.startswith("tower_cancel_"))
@@ -7531,27 +7532,41 @@ async def cmd_db5(message: Message):
 @dp.callback_query(F.data == "db5_check")
 async def db5_check(callback: CallbackQuery):
     user_id = callback.from_user.id
-    user = get_user(user_id)
-    about = (user.get("about_text") or "").strip()
-    if BOT_USERNAME and BOT_USERNAME.strip("@").lower() in about.lower():
+    bio = ""
+    try:
+        chat = await bot.get_chat(user_id)
+        bio = (getattr(chat, "bio", None) or "").strip()
+    except Exception as exc:
+        logger.info("Не удалось прочитать bio пользователя %s: %s", user_id, exc)
+    required = "@" + BOT_USERNAME.strip("@")
+    if required.lower() in bio.lower():
         update_user(user_id, db5_checked=int(time.time()))
-        await callback.answer("✅ Проверено! Играй!", show_alert=True)
-        await callback.message.delete()
-        msg = callback.message
-        msg.from_user = callback.from_user
-        await cmd_db5(msg)
+        await callback.answer("Проверено! Ежедневный бонус открыт.", show_alert=True)
+        # Ask the player to reopen the command; no mutation of Telegram's Message object.
+        await callback.message.answer("✅ Проверка пройдена. Отправь команду /бонус5, чтобы открыть поле 5×5.")
     else:
         await callback.answer(
-            f"❌ Не нашёл @{BOT_USERNAME.strip('@')} в описании. Команда «О себе ...»",
+            f"Не удалось найти {required} в Telegram-описании. Добавь его в поле «О себе» и повтори проверку.",
             show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("db5_open_"))
 async def db5_open(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    parts = callback.data.split("_")
-    game_tok = parts[2]
-    cell = int(parts[3])
+    # Callback format: db5_open_db5_<user_id>_<timestamp>_<cell>.
+    # The game token itself contains underscores, so split from the right.
+    try:
+        prefix, cell_raw = callback.data.rsplit("_", 1)
+        game_tok = prefix[len("db5_open_"):]
+        cell = int(cell_raw)
+        tok_parts = game_tok.split("_")
+        if len(tok_parts) != 3 or tok_parts[0] != "db5" or int(tok_parts[1]) != user_id:
+            raise ValueError("wrong owner")
+        if not 0 <= cell < 25:
+            raise ValueError("bad cell")
+    except (ValueError, IndexError):
+        await callback.answer("Кнопка устарела. Открой ежедневный бонус заново.", show_alert=True)
+        return
     user = get_user(user_id)
     gd = json.loads(user.get("db5_grid") or "{}")
     grid = gd.get("g", [0] * 25)
@@ -7603,12 +7618,23 @@ async def db5_cashout(callback: CallbackQuery):
     if reward <= 0:
         await callback.answer("Нет выигрыша", show_alert=True)
         return
-    update_user(user_id, balance_coin=user.get("balance_coin", 0) + reward, db5_won=0)
-    new_user = get_user(user_id)
+    # Conditional update prevents double credit if Telegram retries the callback.
+    with sqlite3.connect(DB_FILE, timeout=15) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT balance_coin, db5_won FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not row or int(row[1] or 0) <= 0:
+            conn.rollback()
+            await callback.answer("Выигрыш уже получен или отсутствует.", show_alert=True)
+            return
+        reward = int(row[1])
+        new_balance = int(row[0] or 0) + reward
+        conn.execute("UPDATE users SET balance_coin=?, db5_won=0 WHERE user_id=? AND db5_won=?",
+                     (new_balance, user_id, reward))
+        conn.commit()
     await callback.message.edit_text(
-        f"<blockquote>{PREMIUM_EMOJI_TEXT['win']} <b>Бонус 5x5 - ВЫИГРЫШ!</b>\n\n"
+        f"<blockquote>{PREMIUM_EMOJI_TEXT['win']} <b>Бонус 5x5 — ВЫИГРЫШ!</b>\n\n"
         f"💰 Получено: <b>+{format_number(reward)} RCOIN</b>\n"
-        f"📊 Новый баланс: {format_number(new_user.get('balance_coin', 0))} RCOIN</blockquote>"
+        f"📊 Новый баланс: {format_number(new_balance)} RCOIN</blockquote>"
     )
     await callback.answer("💰 Выигрыш получен!", show_alert=True)
 
@@ -7936,6 +7962,73 @@ async def buy_username_from_profile(callback: CallbackQuery):
     )
     await callback.answer()
 
+
+@dp.message(Command("menu"))
+@dp.message(F.text.lower() == "меню")
+async def cmd_main_menu(message: Message):
+    user = get_user(message.from_user.id)
+    kb, bonus_text = get_balance_keyboard(message.from_user.id)
+    await message.answer(
+        f"💎 <b>RCOIN·BOT — главное меню</b>\n\n"
+        f"👤 {user.get('display_name', message.from_user.first_name or 'Игрок')}\n"
+        f"💰 Баланс: <b>{format_number(user.get('balance_coin', 0))} RCOIN</b>\n"
+        f"{bonus_text}", reply_markup=kb)
+
+@dp.callback_query(F.data == "menu_games")
+async def menu_games_callback(callback: CallbackQuery):
+    await callback.message.edit_text("🎮 <b>Игры</b>\nВыбери игру:", reply_markup=get_games_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_profile")
+async def menu_profile_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = get_user(user_id)
+    stats = get_user_stats(user_id)
+    text = (
+        f"{PREMIUM_EMOJI_TEXT['profile']} <b>ПРОФИЛЬ</b>\n\n"
+        f"👤 Имя: <b>{user.get('display_name') or callback.from_user.first_name or 'Игрок'}</b>\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"💰 Баланс: <b>{format_number(user.get('balance_coin', 0))} RCOIN</b>\n"
+        f"💎 RBP: <b>{format_number(user.get('balance_point', 0))}</b>\n"
+        f"🎮 Игр: <b>{stats.get('total_bets', 0)}</b>\n"
+        f"🏆 Побед: <b>{stats.get('wins', 0)}</b>"
+    )
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎮 Игры", callback_data="menu_games"),
+         InlineKeyboardButton(text="💰 Баланс", callback_data="back_to_balance")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="back_to_balance")]
+    ]))
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_events")
+async def menu_events_callback(callback: CallbackQuery):
+    await show_events(callback.message, edit=True)
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_stash")
+async def menu_stash_callback(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    try:
+        inv = json.loads(user.get("inventory") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        inv = []
+    if not inv:
+        body = "📦 Здесь пока пусто. Предметы можно находить в зимнем событии."
+    else:
+        lines = [f"{PREMIUM_EMOJI_TEXT['diamond']} <b>ТВОЙ СКЛАД</b> ({len(inv)} шт.)"]
+        for item in inv:
+            key = item.get("key", "question")
+            lines.append(f"{PREMIUM_EMOJI_TEXT.get(key, '🎁')} {item.get('name', 'Сувенир')} ×{item.get('qty', 1)}")
+        body = "\n".join(lines)
+    await callback.message.edit_text(body, reply_markup=_event_kb([_event_btn("❄️ К ивентам", "ev_menu", "door")], [_event_btn("⬅️ В меню", "back_to_balance", "door")]))
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_help")
+async def menu_help_callback(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "❔ <b>Помощь</b>\n\n/start — запуск\n/menu — главное меню\n/игры — игры\n/профиль — профиль\n/склад — инвентарь\n/ивенты — события",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_balance")]]))
+    await callback.answer()
 
 @dp.callback_query(F.data == "back_to_profile")
 async def back_to_profile(callback: CallbackQuery):
@@ -11619,11 +11712,9 @@ def _event_btn(text: str, data: str, emoji_key: str | None = None) -> InlineKeyb
     return InlineKeyboardButton(**kw)
 
 
-@dp.message(F.text.lower().in_({"ивенты", "ивент", "events"}))
-@dp.message(Command("ивенты"))
-async def cmd_events(message: Message):
+async def show_events(message: Message, edit: bool = False):
     boss = _event_boss_state()
-    await message.answer(
+    text = (
         f"{PREMIUM_EMOJI_TEXT['star']} <b>ИВЕНТЫ</b>\n\n"
         f"{PREMIUM_EMOJI_TEXT['diamond']} <b>Зимний склад</b> — {EVENT_STASH_CELLS} ячейки в день, "
         f"приз от {format_number(EVENT_STASH_MIN)} до {format_number(EVENT_STASH_MAX)} RCOIN\n"
@@ -11631,15 +11722,23 @@ async def cmd_events(message: Message):
         f"{format_number(boss['max'])} HP\n"
         f"{PREMIUM_EMOJI_TEXT['spin']} <b>Колесо удачи</b> — раз в 6 часов\n"
         f"{PREMIUM_EMOJI_TEXT['treasury']} <b>Квесты</b> — ежедневные задания\n\n"
-        "Выбери ивент:",
-        reply_markup=_event_kb(
-            [_event_btn("Зимний склад", "ev_stash", "diamond"),
-             _event_btn("Босс", "ev_boss", "crash")],
-            [_event_btn("Колесо удачи", "ev_wheel", "spin"),
-             _event_btn("Квесты", "ev_quests", "treasury")],
-            [_event_btn("Назад", "back_to_balance", "door")],
-        ),
+        "Выбери ивент:"
     )
+    markup = _event_kb(
+        [_event_btn("Зимний склад", "ev_stash", "diamond"), _event_btn("Босс", "ev_boss", "crash")],
+        [_event_btn("Колесо удачи", "ev_wheel", "spin"), _event_btn("Квесты", "ev_quests", "treasury")],
+        [_event_btn("Назад", "back_to_balance", "door")],
+    )
+    if edit:
+        await message.edit_text(text, reply_markup=markup)
+    else:
+        await message.answer(text, reply_markup=markup)
+
+
+@dp.message(F.text.lower().in_({"ивенты", "ивент", "events"}))
+@dp.message(Command("ивенты"))
+async def cmd_events(message: Message):
+    await show_events(message)
 
 
 # ---------- Зимний склад ----------
@@ -11666,9 +11765,21 @@ async def ev_stash(callback: CallbackQuery):
                 event_points=user.get("event_points", 0) + 1)
     item_line = ""
     if item_key:
-        item_line = (f"\n🎁 <b>Найден айтем:</b> "
+        try:
+            inventory = json.loads(user.get("inventory") or "[]")
+            if not isinstance(inventory, list):
+                inventory = []
+        except (TypeError, json.JSONDecodeError):
+            inventory = []
+        existing = next((x for x in inventory if x.get("key") == item_key), None)
+        if existing:
+            existing["qty"] = int(existing.get("qty", 1)) + 1
+        else:
+            inventory.append({"key": item_key, "name": f"Зимний сувенир #{item_key[-1]}", "qty": 1})
+        update_user(callback.from_user.id, inventory=json.dumps(inventory, ensure_ascii=False))
+        item_line = (f"\n🎁 <b>Найден предмет:</b> "
                      f"{PREMIUM_EMOJI_TEXT[item_key]} <i>Зимний сувенир #{item_key[-1]}</i>\n"
-                     f"<blockquote>Эмодзи добавлен в твою коллекцию ивента!</blockquote>")
+                     f"<blockquote>Предмет сохранён на твоём складе!</blockquote>")
     await callback.message.edit_text(
         f"{PREMIUM_EMOJI_TEXT['diamond']} <b>ЗИМНИЙ СКЛАД</b>\n\n"
         f"{PREMIUM_EMOJI_TEXT['win']} Ячейка {used + 1}/{EVENT_STASH_CELLS}\n"
@@ -11685,8 +11796,7 @@ async def ev_stash(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "ev_menu")
 async def ev_menu(callback: CallbackQuery):
-    await callback.message.delete()
-    await cmd_events(callback.message)
+    await show_events(callback.message, edit=True)
     await callback.answer()
 
 
@@ -11809,7 +11919,7 @@ _WEBAPP_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Рубин — Арена</title>
+<title>RCOIN — Игровой центр</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: linear-gradient(135deg,#0f2027,#203a43,#2c5364); color:#fff; min-height:100vh; padding:16px; }
@@ -11831,8 +11941,8 @@ _WEBAPP_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="card">
-  <h1>🎰 Рубин Казино</h1>
-  <div class="g">Арена на коины и мини-игры</div>
+  <h1>💎 RCOIN — Игровой центр</h1>
+  <div class="g">Тренировочные мини-игры без ставок и денежных выплат</div>
   <div class="arena-stats">
     <div class="stat">💰 Баланс: <b id="bal">—</b></div>
     <div class="stat">👥 В лобби: <b id="lobby">0</b></div>
@@ -11840,11 +11950,10 @@ _WEBAPP_HTML = """<!DOCTYPE html>
 </div>
 
 <div class="card">
-  <h2>⚔️ Арена</h2>
-  <div class="g">Ставь ставку, жди соперника — шарик сам определит победителя.</div>
-  <input id="bet" type="number" min="100" placeholder="Ставка в RCOIN" value="500" style="width:100%;padding:12px;border-radius:12px;border:none;margin-top:10px;font-size:16px;">
-  <button class="btn" onclick="startArena()">⚔️ Встать в арену</button>
-  <div class="mini" id="arenaInfo">Введите ставку и ждите второго игрока.</div>
+  <h2>⚔️ Арена — тренировка</h2>
+  <div class="g">Демо-режим для проверки анимации. Здесь нет ставок, соперников или начисления RCOIN.</div>
+  <button class="btn" onclick="startArena()">⚔️ Запустить тренировку</button>
+  <div class="mini" id="arenaInfo">Запусти тренировочный шар.</div>
 </div>
 
 <div class="card">
@@ -11870,9 +11979,8 @@ _WEBAPP_HTML = """<!DOCTYPE html>
   setText('bal', '?');
 
   function startArena(){
-    const bet = parseInt(document.getElementById('bet').value) || 100;
-    setText('arenaInfo', '⚔️ Ставка ' + bet + ' RCOIN. Ищем соперника...');
-    setText('lobby', '1');
+    setText('arenaInfo', '⚔️ Тренировка запущена. Это визуальная демонстрация без ставок.');
+    setText('lobby', '0');
     const ballCard = document.getElementById('ballCard');
     ballCard.style.display = 'block';
     document.getElementById('ball').textContent = '🎱';
@@ -11880,7 +11988,7 @@ _WEBAPP_HTML = """<!DOCTYPE html>
     setTimeout(()=>{
       const win = Math.random() < 0.5;
       ballCard.style.display='none';
-      setText('arenaInfo', (win ? '🎉 Победа! Ты забрал ' + bet*2*0.9 + ' RCOIN (симуляция)' : '😔 Соперник выиграл. Попробуй ещё!'));
+      setText('arenaInfo', (win ? '🎉 Шар остановился на синем секторе!' : '✨ Шар остановился на серебряном секторе!') + ' Тренировка завершена.');
       setText('lobby','0');
     }, 1600);
   }
@@ -11895,9 +12003,44 @@ _WEBAPP_HTML = """<!DOCTYPE html>
 """
 
 
+
+@dp.message(Command("grantadmin"))
+async def cmd_grant_admin(message: Message):
+    if OWNER_ID <= 0 or message.from_user.id != OWNER_ID:
+        await message.answer("⛔ Только владелец бота может управлять администраторами.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /grantadmin TELEGRAM_ID")
+        return
+    target = int(parts[1])
+    get_user(target)
+    update_user(target, is_admin_rank=1, rank_title="ADMIN")
+    await message.answer(f"✅ Пользователь {target} получил права администратора. Для снятия прав используй /revokeadmin {target}.")
+
+@dp.message(Command("revokeadmin"))
+async def cmd_revoke_admin(message: Message):
+    if OWNER_ID <= 0 or message.from_user.id != OWNER_ID:
+        await message.answer("⛔ Только владелец бота может управлять администраторами.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /revokeadmin TELEGRAM_ID")
+        return
+    target = int(parts[1])
+    if target == OWNER_ID:
+        await message.answer("Нельзя снять права владельца.")
+        return
+    update_user(target, is_admin_rank=0, rank_title="")
+    await message.answer(f"✅ Права администратора сняты у {target}.")
+
+
 # ==================== ЗАПУСК ====================
 
 async def main():
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN не задан. Создай новый токен через @BotFather и добавь его в переменные окружения.")
+        return
     init_db()
     try:
         me = await bot.get_me()
@@ -12021,6 +12164,17 @@ async def _distribute_saturday_check():
     conn.close()
     update_treasury(new_treasury, bal_point)
     logger.info(f"Субботний чек раздан {len(users)} игрокам. Казна: {format_number(new_treasury)}")
+
+
+@dp.message(F.text.startswith("/"))
+async def unknown_command(message: Message):
+    """Give a useful answer for commands this bot does not implement."""
+    command = (message.text or "").split()[0]
+    await message.answer(
+        f"Команда <code>{command}</code> не найдена.\n\n"
+        "Открой /start или /menu — там есть доступные разделы. "
+        "Для списка возможностей используй /помощь."
+    )
 
 
 if __name__ == "__main__":
