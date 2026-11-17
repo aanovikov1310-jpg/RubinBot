@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== КОНФИГУРАЦИЯ ====================
 # Never store a live Telegram token in source control. Set BOT_TOKEN in the host environment.
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9153206613:AAH6yeSZv2lYd-FT1sc3cjyK47rcLoO1uik 5257618084").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9153206613:AAH6yeSZv2lYd-FT1sc3cjyK47rcLoO1uik").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "5257618084"))
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "5257618084").replace(" ", "").split(",") if x.isdigit()}
 if OWNER_ID > 0:
