@@ -60,7 +60,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "9165228951:AAGCciCNqS5LYhx98J2rwLTBnn_tHdVGz
 ADMIN_IDS = [5257618084]
 REQUIRED_CHANNEL = "@playhomemines"
 REQUIRED_CHAT = "@gamehomemines"
-BOT_USERNAME = "rubimupbot"
+BOT_USERNAME = "@rubinupbot"
 DB_FILE = "data.db"
 IMAGE_PATH = "image.png"
 WIN_IMAGE = "win.png"
@@ -10962,7 +10962,7 @@ def _event_btn(text: str, data: str, emoji_key: str | None = None) -> InlineKeyb
     return InlineKeyboardButton(**kw)
 
 
-@dp.message(F.text.lower() in {"ивенты", "ивент", "events"})
+@dp.message(F.text.lower().in_({"ивенты", "ивент", "events"}))
 @dp.message(Command("ивенты"))
 async def cmd_events(message: Message):
     boss = _event_boss_state()
