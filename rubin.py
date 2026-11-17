@@ -56,15 +56,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9165228951:AAGCciCNqS5LYhx98J2rwLTBnn_tHdVGzsw")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9153206613:AAH6yeSZv2lYd-FT1sc3cjyK47rcLoO1uik")
 ADMIN_IDS = [5257618084]
 REQUIRED_CHANNEL = "@playhomemines"
 REQUIRED_CHAT = "@gamehomemines"
-BOT_USERNAME = "@rubinupbot"
+BOT_USERNAME = "rubinupbot"
 DB_FILE = "data.db"
 IMAGE_PATH = "image.png"
 WIN_IMAGE = "win.png"
 LOSE_IMAGE = "lose.png"
+# URL веб-аппа (health-сервер на Render). Замените на реальный домен вида https://rubinbot.onrender.com
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://rubinbot.onrender.com")
 
 # Crypto Pay API
 CRYPTO_PAY_TOKEN = os.getenv("CRYPTO_PAY_TOKEN", "")
@@ -143,10 +145,19 @@ EMOJI_IDS = {
     "mine": "5370692462882857093",
     "business": "5384327463629233871",
     "villa": "5278702045883292456",
-    "collect": "5197491391206281629"
+    "collect": "5197491391206281629",
+    "question": "5436113877181941026",
+    # --- НОВЫЕ ТГП ЭМОДЗИ ДЛЯ ЗИМНЕГО ИВЕНТА ---
+    "item_1": "5332717942599618048",
+    "item_2": "5404752966584394198",
+    "item_3": "5280924618444514633",
+    "item_4": "5368488358681000659",
+    "item_5": "5398024200235529935",
+    "item_6": "5449449325434266744",
+    "item_7": "5201924046563852634",
+    "item_8": "5199959030306456092",
+    "item_9": "5316599316884766402"
 }
-
-# ====== ТГП ЭМОДЗИ ДЛЯ ТЕКСТА ======
 PREMIUM_EMOJI_TEXT = {key: get_emoji(val) for key, val in EMOJI_IDS.items()}
 
 # ==================== МНОЖИТЕЛИ ДЛЯ МИН ====================
@@ -182,58 +193,6 @@ MULTIPLIERS = {
          11: 139.00, 12: 219.00, 13: 346.00, 14: 548.00, 15: 870.00, 16: 1385.00, 17: 2210.00, 18: 3540.00, 19: 5680.00,
          20: 9140.00, 21: 14750.00, 22: 23880.00, 23: 38800.00, 24: 63280.00}
 }
-
-# ==================== ПРОСТОЕ КД ====================
-
-_last_game_time = {}
-
-
-@dp.message(F.text.lower().startswith(
-    ("куб", "рулетка", "фортуна", "кф", "баскет", "мины", "дс", "дартс", "очко", "краш", "охота", "спин", "футбол",
-     "пирамида", "майнер", "хило", "кн")))
-async def check_all_games(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    now = int(time.time())
-
-    if user_id in _last_game_time:
-        if now - _last_game_time[user_id] < 3:
-            await message.reply(f"{PREMIUM_EMOJI_TEXT['games']} Подождите 3 секунды перед следующей игрой!")
-            return
-
-    _last_game_time[user_id] = now
-
-    text = message.text.lower()
-    if text.startswith("куб"):
-        await game_dice(message)
-    elif text.startswith("рулетка"):
-        await game_roulette(message)
-    elif text.startswith("фортуна") or text.startswith("кф"):
-        await game_fortune(message)
-    elif text.startswith("баскет"):
-        await game_basket(message)
-    elif text.startswith("мины"):
-        await game_mines(message, state)
-    elif text.startswith("дс") or text.startswith("дартс"):
-        await game_darts(message)
-    elif text.startswith("очко"):
-        await game_blackjack(message, state)
-    elif text.startswith("краш"):
-        await cmd_crash(message, state)
-    elif text.startswith("охота"):
-        await game_hunt(message)
-    elif text.startswith("спин"):
-        await game_spin(message)
-    elif text.startswith("футбол"):
-        await game_football(message)
-    elif text.startswith("пирамида"):
-        await cmd_pyramid(message, state)
-    elif text.startswith("майнер"):
-        await cmd_miner(message)
-    elif text.startswith("хило"):
-        await game_hi_lo(message, state)
-    elif text.startswith("кн"):
-        await cmd_ttt(message, state)
-
 
 # ==================== БАЗА ДАННЫХ ====================
 
@@ -326,6 +285,20 @@ def init_db():
             ('event_boss_last', 'INTEGER DEFAULT 0'),
             ('event_wheel_last', 'INTEGER DEFAULT 0'),
             ('event_points', 'INTEGER DEFAULT 0'),
+            # --- КВЕСТЫ (статусы завершения) ---
+            ('quest_q_games', 'INTEGER DEFAULT 0'),
+            ('quest_q_wins', 'INTEGER DEFAULT 0'),
+            ('quest_q_stash', 'INTEGER DEFAULT 0'),
+            ('quest_q_boss', 'INTEGER DEFAULT 0'),
+            # --- ЕЖЕДНЕВНЫЙ БОНУС 5x5 ---
+            ('db5_checked', 'INTEGER DEFAULT 0'),
+            ('db5_last', 'INTEGER DEFAULT 0'),
+            ('db5_streak', 'INTEGER DEFAULT 0'),
+            ('db5_opened', 'INTEGER DEFAULT 0'),
+            ('db5_grid', 'TEXT DEFAULT "[]"'),
+            ('db5_won', 'INTEGER DEFAULT 0'),
+            # --- ЛИЧНЫЙ СКЛАД ---
+            ('inventory', 'TEXT DEFAULT "[]"'),
         ]
 
         for col_name, col_type in columns_to_add:
@@ -437,6 +410,20 @@ def init_db():
                 multiplier REAL DEFAULT 1.0,
                 mines_count INTEGER,
                 opened_cells INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'active',
+                grid TEXT,
+                created_at INTEGER
+            )
+        ''')
+
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS tower_games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                bet_amount INTEGER,
+                level INTEGER DEFAULT 0,
+                bombs INTEGER DEFAULT 1,
+                mult REAL DEFAULT 1.0,
                 status TEXT DEFAULT 'active',
                 grid TEXT,
                 created_at INTEGER
@@ -734,7 +721,12 @@ def get_user(user_id: int) -> Optional[Dict]:
             'last_spin_time', 'about_text', 'rank_title', 'custom_username',
             'is_scammer', 'is_admin_rank', 'is_donater', 'is_official', 'last_game_time',
             'daily_bonus_last', 'daily_bonus_streak',
-            'total_games_day', 'last_game_day', 'titles', 'treasury_access'
+            'total_games_day', 'last_game_day', 'titles', 'treasury_access',
+            'event_day', 'event_stash_last', 'event_boss_dmg', 'event_boss_last',
+            'event_wheel_last', 'event_points',
+            'quest_q_games', 'quest_q_wins', 'quest_q_stash', 'quest_q_boss',
+            'db5_checked', 'db5_last', 'db5_streak', 'db5_opened', 'db5_grid', 'db5_won',
+            'inventory'
         ]
 
         result = dict(zip(columns, row))
@@ -4995,6 +4987,384 @@ async def mines_none(callback: CallbackQuery):
     await callback.answer()
 
 
+# ==================== ИГРА БАШНЯ ====================
+# Поле 5x5. Игрок открывает по одной клетке сверху вниз. Попал на мину — проигрыш.
+# Множители растут с каждым уровнем (по скриншоту: x1.19, x1.48, x1.86, x2.32, x2.90...).
+
+TOWER_MULT = [1.0, 1.19, 1.48, 1.86, 2.32, 2.90, 3.62, 4.52, 5.65, 7.06]
+
+
+def build_tower_grid() -> list:
+    """Сетка 5 уровней x 5 колонок. В каждом уровне 4 безопасные клетки и 1 мина."""
+    grid = []
+    for _ in range(5):
+        row = [0] * 5
+        bomb = random.randint(0, 4)
+        row[bomb] = 1
+        grid.append(row)
+    return grid
+
+
+def tower_kb(grid: list, level: int, game_id: int, bombs: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for row_i in range(5):
+        for col_i in range(5):
+            if row_i < level and grid[row_i][col_i] == 1:
+                builder.button(text=" ", callback_data=f"tower_none_{game_id}",
+                               icon_custom_emoji_id=EMOJI_IDS["mines"])
+            elif row_i < level:
+                builder.button(text=" ", callback_data=f"tower_none_{game_id}",
+                               icon_custom_emoji_id=EMOJI_IDS["diamond"])
+            else:
+                builder.button(text=" ", callback_data=f"tower_pick_{game_id}_{row_i}_{col_i}",
+                               icon_custom_emoji_id=EMOJI_IDS["question"])
+        builder.adjust(5)
+    if level > 0:
+        builder.button(text="💰 Забрать выигрыш", callback_data=f"tower_cashout_{game_id}",
+                       icon_custom_emoji_id=EMOJI_IDS["win"])
+    if level == 0:
+        builder.button(text="💥 Отменить игру", callback_data=f"tower_cancel_{game_id}")
+    builder.adjust(5)
+    return builder.as_markup()
+
+
+@dp.message(F.text.lower().startswith("башн"))
+async def cmd_tower(message: Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        await message.reply(f"{PREMIUM_EMOJI_TEXT['lock']} Ошибка данных.")
+        return
+    parts = message.text.lower().split()
+    if len(parts) < 2:
+        await message.reply(
+            f"{PREMIUM_EMOJI_TEXT['lock']} <b>Неправильный формат!</b>\n\n"
+            "Примеры:\n"
+            "• <code>башня 500</code> – 500 RCOIN\n"
+            "• <code>башня все</code> – весь баланс\n"
+            "• <code>башня вб</code> – весь баланс"
+        )
+        return
+    amount_str = parts[1]
+    current_balance = user.get('balance_coin', 0)
+    bet_amount, deduct_amount = parse_bet_amount(amount_str, current_balance)
+    if bet_amount <= 0 or current_balance < deduct_amount:
+        await message.reply(
+            f"{PREMIUM_EMOJI_TEXT['lock']} <b>Недостаточно RCOIN!</b>\n"
+            f"💰 Баланс: {format_number(current_balance)} RCOIN")
+        return
+
+    grid = build_tower_grid()
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO tower_games (user_id, bet_amount, level, bombs, mult, status, grid, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (user_id, bet_amount, 0, 1, 1.0, 'active', json.dumps(grid), int(time.time())))
+    game_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    update_user(user_id, balance_coin=current_balance - deduct_amount)
+
+    kb = tower_kb(grid, 0, game_id, 1)
+    await message.reply(
+        f"{PREMIUM_EMOJI_TEXT['games']} <b>Игра БАШНЯ · начни игру!</b>\n\n"
+        f"👤 <b>Игрок:</b> {user.get('display_name', message.from_user.username or 'без_ника')}\n"
+        f"💸 <b>Ставка:</b> {format_number(bet_amount)} RCOIN\n"
+        f"💣 <b>Мин:</b> 1\n\n"
+        f"📈 <b>Следующий уровень:</b>\n"
+        + "\n".join(
+            f"  {i+1} • <b>x{TOWER_MULT[i+1]:.2f}</b>" for i in range(min(5, len(TOWER_MULT)-1))) + "\n\n"
+        f"<i>Выбирай клетку.</i>",
+        reply_markup=kb
+    )
+
+
+@dp.callback_query(F.data.startswith("tower_pick_"))
+async def tower_pick(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    _, _, gid_s, row_s, col_s = callback.data.split("_", 4)
+    game_id = int(gid_s)
+    row_i = int(row_s)
+    col_i = int(col_s)
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, bet_amount, level, bombs, mult, status, grid FROM tower_games WHERE id=?",
+                (game_id,))
+    game = cur.fetchone()
+    conn.close()
+    if not game:
+        await callback.answer("Игра не найдена", show_alert=True)
+        return
+    gu, bet, level, bombs, mult, status, grid_json = game
+    if gu != user_id:
+        await callback.answer("Это не твоя игра", show_alert=True)
+        return
+    if status != 'active':
+        await callback.answer("Игра завершена", show_alert=True)
+        return
+    if row_i != level:
+        await callback.answer("Сначала открывай текущий уровень", show_alert=True)
+        return
+    grid = json.loads(grid_json)
+    if grid[row_i][col_i] == 1:
+        grid[row_i][col_i] = -1
+        conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+        c.execute("UPDATE tower_games SET grid=?, status='lost' WHERE id=?", (json.dumps(grid), game_id))
+        conn.commit(); conn.close()
+        user = get_user(user_id)
+        kb = tower_kb(grid, level + 1, game_id, bombs)
+        await callback.message.edit_text(
+            f"<blockquote>{PREMIUM_EMOJI_TEXT['mines']} <b>БАШНЯ - ПРОИГРЫШ!</b>\n\n"
+            f"👤 <b>Игрок:</b> {user.get('display_name', callback.from_user.username or 'без_ника')}\n"
+            f"💸 <b>Ставка:</b> {format_number(bet)} RCOIN\n"
+            f"❌ <b>Итог:</b> ПРОИГРЫШ! -{format_number(bet)} RCOIN\n"
+            f"📊 <b>Баланс:</b> {format_number(user.get('balance_coin', 0))} RCOIN</blockquote>",
+            reply_markup=kb)
+        await callback.answer("💥 Попал на мину!", show_alert=True)
+        return
+    grid[row_i][col_i] = -1
+    level += 1
+    mult = TOWER_MULT[level] if level < len(TOWER_MULT) else TOWER_MULT[-1] * (1 + (level - len(TOWER_MULT)) * 0.3)
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("UPDATE tower_games SET level=?, mult=?, grid=? WHERE id=?",
+              (level, mult, json.dumps(grid), game_id))
+    conn.commit(); conn.close()
+    user = get_user(user_id)
+    pot = int(bet * mult)
+    kb = tower_kb(grid, level, game_id, bombs)
+    if level >= 5:
+        grid = json.loads(json.dumps(grid))  # показать всю сетку
+        kb = tower_kb(grid, 5, game_id, bombs)
+        await callback.message.edit_text(
+            f"{PREMIUM_EMOJI_TEXT['diamond']} <b>Игра БАШНЯ · игра идёт</b>\n\n"
+            f"👤 <b>Игрок:</b> {user.get('display_name', callback.from_user.username or 'без_ника')}\n"
+            f"💸 <b>Ставка:</b> {format_number(bet)} RCOIN\n"
+            f"📊 <b>Все уровни пройдены!</b>\n"
+            f"💰 Выигрыш: {format_number(pot)} RCOIN",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="💰 Забрать выигрыш", callback_data=f"tower_cashout_{game_id}")
+            ]]))
+    else:
+        nxt = []
+        for i in range(1, 6):
+            if level + i < len(TOWER_MULT):
+                nxt.append(f"{level+i} • <b>x{TOWER_MULT[level+i]:.2f}</b>")
+        await callback.message.edit_text(
+            f"{PREMIUM_EMOJI_TEXT['diamond']} <b>Игра БАШНЯ · игра идёт</b>\n\n"
+            f"👤 <b>Игрок:</b> {user.get('display_name', callback.from_user.username or 'без_ника')}\n"
+            f"💸 <b>Ставка:</b> {format_number(bet)} RCOIN\n"
+            f"📊 <b>Уровень:</b> {level}/5\n"
+            f"📈 <b>Множитель:</b> x{mult:.2f}\n"
+            f"💰 <b>Выигрыш:</b> {format_number(pot)} RCOIN\n"
+            f"📊 <b>Следующий:</b>\n" + "\n".join(nxt[:3]) + "\n\n"
+            f"<i>Выбирай клетку или забери выигрыш.</i>",
+            reply_markup=kb)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("tower_cashout_"))
+async def tower_cashout(callback: CallbackQuery):
+    game_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, bet_amount, level, mult, status, grid FROM tower_games WHERE id=?", (game_id,))
+    game = cur.fetchone()
+    conn.close()
+    if not game:
+        await callback.answer("Игра не найдена", show_alert=True)
+        return
+    gu, bet, level, mult, status, grid_json = game
+    if gu != user_id:
+        await callback.answer("Это не твоя игра", show_alert=True)
+        return
+    if status != 'active':
+        await callback.answer("Игра завершена", show_alert=True)
+        return
+    if level <= 0:
+        await callback.answer("Сначала открой клетку", show_alert=True)
+        return
+    win = int(bet * mult)
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("UPDATE tower_games SET status='won' WHERE id=?", (game_id,))
+    conn.commit(); conn.close()
+    user = get_user(user_id)
+    new_bal = user.get('balance_coin', 0) + win
+    update_user(user_id, balance_coin=new_bal, total_wins=user.get('total_wins', 0) + 1)
+    grid = json.loads(grid_json) if grid_json else []
+    kb = tower_kb(grid, 5, game_id, 1)
+    await callback.message.edit_text(
+        f"<blockquote>💰 <b>БАШНЯ - ВЫИГРЫШ!</b>\n\n"
+        f"👤 <b>Игрок:</b> {user.get('display_name', callback.from_user.username or 'без_ника')}\n"
+        f"💸 <b>Ставка:</b> {format_number(bet)} RCOIN\n"
+        f"📈 <b>Множитель:</b> x{mult:.2f}\n"
+        f"✅ <b>Итог:</b> ПОБЕДА! +{format_number(win)} RCOIN\n"
+        f"📊 <b>Новый баланс:</b> {format_number(new_bal)} RCOIN</blockquote>",
+        reply_markup=kb)
+    add_bet_history(user_id, "tower", bet, win, 1, f"level={level}")
+    await callback.answer("💰 Выигрыш получен!", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("tower_cancel_"))
+async def tower_cancel(callback: CallbackQuery):
+    game_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, bet_amount, status FROM tower_games WHERE id=?", (game_id,))
+    game = cur.fetchone()
+    conn.close()
+    if not game:
+        await callback.answer("Игра не найдена", show_alert=True)
+        return
+    gu, bet, status = game
+    if gu != user_id:
+        await callback.answer("Это не твоя игра", show_alert=True)
+        return
+    if status != 'active':
+        await callback.answer("Игра завершена", show_alert=True)
+        return
+    user = get_user(user_id)
+    new_bal = user.get('balance_coin', 0) + bet
+    update_user(user_id, balance_coin=new_bal)
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("UPDATE tower_games SET status='cancelled' WHERE id=?", (game_id,))
+    conn.commit(); conn.close()
+    await callback.message.edit_text(
+        f"{PREMIUM_EMOJI_TEXT['lock']} <b>Игра БАШНЯ отменена</b>\n\n"
+        f"💰 Ставка {format_number(bet)} RCOIN возвращена.\n"
+        f"📊 <b>Баланс:</b> {format_number(new_bal)} RCOIN")
+    await callback.answer("💥 Игра отменена", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("tower_none_"))
+async def tower_none(callback: CallbackQuery):
+    await callback.answer()
+
+
+# ==================== ИГРА АРЕНА (2 игрока, ставка, шанс) ====================
+# Игрок ставит ставку. Находит соперника. Через 15 сек шарик катится по ленте
+# и останавливается возле победителя (у кого больший шанс — чаще выигрывает).
+
+_arena_waiting = {}   # bet_amount -> [player_id]
+
+
+@dp.message(F.text.lower().startswith("арена"))
+async def cmd_arena(message: Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        await message.reply(f"{PREMIUM_EMOJI_TEXT['lock']} Ошибка данных.")
+        return
+    parts = message.text.lower().split()
+    if len(parts) < 2:
+        await message.reply(
+            f"{PREMIUM_EMOJI_TEXT['games']} <b>АРЕНА</b>\n\n"
+            "Примеры:\n"
+            "• <code>арена 500</code> – ставка 500 RCOIN\n"
+            "• <code>арена 1000</code> – ставка 1000 RCOIN\n\n"
+            "<i>Ждёшь второго игрока с той же ставкой → шарик катится → кто ближе — тот выигрывает!</i>"
+        )
+        return
+    amount_str = parts[1]
+    cur_bal = user.get("balance_coin", 0)
+    bet, deduct = parse_bet_amount(amount_str, cur_bal)
+    if bet <= 0 or cur_bal < deduct:
+        await message.reply(f"{PREMIUM_EMOJI_TEXT['lock']} Недостаточно RCOIN! Баланс: {format_number(cur_bal)}")
+        return
+
+    # ищем соперника с той же ставкой
+    rival_id = None
+    for b, plist in list(_arena_waiting.items()):
+        if b == bet and plist:
+            rival_id = plist.pop(0)
+            if not plist:
+                del _arena_waiting[b]
+            break
+    if rival_id is None:
+        _arena_waiting.setdefault(bet, []).append(user_id)
+        await message.reply(
+            f"{PREMIUM_EMOJI_TEXT['games']} <b>АРЕНА</b>\n\n"
+            f"💸 Ставка: {format_number(bet)} RCOIN\n"
+            f"⏳ Ждём соперника с такой же ставкой...\n\n"
+            f"<i>Команда повторно через пару секунд: <code>арена {amount_str}</code></i>"
+        )
+        return
+
+    # старт матча: два игрока, шарик
+    update_user(user_id, balance_coin=cur_bal - deduct)
+    rival = get_user(rival_id)
+    update_user(rival_id, balance_coin=(rival.get("balance_coin", 0) - deduct))
+    # шанс ~ пропорционально балансу (при равных ставках — 50/50, бонус за больший рейтинг)
+    chance_a = 50
+    chance_b = 50
+    pool = bet * 2 * 0.9  # 10% рейк казино
+    win_amount = int(pool)
+
+    b = InlineKeyboardBuilder()
+    b.button(text="🎲 Запустить шар", callback_data=f"arena_roll_{user_id}_{rival_id}_{bet}")
+    b.adjust(1)
+    msg = await message.reply(
+        f"{PREMIUM_EMOJI_TEXT['games']} <b>АРЕНА — МАТЧ!</b>\n\n"
+        f"⚔️ {user.get('display_name', '—')} (шанс {chance_a}%)\n"
+        f"🤝 vs\n"
+        f"⚔️ {rival.get('display_name', '—')} (шанс {chance_b}%)\n\n"
+        f"💸 Приз: <b>{format_number(win_amount)} RCOIN</b>\n\n"
+        f"<i>Нажми «Запустить шар» — через 15 сек он остановится возле победителя!</i>",
+        reply_markup=b.as_markup()
+    )
+    # уведомляем соперника
+    try:
+        await bot.send_message(
+            rival_id,
+            f"{PREMIUM_EMOJI_TEXT['games']} <b>АРЕНА!</b>\n\n"
+            f"Соперник найден: <b>{user.get('display_name', '—')}</b>\n"
+            f"Ставка: <b>{format_number(bet)} RCOIN</b>\n"
+            f"Приз: <b>{format_number(win_amount)} RCOIN</b>\n\n"
+            f"Игра идёт — следи за чатом!"
+        )
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data.startswith("arena_roll_"))
+async def arena_roll(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    a_id = int(parts[2]); b_id = int(parts[3]); bet = int(parts[4])
+    user_id = callback.from_user.id
+    if user_id not in (a_id, b_id):
+        await callback.answer("Только участники матча", show_alert=True)
+        return
+    # запускаем шар: 15 сек «катится», потом результат
+    await callback.answer("🎲 Шар покатился!")
+    await callback.message.edit_text(
+        f"{PREMIUM_EMOJI_TEXT['games']} <b>АРЕНА — ШАР КАТИТСЯ...</b>\n\n"
+        f"{'🎱'*1}  🎲  🎲  🎲  🎲\n\n"
+        f"<i>Запуск через 15 секунд...</i>"
+    )
+    await asyncio.sleep(15)
+    a = get_user(a_id); b = get_user(b_id)
+    a_name = a.get("display_name", "Игрок А") if a else "Игрок А"
+    b_name = b.get("display_name", "Игрок Б") if b else "Игрок Б"
+    winner = a_id if random.random() < 0.5 else b_id
+    win = int(bet * 2 * 0.9)
+    w_user = get_user(winner)
+    update_user(winner, balance_coin=(w_user.get("balance_coin", 0) + win),
+                total_wins=(w_user.get("total_wins", 0) + 1))
+    wname = a_name if winner == a_id else b_name
+    await callback.message.edit_text(
+        f"<blockquote>{PREMIUM_EMOJI_TEXT['win']} <b>АРЕНА — РЕЗУЛЬТАТ!</b>\n\n"
+        f"🎲 Шар остановился возле: <b>{wname}</b>\n\n"
+        f"💰 Победитель получает: <b>+{format_number(win)} RCOIN</b></blockquote>"
+    )
+    await callback.answer("Шар остановился!", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("arena_"))
+async def arena_none(callback: CallbackQuery):
+    await callback.answer()
+
+
 # ==================== ИГРА КРАШ ====================
 
 @dp.message(F.text.lower().startswith("краш"))
@@ -7041,6 +7411,280 @@ async def cmd_daily_bonus(message: Message):
         f"🔥 Серия: {new_streak} дней\n"
         f"📊 Новый баланс: {format_number(user.get('balance_coin', 0) + bonus)} RCOIN</blockquote>"
     )
+
+
+# ==================== ЕЖЕДНЕВНЫЙ БОНУС 5x5 ====================
+# Поле 5x5 с кнопками «?». Для игры нужно добавить юзернейм бота в описание
+# профиля и нажать «Проверить». Кол-во открываемых ячеек и выигрыш растут по дням серии.
+
+
+def _db5_day_config(streak: int) -> tuple:
+    """Возвращает (кол-во ячеек, макс выигрыш) для дня серии."""
+    if streak <= 1:
+        return (3, 150_000)
+    if streak == 2:
+        return (4, 250_000)
+    return (5, 400_000)
+
+
+def _db5_openable(streak: int) -> int:
+    return _db5_day_config(streak)[0]
+
+
+def _db5_questions_kb(grid: list, opened: int, streak: int, game_id: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    openable = _db5_openable(streak)
+    for i in range(25):
+        if grid[i] == 1:
+            builder.button(text=" ", callback_data=f"db5_none_{game_id}",
+                           icon_custom_emoji_id=EMOJI_IDS["diamond"])
+        elif grid[i] == 2:
+            builder.button(text=" ", callback_data=f"db5_none_{game_id}",
+                           icon_custom_emoji_id=EMOJI_IDS["question"])
+        else:
+            builder.button(text=" ", callback_data=f"db5_open_{game_id}_{i}",
+                           icon_custom_emoji_id=EMOJI_IDS["question"])
+    builder.adjust(5)
+    if opened > 0 and opened < openable:
+        builder.button(text="💰 Забрать", callback_data=f"db5_cashout_{game_id}")
+    builder.adjust(5)
+    return builder.as_markup()
+
+
+@dp.message(F.text.lower().in_({"ежедневный бонус", "бонус 5х5", "бонус 5x5", "дб5", "игра бонус"}))
+@dp.message(Command("бонус5"))
+async def cmd_db5(message: Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        await message.answer(f"{PREMIUM_EMOJI_TEXT['lock']} Ошибка данных.")
+        return
+    now = int(time.time())
+    today = _event_today()
+
+    # проверка юзернейма бота в описании профиля
+    need_check = user.get("db5_checked", 0) < now - 86400 * 30
+    about = (user.get("about_text") or "").strip()
+
+    verified = False
+    if not need_check:
+        verified = True
+    elif about and BOT_USERNAME and BOT_USERNAME.strip("@").lower() in about.lower():
+        verified = True
+        need_check = False
+
+    if need_check:
+        await message.answer(
+            f"{PREMIUM_EMOJI_TEXT['question']} <b>Ежедневный бонус 5x5</b>\n\n"
+            f"Чтобы играть, добавь юзернейм бота <code>@{BOT_USERNAME.strip('@')}</code> "
+            f"в описание профиля («О себе») и нажми кнопку «Проверить».\n\n"
+            f"<i>Команда «О себе <ваш текст>» — изменить описание.</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Проверить", callback_data="db5_check")
+            ]])
+        )
+        return
+
+    # новый день — создаём поле
+    last = user.get("db5_last", 0)
+    streak = user.get("db5_streak", 0)
+    if last < 1 or (now - last) >= 86400:
+        if last < 1:
+            streak = 1
+        else:
+            streak = streak + 1
+        openable = _db5_openable(streak)
+        import random
+        grid = [0] * 25
+        idx = random.sample(range(25), openable)
+        for k in idx:
+            grid[k] = 2  # 2 = вопрос (открывается)
+        # резервируем «приз» на каждую открываемую ячейку
+        won_cells = [random.randint(10_000, _db5_day_config(streak)[1] // max(openable, 1)) for _ in range(openable)]
+        update_user(user_id, db5_last=now, db5_streak=streak, db5_opened=0,
+                    db5_grid=json.dumps({"g": grid, "w": won_cells}), db5_won=0)
+    else:
+        streak += 0  # уже играем в тот же день
+
+    user = get_user(user_id)
+    grid_data = user.get("db5_grid") or "{}"
+    try:
+        gd = json.loads(grid_data)
+        grid = gd.get("g", [0] * 25)
+    except Exception:
+        grid = [0] * 25
+    opened = user.get("db5_opened", 0)
+    openable = _db5_openable(streak)
+    game_id_tok = f"db5_{user_id}_{now}"
+    kb = _db5_questions_kb(grid, opened, streak, game_id_tok)
+    maxw = _db5_day_config(streak)[1]
+    await message.answer(
+        f"{PREMIUM_EMOJI_TEXT['question']} <b>Ежедневный бонус 5x5</b>\n\n"
+        f"🔥 Серия: {streak} день\n"
+        f"🗂 Открыть ячеек: {openable}\n"
+        f"💰 Макс выигрыш: {format_number(maxw)} RCOIN\n\n"
+        f"<i>Открывай ячейки и забирай выигрыш!</i>",
+        reply_markup=kb
+    )
+
+
+@dp.callback_query(F.data == "db5_check")
+async def db5_check(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = get_user(user_id)
+    about = (user.get("about_text") or "").strip()
+    if BOT_USERNAME and BOT_USERNAME.strip("@").lower() in about.lower():
+        update_user(user_id, db5_checked=int(time.time()))
+        await callback.answer("✅ Проверено! Играй!", show_alert=True)
+        await callback.message.delete()
+        msg = callback.message
+        msg.from_user = callback.from_user
+        await cmd_db5(msg)
+    else:
+        await callback.answer(
+            f"❌ Не нашёл @{BOT_USERNAME.strip('@')} в описании. Команда «О себе ...»",
+            show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("db5_open_"))
+async def db5_open(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    parts = callback.data.split("_")
+    game_tok = parts[2]
+    cell = int(parts[3])
+    user = get_user(user_id)
+    gd = json.loads(user.get("db5_grid") or "{}")
+    grid = gd.get("g", [0] * 25)
+    won = gd.get("w", [])
+    if grid[cell] == 1:
+        await callback.answer("Уже открыто", show_alert=True)
+        return
+    if grid[cell] == 0:
+        await callback.answer("Пусто, попробуй другую", show_alert=True)
+        return
+    # открыли приз
+    grid[cell] = 1
+    opened = user.get("db5_opened", 0) + 1
+    openable = _db5_openable(user.get("db5_streak", 1))
+    prize = won[opened - 1] if opened - 1 < len(won) else 5000
+    user_reward = user.get("db5_won", 0) + prize
+    update_user(user_id, db5_grid=json.dumps({"g": grid, "w": won}),
+                db5_opened=opened, db5_won=user_reward)
+    new_user = get_user(user_id)
+    kb = _db5_questions_kb(grid, opened, user.get("db5_streak", 1), game_tok)
+    if opened >= openable:
+        # все открыты — забрать автоматически
+        await callback.message.edit_text(
+            f"{PREMIUM_EMOJI_TEXT['win']} <b>Бонус 5x5 завершён!</b>\n\n"
+            f"💰 Выигрыш: <b>+{format_number(user_reward)} RCOIN</b>\n"
+            f"📊 Баланс: {format_number(new_user.get('balance_coin', 0) + user_reward)}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="💰 Забрать выигрыш", callback_data=f"db5_fin_{game_tok}")
+            ]])
+        )
+    else:
+        await callback.message.edit_text(
+            f"{PREMIUM_EMOJI_TEXT['question']} <b>Бонус 5x5</b>\n\n"
+            f"🔥 Серия: {new_user.get('db5_streak', 1)} день\n"
+            f"Открыто: {opened}/{openable}\n"
+            f"Текущий выигрыш: {format_number(user_reward)} RCOIN\n\n"
+            f"<i>Открывай дальше или забирай!</i>",
+            reply_markup=kb
+        )
+    await callback.answer(f"+{format_number(prize)} RCOIN")
+
+
+@dp.callback_query(F.data.startswith("db5_cashout_"))
+@dp.callback_query(F.data.startswith("db5_fin_"))
+async def db5_cashout(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = get_user(user_id)
+    reward = user.get("db5_won", 0)
+    if reward <= 0:
+        await callback.answer("Нет выигрыша", show_alert=True)
+        return
+    update_user(user_id, balance_coin=user.get("balance_coin", 0) + reward, db5_won=0)
+    new_user = get_user(user_id)
+    await callback.message.edit_text(
+        f"<blockquote>{PREMIUM_EMOJI_TEXT['win']} <b>Бонус 5x5 - ВЫИГРЫШ!</b>\n\n"
+        f"💰 Получено: <b>+{format_number(reward)} RCOIN</b>\n"
+        f"📊 Новый баланс: {format_number(new_user.get('balance_coin', 0))} RCOIN</blockquote>"
+    )
+    await callback.answer("💰 Выигрыш получен!", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("db5_none_"))
+async def db5_none(callback: CallbackQuery):
+    await callback.answer()
+
+
+# ==================== КОМАНДА СКЛАД (личный инвентарь) ====================
+# Сюда складываются тгп-айтемы и подарки. Показывает коллекцию предметов.
+
+@dp.message(F.text.lower().in_({"склад", "мой склад", "инвентарь", "инвент"}))
+@dp.message(Command("склад"))
+async def cmd_sklad(message: Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        await message.answer(f"{PREMIUM_EMOJI_TEXT['lock']} Ошибка данных.")
+        return
+    try:
+        inv = json.loads(user.get("inventory") or "[]")
+    except Exception:
+        inv = []
+    if not inv:
+        await message.answer(
+            f"{PREMIUM_EMOJI_TEXT['diamond']} <b>Твой склад</b>\n\n"
+            f"📦 Здесь будут предметы, найденные в ивентах.\n"
+            f"<i>Открывай «Зимний склад» и собирай коллекцию!</i>",
+            reply_markup=_event_kb([_event_btn("К ивентам", "ev_menu", "door")]))
+        return
+    lines = [f"{PREMIUM_EMOJI_TEXT['diamond']} <b>Твой склад</b> ({len(inv)} шт.)\n"]
+    for itm in inv:
+        key = itm.get("key") or "question"
+        name = itm.get("name") or "Сувенир"
+        lines.append(f"{PREMIUM_EMOJI_TEXT.get(key, '🎁')} {name} — <i>x{itm.get('qty', 1)}</i>")
+    await message.answer("\n".join(lines),
+                         reply_markup=_event_kb([_event_btn("К ивентам", "ev_menu", "door")]))
+
+
+# ==================== ПОМОЩЬ САНТЕ ЗА КОИНЫ ====================
+# Аналог удара по боссу: платишь ставку, Санта получает урон, тебе капает награда.
+
+@dp.message(F.text.lower().in_({"помочь санте", "помощь санте", "помог санте", "санте"}))
+@dp.message(Command("санте"))
+async def cmd_help_santa(message: Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        await message.reply(f"{PREMIUM_EMOJI_TEXT['lock']} Ошибка данных.")
+        return
+    parts = message.text.split()
+    amount_str = parts[1] if len(parts) > 1 else "1000"
+    cur_bal = user.get("balance_coin", 0)
+    bet, deduct = parse_bet_amount(amount_str, cur_bal)
+    if bet <= 0 or cur_bal < deduct:
+        await message.reply(f"{PREMIUM_EMOJI_TEXT['lock']} Недостаточно RCOIN! Баланс: {format_number(cur_bal)}")
+        return
+    today = _event_today()
+    if user.get("event_day") == today and user.get("event_boss_last", 0) > 0:
+        await message.reply(f"{PREMIUM_EMOJI_TEXT['lock']} Ты уже помогал Санте сегодня. Завтра!")
+        return
+    damage = _rnd.randint(10000, 120000)
+    _event_boss_hit(damage)
+    reward = damage * 2 + int(bet*0.5)
+    update_user(user_id, balance_coin=cur_bal + reward,
+                event_day=today, event_boss_last=int(time.time()),
+                event_boss_dmg=user.get("event_boss_dmg", 0) + damage)
+    boss = _event_boss_state()
+    await message.reply(
+        f"{PREMIUM_EMOJI_TEXT['win']} <b>ПОМОЩЬ САНТЕ!</b>\n\n"
+        f"💸 Потрачено: {format_number(bet)} RCOIN\n"
+        f"⚔️ Урон Санте: <b>{format_number(damage)}</b>\n"
+        f"🎁 Награда: <b>+{format_number(reward)} RCOIN</b>\n\n"
+        f"HP босса: {format_number(boss['hp'])} / {format_number(boss['max'])}\n"
+        f"<code>{_event_bar(boss['max'] - boss['hp'], boss['max'])}</code>")
 
 
 # ==================== КОМАНДА ЛОГ ====================
@@ -10732,12 +11376,25 @@ async def simple_unmute(message: Message):
 @dp.message(Command("игры"))
 async def cmd_games(message: Message):
     kb = get_games_keyboard(0)
+    # Добавляем кнопку открытия веб-аппа с ареной и играми
+    try:
+        web_btn = [
+            InlineKeyboardButton(text="🎮 Открыть Веб-Апп (арена + игры)",
+                                 web_app=WebAppInfo(url=WEBAPP_URL))
+        ]
+        outer = InlineKeyboardMarkup(inline_keyboard=[
+            *kb.inline_keyboard,
+            web_btn
+        ])
+    except Exception:
+        outer = kb
 
     await message.answer(
         f"{PREMIUM_EMOJI_TEXT['games']} <b>ВЫБЕРИТЕ ИГРУ</b>\n\n"
         "Нажмите на кнопку с названием игры,\n"
-        "чтобы узнать подробности и правила.",
-        reply_markup=kb
+        "чтобы узнать подробности и правила.\n\n"
+        "🎮 В веб-аппе — арена на коины и мини-игры.",
+        reply_markup=outer
     )
 
 
@@ -10998,14 +11655,24 @@ async def ev_stash(callback: CallbackQuery):
         await callback.answer("Приходи завтра", show_alert=True)
         return
     prize = _rnd.randint(EVENT_STASH_MIN, EVENT_STASH_MAX)
+    # Изредка из ячейки выпадает тгп-айтем (новые эмодзи зимнего ивента)
+    item_key = None
+    if _rnd.random() < 0.4:
+        item_key = _rnd.choice(["item_1", "item_2", "item_3", "item_4", "item_5",
+                                "item_6", "item_7", "item_8", "item_9"])
     total = user.get("balance_coin", 0) + prize
     update_user(callback.from_user.id, balance_coin=total,
                 event_day=today, event_stash_last=used + 1,
                 event_points=user.get("event_points", 0) + 1)
+    item_line = ""
+    if item_key:
+        item_line = (f"\n🎁 <b>Найден айтем:</b> "
+                     f"{PREMIUM_EMOJI_TEXT[item_key]} <i>Зимний сувенир #{item_key[-1]}</i>\n"
+                     f"<blockquote>Эмодзи добавлен в твою коллекцию ивента!</blockquote>")
     await callback.message.edit_text(
         f"{PREMIUM_EMOJI_TEXT['diamond']} <b>ЗИМНИЙ СКЛАД</b>\n\n"
         f"{PREMIUM_EMOJI_TEXT['win']} Ячейка {used + 1}/{EVENT_STASH_CELLS}\n"
-        f"Приз: <b>+{format_number(prize)} RCOIN</b>\n"
+        f"Приз: <b>+{format_number(prize)} RCOIN</b>{item_line}\n"
         f"{PREMIUM_EMOJI_TEXT['balance']} Баланс: {format_number(total)}",
         reply_markup=_event_kb(
             [_event_btn("Открыть ещё", "ev_stash", "diamond")]
@@ -11136,6 +11803,98 @@ async def ev_quest_claim(callback: CallbackQuery):
     await ev_quests(callback)
 
 
+# ==================== ВЕБ-АПП (HTML-панель) ====================
+_WEBAPP_HTML = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Рубин — Арена</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: linear-gradient(135deg,#0f2027,#203a43,#2c5364); color:#fff; min-height:100vh; padding:16px; }
+  .card { background: rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.15); border-radius:16px; padding:16px; margin-bottom:14px; backdrop-filter: blur(6px); }
+  h1 { font-size:22px; margin-bottom:4px; }
+  h2 { font-size:16px; margin-bottom:8px; color:#ffd166; }
+  .g { font-size:13px; color:#cfe; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
+  .game { background:rgba(255,255,255,.12); border-radius:12px; padding:12px; text-align:center; cursor:pointer; }
+  .game:hover { background:rgba(255,255,255,.2); }
+  .game b { display:block; font-size:13px; margin-top:4px; }
+  .arena-stats { display:flex; gap:10px; flex-wrap:wrap; }
+  .stat { background:rgba(0,0,0,.3); border-radius:10px; padding:8px 12px; font-size:13px; }
+  .btn { display:block; width:100%; padding:12px; margin-top:10px; border:none; border-radius:12px; background:linear-gradient(90deg,#11998e,#38ef7d); color:#fff; font-size:16px; font-weight:700; cursor:pointer; }
+  .btn:active { transform:scale(.98); }
+  .mini { font-size:12px; opacity:.75; margin-top:10px; }
+  #ball { font-size:20px; transition:margin-left 1.5s ease; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🎰 Рубин Казино</h1>
+  <div class="g">Арена на коины и мини-игры</div>
+  <div class="arena-stats">
+    <div class="stat">💰 Баланс: <b id="bal">—</b></div>
+    <div class="stat">👥 В лобби: <b id="lobby">0</b></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>⚔️ Арена</h2>
+  <div class="g">Ставь ставку, жди соперника — шарик сам определит победителя.</div>
+  <input id="bet" type="number" min="100" placeholder="Ставка в RCOIN" value="500" style="width:100%;padding:12px;border-radius:12px;border:none;margin-top:10px;font-size:16px;">
+  <button class="btn" onclick="startArena()">⚔️ Встать в арену</button>
+  <div class="mini" id="arenaInfo">Введите ставку и ждите второго игрока.</div>
+</div>
+
+<div class="card">
+  <h2>🎮 Мини-игры</h2>
+  <div class="grid">
+    <div class="game" onclick="miniGame('cube')">🎲<b>Кубик</b></div>
+    <div class="game" onclick="miniGame('dice')">🎯<b>Рулетка</b></div>
+    <div class="game" onclick="miniGame('coin')">🪙<b>Орёл/Решка</b></div>
+    <div class="game" onclick="miniGame('card')">🃏<b>Карта</b></div>
+  </div>
+  <div class="mini" id="miniInfo">Выбери игру.</div>
+</div>
+
+<div class="card" style="display:none" id="ballCard">
+  <h2>🎱 Шар катится</h2>
+  <div id="ball">🎱</div>
+</div>
+
+<script>
+  const tg = window.Telegram ? Telegram.WebApp : null;
+  if (tg) { tg.ready(); tg.expand(); }
+  function setText(id, t){ const el=document.getElementById(id); if(el) el.textContent=t; }
+  setText('bal', '?');
+
+  function startArena(){
+    const bet = parseInt(document.getElementById('bet').value) || 100;
+    setText('arenaInfo', '⚔️ Ставка ' + bet + ' RCOIN. Ищем соперника...');
+    setText('lobby', '1');
+    const ballCard = document.getElementById('ballCard');
+    ballCard.style.display = 'block';
+    document.getElementById('ball').textContent = '🎱';
+    setTimeout(()=>{ document.getElementById('ball').style.marginLeft='60%'; }, 200);
+    setTimeout(()=>{
+      const win = Math.random() < 0.5;
+      ballCard.style.display='none';
+      setText('arenaInfo', (win ? '🎉 Победа! Ты забрал ' + bet*2*0.9 + ' RCOIN (симуляция)' : '😔 Соперник выиграл. Попробуй ещё!'));
+      setText('lobby','0');
+    }, 1600);
+  }
+
+  function miniGame(g){
+    const names = {cube:'🎲 Кубик', dice:'🎰 Рулетка', coin:'🪙 Орёл/Решка', card:'🃏 Карта'};
+    setText('miniInfo', 'Игра: ' + (names[g]||g) + ' — открывается в боте командой!');
+  }
+</script>
+</body>
+</html>
+"""
+
+
 # ==================== ЗАПУСК ====================
 
 async def main():
@@ -11157,8 +11916,12 @@ async def main():
         async def _health(_request):
             return _web.Response(text="Rubin OK")
 
+        async def _webapp(_request):
+            return _web.Response(text=_WEBAPP_HTML, content_type="text/html; charset=utf-8")
+
         _app = _web.Application()
         _app.router.add_get("/", _health)
+        _app.router.add_get("/webapp", _webapp)
         _runner = _web.AppRunner(_app)
         await _runner.setup()
         _port = int(os.getenv("PORT") or 8080)
@@ -11168,7 +11931,96 @@ async def main():
         logger.warning(f"Веб-сервер: {exc}")
 
     logger.info("Начинаю polling...")
+    # Фоновая задача авто-чеков: пятница 23:00 МСК — всем по 1кк, суббота — всем
+    asyncio.create_task(auto_check_loop())
     await dp.start_polling(bot, skip_updates=True)
+
+
+_auto_check_last = {"fri": "", "sat": ""}
+
+
+async def auto_check_loop():
+    """Каждые 30 сек проверяет день/время и раздаёт чеки из казны."""
+    while True:
+        try:
+            await _maybe_auto_check()
+        except Exception as e:
+            logger.error(f"auto_check_loop: {e}")
+        await asyncio.sleep(30)
+
+
+async def _maybe_auto_check():
+    import zoneinfo
+    try:
+        tz = zoneinfo.ZoneInfo("Europe/Moscow")
+    except Exception:
+        tz = None
+    now_msk = datetime.now(tz) if tz else datetime.utcnow()
+    weekday = now_msk.weekday()  # 0=пн ... 4=пт, 5=сб
+    day_key = now_msk.strftime("%Y-%m-%d")
+    # Пятница 23:00 МСК — всем игрокам по 1кк (1 000 000 RCOIN)
+    if weekday == 4 and now_msk.hour == 23 and now_msk.minute == 0:
+        if _auto_check_last["fri"] != day_key:
+            _auto_check_last["fri"] = day_key
+            await _distribute_auto_check(1_000_000)
+    # Суббота — всем игрокам (ивент-чек)
+    if weekday == 5:
+        if _auto_check_last["sat"] != day_key:
+            await _distribute_saturday_check()
+            _auto_check_last["sat"] = day_key
+
+
+async def _distribute_auto_check(amount: int):
+    """Даёт amount каждому пользователю из казны."""
+    users = get_all_users()
+    bal_coin, bal_point = get_treasury_balance()
+    total = amount * len(users)
+    if bal_coin < total:
+        logger.warning(f"Авто-чек: в казне недостаточно ({bal_coin} < {total})")
+        return
+    new_treasury = bal_coin - total
+    conn = sqlite3.connect(DB_FILE)
+    for uid in users:
+        cur = conn.cursor()
+        row = cur.execute("SELECT balance_coin FROM users WHERE user_id=?", (uid,)).fetchone()
+        if row:
+            new_b = (row[0] or 0) + amount
+            cur.execute("UPDATE users SET balance_coin=? WHERE user_id=?", (new_b, uid))
+    conn.commit()
+    conn.close()
+    update_treasury(new_treasury, bal_point)
+    logger.info(f"Авто-чек {format_number(amount)} RCOIN раздан {len(users)} игрокам. Казна: {format_number(new_treasury)}")
+
+
+async def _distribute_saturday_check():
+    """Суббота: каждому из казны выдаётся ивент-чек-item (сумма) и предмет в инвентарь."""
+    users = get_all_users()
+    bal_coin, bal_point = get_treasury_balance()
+    amount = 500_000
+    total = amount * len(users)
+    if bal_coin < total:
+        logger.warning(f"Субботний чек: в казне недостаточно ({bal_coin})")
+        return
+    new_treasury = bal_coin - total
+    conn = sqlite3.connect(DB_FILE)
+    import random
+    cur = conn.cursor()
+    for uid in users:
+        row = cur.execute("SELECT balance_coin, inventory FROM users WHERE user_id=?", (uid,)).fetchone()
+        if row:
+            new_b = (row[0] or 0) + amount
+            inv = []
+            try:
+                inv = json.loads(row[1] or "[]")
+            except Exception:
+                pass
+            inv.append({"key": f"item_{random.randint(1,9)}", "name": "Субботний сувенир", "qty": 1})
+            cur.execute("UPDATE users SET balance_coin=?, inventory=? WHERE user_id=?",
+                        (new_b, json.dumps(inv), uid))
+    conn.commit()
+    conn.close()
+    update_treasury(new_treasury, bal_point)
+    logger.info(f"Субботний чек раздан {len(users)} игрокам. Казна: {format_number(new_treasury)}")
 
 
 if __name__ == "__main__":
