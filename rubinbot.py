@@ -47,7 +47,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("rcoin")
 
 # ============================ КОНФИГ ============================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9165228951:AAFqAxLfwHc83TMlCib7awt0chj4mY_Ngt8").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "5257618084") or 0)
 ADMIN_IDS = {OWNER_ID} | {int(v) for v in re.findall(r"\d+", os.getenv("ADMIN_IDS", ""))}
 ADMIN_IDS.discard(0)
