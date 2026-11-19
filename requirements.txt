@@ -1,4 +1,2 @@
-aiogram>=3.13
-aiosqlite
-aiohttp
-Pillow
+aiogram>=3.13,<4
+aiosqlite>=0.20
