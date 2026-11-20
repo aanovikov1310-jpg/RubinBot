@@ -18,8 +18,12 @@ import random
 import re
 import sqlite3
 import re as _db_re
-import psycopg2
-from psycopg2.extras import RealDictCursor
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:  # локальный запуск на SQLite не требует psycopg2
+    psycopg2 = None
+    RealDictCursor = None
 import string
 import sys
 import time
@@ -91,7 +95,7 @@ EMOJI_IDS = {
     "hi_lo": "5926783847453692661", "ttt": "5222158908805632010", "door": "5259067694396474462",
     "profile": "5202216593966244027", "balance": "5197491391206281629", "bank": "5881948563591666817",
     "diamond": "5438496463044752972", "star": "5438496463044752972", "lock": "5305621469134857194",
-    "nft": "5262517101578443800", "referral": "5942877472163892475", "check": "5444856076954520455",
+    "nft": "5262517101578443800", "referral": "5942877472163892475", "check": "5810189259327413739",
     "treasury": "5798678875823153004", "win": "5305747221996177787", "lose": "5305474786400690766",
     "settings": "5258096772776991776", "admin": "6129805886383723340", "donate": "5438496463044752972",
     "ad": "5213391561999526028", "market": "5278702045883292456", "question": "5436113877181941026",
@@ -159,12 +163,14 @@ _fb_hits = [0]
 
 
 def _strip_method(method):
-    """Копия запроса без кастомных эмодзи в тексте и без иконок на кнопках (или None, если нечего убирать)."""
+    """Копия запроса без кастомных и обычных эмодзи (или None, если нечего убирать)."""
     upd = {}
     for f in ("text", "caption"):
         v = getattr(method, f, None)
-        if isinstance(v, str) and "<tg-emoji" in v:
-            upd[f] = TGE_RE.sub(r"\1", v)
+        if isinstance(v, str) and v:
+            nv = _strip_emoji_text(v)
+            if nv != v:
+                upd[f] = nv
     rm = getattr(method, "reply_markup", None)
     if isinstance(rm, InlineKeyboardMarkup):
         rows, changed = [], False
@@ -175,8 +181,12 @@ def _strip_method(method):
                 if "icon_custom_emoji_id" in d:
                     d.pop("icon_custom_emoji_id")
                     changed = True
-                    if d.get("text") == "\u2800":
-                        d["text"] = "❔"
+                clean = _strip_emoji_text(d.get("text") or "")
+                if clean == "…" or not clean.strip():
+                    clean = "•"
+                if clean != d.get("text"):
+                    changed = True
+                d["text"] = clean[:64]
                 nr.append(InlineKeyboardButton(**d))
             rows.append(nr)
         if changed:
@@ -205,7 +215,8 @@ class EmojiFallback(BaseRequestMiddleware):
 async def validate_emoji_ids():
     """Оставляем только те ID эмодзи, которые реально существуют."""
     global EMOJI_IDS
-    ids = sorted(set(EMOJI_IDS.values()))
+    badges = globals().get("BADGES") or {}
+    ids = sorted(set(EMOJI_IDS.values()) | {str(b.get("id")) for b in badges.values() if b.get("id")})
     valid = set()
     try:
         for i in range(0, len(ids), 200):
@@ -218,7 +229,158 @@ async def validate_emoji_ids():
     if bad:
         log.warning("Недействительные ID эмодзи, заменены обычными: %s", ", ".join(bad))
     EMOJI_IDS = {k: v for k, v in EMOJI_IDS.items() if v in valid}
+    for key, b in badges.items():
+        if b.get("id") and str(b["id"]) not in valid:
+            log.warning("Недействительный ID галочки %s — включаю обычный символ", key)
+            b["id"] = ""
     log.info("Рабочих премиум-эмодзи: %s из %s", len(EMOJI_IDS), len(EMOJI_IDS) + len(bad))
+
+
+# ---------- единая замена обычных эмодзи на кастомные ----------
+# Ключ — обычный эмодзи, значение — ключ EMOJI_IDS / BADGES.
+EMOJI_ALIASES = {
+    "🎮": "games", "🎲": "dice", "🎰": "spin", "🎡": "fortune", "💣": "mines",
+    "🚀": "crash", "🏀": "basket", "🎯": "darts", "🃏": "blackjack", "☀": "sun",
+    "🏹": "hunt", "⚽": "football", "🔺": "pyramid", "⛏": "miner", "🎴": "hi_lo",
+    "❌": "ttt", "🚪": "door", "👤": "profile", "💰": "balance", "💸": "balance",
+    "🏦": "bank", "💎": "diamond", "⭐": "star", "🔒": "lock", "🖼": "nft",
+    "👥": "referral", "✅": "check", "🏛": "treasury", "🏆": "win", "💔": "lose",
+    "⚙": "settings", "👑": "admin", "🎁": "donate", "📢": "ad", "🛒": "market",
+    "❔": "question", "❄": "item_1", "🍬": "item_2", "🧦": "item_3", "🧤": "item_4",
+    "🍪": "item_5", "🔔": "item_7", "🧊": "item_8", "☕": "item_9",
+    "☑": "black", "✔": "blue", "💠": "rubin", "🛡": "moder", "🎧": "support",
+    "🧪": "tester", "🎄": "ny", "👨": "dev",
+}
+EMOJI_SEQUENCES = {
+    "👨‍💻": "dev", "☑️": "black", "✔️": "blue", "❄️": "item_1", "☀️": "sun",
+    "⚙️": "settings", "🎄": "ny",
+}
+EMOJI_RANGES = re.compile(
+    "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u2300-\u23FF\uFE0F\u200D\u20E3]"
+)
+EMOJI_SEQ_RE = re.compile("|".join(re.escape(s) for s in sorted(EMOJI_SEQUENCES, key=len, reverse=True)))
+EMOJI_ANY_RE = re.compile("(?:" + EMOJI_SEQ_RE.pattern + ")|(?:" + EMOJI_RANGES.pattern + ")")
+
+
+def _emoji_id(key: Optional[str]) -> str:
+    if not key:
+        return ""
+    eid = EMOJI_IDS.get(key)
+    if not eid:
+        b = globals().get("BADGES") or {}
+        eid = (b.get(key) or {}).get("id")
+    return str(eid) if eid else ""
+
+
+def _emoji_key(token: str) -> Optional[str]:
+    key = EMOJI_SEQUENCES.get(token) or EMOJI_ALIASES.get(token)
+    if not key and token.endswith("\ufe0f"):
+        key = EMOJI_ALIASES.get(token[:-1])
+    return key
+
+
+def _replace_emoji_chunk(text: str) -> str:
+    def repl(m):
+        token = m.group(0)
+        if token in ("\ufe0f", "\u200d", "\u20e3"):
+            return ""
+        key = _emoji_key(token)
+        eid = _emoji_id(key)
+        if eid and PREMIUM_EMOJI:
+            return f'<tg-emoji emoji-id="{eid}">{token}</tg-emoji>'
+        return ""
+    return EMOJI_ANY_RE.sub(repl, text)
+
+
+def _tidy_text(text: str) -> str:
+    lines = []
+    for line in text.split("\n"):
+        line = re.sub(r"[ \t]{2,}", " ", line).strip() if line.strip() else ""
+        lines.append(line)
+    return "\n".join(lines)
+
+
+HTML_TAG_RE = re.compile(r"<tg-emoji\b[^>]*>.*?</tg-emoji>|<[^>]+>", re.S)
+
+
+def premiumize_text(text: str) -> str:
+    """Заменяет обычные эмодзи на <tg-emoji>, не трогая HTML-разметку."""
+    if not text or not isinstance(text, str):
+        return text
+    out, last = [], 0
+    for m in HTML_TAG_RE.finditer(text):
+        out.append(_replace_emoji_chunk(text[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_replace_emoji_chunk(text[last:]))
+    s = _tidy_text("".join(out))
+    if not re.sub(r"<[^>]+>", "", s).strip():
+        return "…"
+    return s
+
+
+def premiumize_button(b: InlineKeyboardButton) -> InlineKeyboardButton:
+    d = b.model_dump(exclude_none=True)
+    text = str(d.get("text") or "")
+    icon = d.get("icon_custom_emoji_id")
+    m = TGE_RE.search(text)
+    if m and not icon:
+        im = re.search(r'emoji-id="(\d+)"', m.group(0))
+        if im:
+            icon = im.group(1)
+    text = TGE_RE.sub("", text)
+    stripped = text.strip()
+    m2 = EMOJI_SEQ_RE.match(stripped) or EMOJI_ANY_RE.match(stripped)
+    if m2 and not icon:
+        key = _emoji_key(m2.group(0))
+        if key:
+            icon = _emoji_id(key)
+    text = re.sub(r"[ \t]{2,}", " ", EMOJI_ANY_RE.sub("", text)).strip()
+    if not text:
+        text = "\u2800" if icon else "•"
+    d["text"] = text[:64]
+    if icon and PREMIUM_ICONS:
+        d["icon_custom_emoji_id"] = str(icon)
+    else:
+        d.pop("icon_custom_emoji_id", None)
+    return InlineKeyboardButton(**d)
+
+
+def premiumize_markup(markup):
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return markup
+    rows = [[premiumize_button(b) for b in row] for row in markup.inline_keyboard]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+class PremiumOut(BaseRequestMiddleware):
+    """Приводит исходящие сообщения к премиум-эмодзи и чистит обычные."""
+
+    async def __call__(self, make_request, bot, method):
+        if not hasattr(method, "parse_mode"):
+            return await make_request(bot, method)
+        upd = {}
+        for f in ("text", "caption"):
+            v = getattr(method, f, None)
+            if isinstance(v, str) and v:
+                nv = premiumize_text(v)
+                if nv != v:
+                    upd[f] = nv
+        rm = getattr(method, "reply_markup", None)
+        if isinstance(rm, InlineKeyboardMarkup):
+            nrm = premiumize_markup(rm)
+            if nrm is not None:
+                upd["reply_markup"] = nrm
+        if upd:
+            method = method.model_copy(update=upd)
+        return await make_request(bot, method)
+
+
+def _strip_emoji_text(text: str) -> str:
+    s = TGE_RE.sub("", text or "")
+    s = EMOJI_ANY_RE.sub("", s)
+    s = _tidy_text(s)
+    return s or "…"
 
 
 # ============================ УТИЛИТЫ ============================
@@ -362,6 +524,8 @@ class _CompatConnection:
 
 def db_connect(path=None, timeout=30):
     if DATABASE_URL:
+        if psycopg2 is None:
+            raise RuntimeError("DATABASE_URL задан, но psycopg2 не установлен: pip install psycopg2-binary")
         url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
         return _CompatConnection(psycopg2.connect(url, connect_timeout=timeout, sslmode="require"))
     return sqlite3.connect(str(path or DB_FILE), timeout=timeout)
@@ -444,7 +608,7 @@ def ensure_cols(table: str, cols: Dict[str, str]):
         if name not in have:
             try:
                 x(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-            except (sqlite3.OperationalError, psycopg2.Error) as e:
+            except Exception as e:
                 log.warning("ALTER %s.%s: %s", table, name, e)
 
 
@@ -652,6 +816,9 @@ def settle(uid: int, game: str, bet: int, payout: int, detail: str = "") -> int:
 # ---------- ответы ----------
 async def ans(cb: CallbackQuery, text: str = None, alert: bool = False):
     try:
+        if text:
+            text = re.sub(r"\s{2,}", " ", EMOJI_ANY_RE.sub("", str(text))).strip()
+            text = text[:190]
         await cb.answer(text, show_alert=alert)
     except Exception:
         pass
@@ -1768,8 +1935,13 @@ async def cb_ttt(cb: CallbackQuery):
 # ============================ АРЕНА В ЧАТЕ ============================
 ARENAS: Dict[int, dict] = {}
 _arena_seq = [0]
-ARENA_COLORS = ["🟥", "🟦", "🟩", "🟨", "🟪", "🟧"]
+ARENA_MARKS = ["🟥", "🟦", "🟩", "🟨", "🟪", "🟧"]
 ARENA_RING = 20
+
+
+def arena_name(u: Dict[str, Any]) -> str:
+    n = u.get("display_name") or u.get("username") or str(u["user_id"])
+    return re.sub(r"<[^>]+>", "", str(n))[:24]
 
 
 def arena_pick(bets: Dict[int, int]) -> int:
@@ -1779,16 +1951,24 @@ def arena_pick(bets: Dict[int, int]) -> int:
 
 def arena_text(a: dict, extra: str = "") -> str:
     pl = a["players"]
-    lines = [f"{ARENA_COLORS[i]} {esc(n)}" for i, (uid, n) in enumerate(pl.items())]
-    pct = f" — шанс каждого {100 // max(1, len(pl))}%" if pl else ""
-    return (f"{E('games')} <b>АРЕНА</b> · ставка <b>{fmt(a['bet'])}</b> RCOIN\n" + "\n".join(lines) +
-            f"\n\n💰 Банк: <b>{fmt(a['bet'] * len(pl))}</b>{pct}\n{extra}")
+    n = len(pl)
+    bank = a["bet"] * n
+    lines = [f"{E('games')} <b>АРЕНА</b> · ставка <b>{fmt(a['bet'])}</b> RCOIN",
+             f"{E('balance')} Банк: <b>{fmt(bank)}</b> RCOIN · игроков <b>{n}/{len(ARENA_MARKS)}</b>"]
+    if pl:
+        lines.append("")
+        for i, (uid, name) in enumerate(pl.items()):
+            lines.append(f"{ARENA_MARKS[i]} <b>{esc(name)}</b> · {fmt(a['bet'])} · {100 / n:.0f}%")
+    else:
+        lines.append("<i>Пока никого нет.</i>")
+    lines.append("")
+    return "\n".join(lines) + extra
 
 
 def arena_kb(aid: int, a: dict) -> InlineKeyboardMarkup:
-    rows = [[btn(f"⚔️ Вступить ({fmt(a['bet'])})", f"ar:j:{aid}")]]
+    rows = [[btn(f"Вступить · {fmt(a['bet'])}", f"ar:j:{aid}", icon="games")]]
     if len(a["players"]) == 1:
-        rows.append([btn("↩️ Отменить арену", f"ar:x:{aid}")])
+        rows.append([btn("Отменить арену", f"ar:x:{aid}", icon="door")])
     return kb(*rows)
 
 
@@ -1806,7 +1986,7 @@ async def g_arena(m: Message):
         return
     _arena_seq[0] += 1
     aid = _arena_seq[0]
-    a = {"bet": bet, "players": {u["user_id"]: re.sub(r"<[^>]+>", "", uname(u, False))}, "started": False, "chat": m.chat.id, "msg": None}
+    a = {"bet": bet, "players": {u["user_id"]: arena_name(u)}, "started": False, "chat": m.chat.id, "msg": None}
     ARENAS[aid] = a
     a["msg"] = await m.reply(arena_text(a, "⏳ Ждём соперника..."), reply_markup=arena_kb(aid, a))
 
@@ -1827,11 +2007,11 @@ async def cb_arena(cb: CallbackQuery):
         return await ans(cb)
     if uid in a["players"]:
         return await ans(cb, "Ты уже в арене", True)
-    if len(a["players"]) >= len(ARENA_COLORS):
+    if len(a["players"]) >= len(ARENA_MARKS):
         return await ans(cb, "Арена заполнена", True)
     if not spend(uid, a["bet"]):
         return await ans(cb, "Недостаточно RCOIN", True)
-    a["players"][uid] = re.sub(r"<[^>]+>", "", uname(get_user(uid), False))
+    a["players"][uid] = arena_name(get_user(uid))
     a["msg"] = cb.message
     await ans(cb, "Ты в арене!")
     if len(a["players"]) == 2:
@@ -1863,15 +2043,15 @@ async def arena_run(aid: int):
         n, per = len(ids), ARENA_RING // len(ids)
         ring = []
         for i, uid in enumerate(ids):
-            ring += [ARENA_COLORS[i]] * (per + (1 if i < ARENA_RING - per * n else 0))
+            ring += [ARENA_MARKS[i]] * (per + (1 if i < ARENA_RING - per * n else 0))
         wi = ids.index(winner)
-        wcells = [i for i, c in enumerate(ring) if c == ARENA_COLORS[wi]]
+        wcells = [i for i, c in enumerate(ring) if c == ARENA_MARKS[wi]]
         target = random.choice(wcells)
         start = random.randrange(ARENA_RING)
         total = ARENA_RING * 2 + (target - start) % ARENA_RING
         for k in range(1, 8):
             pos = (start + int(total * (1 - (1 - k / 7) ** 2.2))) % ARENA_RING if k < 7 else target
-            line = "".join("⚪" if i == pos else c for i, c in enumerate(ring))
+            line = "".join("●" if i == pos else c for i, c in enumerate(ring))
             await _arena_edit(a, f"{E('games')} <b>АРЕНА</b> — шарик катится...\n\n{line}")
             await asyncio.sleep(0.9 + k * 0.15)
         pool = a["bet"] * n
@@ -1880,10 +2060,10 @@ async def arena_run(aid: int):
         prize = pool - rake
         for uid in ids:
             settle(uid, "arena", a["bet"], prize if uid == winner else 0, "arena")
-        line = "".join("⚪" if i == target else c for i, c in enumerate(ring))
+        line = "".join("●" if i == target else c for i, c in enumerate(ring))
         await _arena_edit(a, box(f"{E('win')} <b>АРЕНА — РЕЗУЛЬТАТ</b>", line,
-                                 f"🏆 Победитель: <b>{esc(pl[winner])}</b> {ARENA_COLORS[wi]}",
-                                 f"💰 Выигрыш: <b>+{fmt(prize - a['bet'])}</b> RCOIN (банк {fmt(pool)}, комиссия {fmt(rake)})"))
+                                 f"Победитель: <b>{esc(pl[winner])}</b> {ARENA_MARKS[wi]}",
+                                 f"Выигрыш: <b>+{fmt(prize - a['bet'])}</b> RCOIN (банк {fmt(pool)}, комиссия {fmt(rake)})"))
     except Exception:
         log.exception("arena")
         for uid in list(a["players"]):
@@ -3722,18 +3902,18 @@ async def cb_snowman(cb: CallbackQuery):
 
 # ============================ ЗИМНИЕ МИНИ-ИГРЫ (ивенты) ============================
 SNOW_GAMES = {
-    1: {"key": "snow", "name": "Снежки", "bp": (1.5, 2.2), "max": 0, "min": 5_000,
-        "desc": "Собери снежки в точку: 3 из 3 — победа"},
-    2: {"key": "ice", "name": "Ледяная дорожка", "bp": (1.8, 2.0), "max": 0, "min": 10_000,
-        "desc": "Перепрыгни в прорубь от 1 до 5"},
-    3: {"key": "bear", "name": "Белый медведь", "bp": (2.0, 2.0), "max": 0, "min": 10_000,
-        "desc": "Угадай лапу: из 3 лап одна с рыбой"},
-    4: {"key": "santa", "name": "Сани Санты", "bp": (1.6, 2.5), "max": 0, "min": 25_000,
-        "desc": "Доведи сани: 5 000 км"} ,
-    5: {"key": "gift", "name": "Подарки", "bp": (1.7, 2.0), "max": 0, "min": 20_000,
-        "desc": "Из трёх коробок одна с подарком"},
-    6: {"key": "mint", "name": "Пряничный забег", "bp": (1.9, 2.0), "max": 0, "min": 15_000,
-        "desc": "Добеги до дома: 5 шагов"},
+    1: {"key": "snow", "name": "Снежки", "bp": (4.2, 4.2), "max": 0, "min": 5_000,
+        "desc": "Три броска: 3 из 3 — победа x4.2"},
+    2: {"key": "ice", "name": "Ледяная дорожка", "bp": (5.0, 5.0), "max": 0, "min": 10_000,
+        "desc": "Угадай прорубь из 5 — победа x5"},
+    3: {"key": "bear", "name": "Белый медведь", "bp": (3.0, 3.0), "max": 0, "min": 10_000,
+        "desc": "Угадай лапу с рыбой из 3 — победа x3"},
+    4: {"key": "santa", "name": "Сани Санты", "bp": (5.0, 5.0), "max": 0, "min": 25_000,
+        "desc": "Довези сани до 5 000 км — победа x5"},
+    5: {"key": "gift", "name": "Подарки", "bp": (3.0, 3.0), "max": 0, "min": 20_000,
+        "desc": "Найди подарок в одной из трёх коробок — победа x3"},
+    6: {"key": "mint", "name": "Пряничный забег", "bp": (5.0, 5.0), "max": 0, "min": 15_000,
+        "desc": "Доберись до дома за 5 шагов — победа x5"},
 }
 EV_POT = "ev_pot"
 
@@ -3756,7 +3936,7 @@ def ev_games_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
     for i, g in SNOW_GAMES.items():
         lines.append(f"{E('item_' + str(i))} <b>{g['name']}</b> — {g['desc']}\n   x{g['bp'][0]:.2f}–{g['bp'][1]:.2f} · от {fmt(g['min'])}")
     lines.append("\nВыбери игру и ставку: <code>снежки 10к</code>")
-    rows = [[btn(f"{E('item_' + str(i))} {g['name']}", f"gm:{g['key']}")] for i, g in SNOW_GAMES.items()]
+    rows = [[btn(g["name"], f"gm:{g['key']}", icon=f"item_{i}")] for i, g in SNOW_GAMES.items()]
     rows.append([btn("Назад", "menu:events", "door")])
     return "\n".join(lines), kb(*rows)
 
@@ -3793,27 +3973,28 @@ def run_snow(uid: int, bet: int, key: str) -> str:
     payout, detail = 0, ""
     if key == "snow":
         hits = sum(random.random() < (0.62 + 0.03 * bonus_mult(uid)) for _ in range(3))
-        payout = int(bet * [0, 1.2, 2.0, 3.4][hits]) if hits == 3 else 0
+        payout = int(bet * 4.2) if hits == 3 else 0
         detail = f"Попаданий: <b>{hits}/3</b>"
     elif key == "ice":
         pick, hole = random.randint(1, 5), random.randint(1, 5)
         payout = bet * 5 if pick == hole else 0
-        detail = f"Ты прыгнул в прорубь №{pick}, лёд был на №{hole}" if pick != hole else f"Промахнулся в прорубь №{hole}!"
+        detail = (f"Ты угадал прорубь №{hole} — победа x5!" if pick == hole
+                  else f"Лёд выдержал. Прорубь была на №{hole}.")
     elif key == "bear":
         pick, fish = random.choice([1, 2, 3]), random.choice([1, 2, 3])
         payout = bet * 3 if pick == fish else 0
-        detail = f"Лапа {pick}: {'🐟 есть рыба!' if pick == fish else 'пусто'}"
+        detail = f"Лапа {pick}: {'есть рыба!' if pick == fish else 'пусто'}"
     elif key == "santa":
-        step = random.choice([0, 1800, 2600, 5000, 5000, 5000])
-        payout = int(bet * (1 + step / 1000)) if step >= 5000 else 0
-        detail = f"Сани проехали <b>{step:,}</b> км".replace(",", " ")
+        step = random.choice([0, 1000, 2000, 3000, 4000, 5000])
+        payout = bet * 5 if step >= 5000 else 0
+        detail = f"Сани проехали <b>{step:,}</b> из 5 000 км".replace(",", " ")
     elif key == "gift":
         pick, gift = random.choice([1, 2, 3]), random.choice([1, 2, 3])
-        payout = bet * 2 if pick == gift else 0
+        payout = bet * 3 if pick == gift else 0
         detail = f"Ты открыл коробку №{pick}: {'подарок!' if pick == gift else 'мишура'}"
     else:
         step = random.randint(1, 5)
-        payout = int(bet * (1 + 0.4 * step)) if step == 5 else 0
+        payout = bet * 5 if step == 5 else 0
         detail = f"Пряничный человечек прошёл {step}/5 шагов"
     settle(uid, key, bet, payout, detail)
     if payout > bet:
@@ -4005,6 +4186,8 @@ ADMIN_ACTIONS = {
     "rank_admin": ("👑 Ранг ADMIN", True, []),
     "rank_donater": ("💵 Ранг DONATER", True, []),
     "rank_official": ("✅ Ранг VERIFIED", True, []),
+    "rank_custom": ("🎖 Личный ранг", True, ["Название ранга (до 32 символов)"]),
+    "rank_owner": ("👑 Ранг ВЛАДЕЛЕЦ", True, []),
     "rank_clear": ("🗑 Снять ранги", True, []),
     "treasury": ("🏦 Доступ к казне (вкл/выкл)", True, []),
     "info": ("ℹ️ Инфо об игроке", True, []),
@@ -4023,6 +4206,8 @@ def admin_kb() -> InlineKeyboardMarkup:
               [a("take_coin"), a("take_rbp")], [a("take_stars")],
               [a("reset_coin"), a("reset_bank")], [a("reset_rbp"), a("reset_all")],
               [a("rank_scammer"), a("rank_admin")], [a("rank_donater"), a("rank_official")],
+              [a("rank_custom"), a("rank_owner")],
+              [btn("🎖 Выдать себе", "adm:self", icon="admin")],
               [a("rank_clear"), a("treasury")],
               [btn("📊 Статистика", "adm:stats"), btn("👥 Игроки", "adm:users")],
               [a("mailing"), btn("💾 Выгрузка БД", "adm:export")],
@@ -4072,6 +4257,17 @@ def admin_exec(action: str, tid: Optional[int], a: List[str], by: int) -> str:
     elif action == "unban":
         update_user(tid, banned_until=0, ban_reason="", muted_until=0, mute_reason="")
     elif action.startswith("rank_"):
+        if action == "rank_custom":
+            title = (a[0] if a else "").strip()[:32] or "Новичок"
+            update_user(tid, rank_title=title, is_scammer=0, is_donater=0, is_official=1)
+            return f"🎖 Личный ранг «{esc(title)}» выдан {nm} ({tid})"
+        if action == "rank_owner":
+            if by != OWNER_ID:
+                return "⛔ Ранг владельца может выдать только владелец."
+            update_user(tid, rank_title="Владелец", is_official=1)
+            return f"👑 Ранг владельца выдан {nm} ({tid})"
+        if action == "rank_clear" and tid == OWNER_ID:
+            return "⛔ Нельзя снять ранги у владельца."
         flags = dict(is_scammer=0, is_admin_rank=0, is_donater=0, is_official=0)
         names = {"rank_scammer": ("is_scammer", "SCAMMER"), "rank_admin": ("is_admin_rank", "ADMIN"),
                  "rank_donater": ("is_donater", "DONATER"), "rank_official": ("is_official", "VERIFIED")}
@@ -4121,11 +4317,43 @@ async def _dm(uid: int, text: str):
         pass
 
 
+def admin_self_view(uid: int):
+    rank = get_user(uid)["rank_title"] or "Новичок"
+    text = (f"{E('admin')} <b>ВЫДАТЬ СЕБЕ</b>\n\n"
+            f"Твой ранг: <b>{esc(rank)}</b>\n"
+            "Выбери галочку или задай личный ранг.")
+    rows = [[btn(BADGES[b]["title"], f"adm:selfb:{b}", icon=b)]
+            for b in BADGE_ORDER if b != "dev" or uid == OWNER_ID]
+    rows.append([btn("🎖 Свой ранг", "adm:selfrank")])
+    rows.append([btn("Назад", "adm:menu", "door")])
+    return text, kb(*rows)
+
+
 @dp.callback_query(F.data.startswith("adm:"))
 async def cb_admin(cb: CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id):
         return await ans(cb, "Нет прав", True)
     action = cb.data.split(":")[1]
+    if action == "menu":
+        await safe_edit(cb, f"{E('admin')} <b>АДМИН-ПАНЕЛЬ</b>\n\nВыберите действие:", admin_kb())
+        return await ans(cb)
+    if action == "self":
+        t, k = admin_self_view(cb.from_user.id)
+        await safe_edit(cb, t, k)
+        return await ans(cb)
+    if action.startswith("selfb"):
+        parts = cb.data.split(":")
+        key = parts[2] if len(parts) > 2 else ""
+        if key not in BADGES:
+            return await ans(cb, "Нет такой галочки", True)
+        if key == "dev" and cb.from_user.id != OWNER_ID:
+            return await ans(cb, "Галочку владельца может выдать только владелец", True)
+        give_badge(cb.from_user.id, key)
+        await ans(cb, f"Выдано: {BADGES[key]['title']}", True)
+        t, k = admin_self_view(cb.from_user.id)
+        return await safe_edit(cb, t, k)
+    if action == "selfrank":
+        return await ask(cb, state, "adm_selfrank", "Введи свой личный ранг (до 32 символов):")
     if action == "stats":
         r = q("SELECT COUNT(*) n, SUM(balance_coin) c, SUM(balance_point) p, SUM(bank_balance) b, SUM(stars_balance) s FROM users", one=True)
         bets = q("SELECT COUNT(*) n FROM bet_history", one=True)["n"]
@@ -4185,6 +4413,16 @@ async def f_adm_a(m: Message, state: FSMContext, d, txt):
     if len(answers) < len(prompts):
         return await step(m, state, "adm_a", f"{title}\n{prompts[len(answers)]}", answers=answers)
     await adm_finish(m, state, d["action"], d.get("target", 0), answers)
+
+
+@flow("adm_selfrank")
+async def f_adm_selfrank(m: Message, state: FSMContext, d, txt):
+    if not is_admin(m.from_user.id):
+        return await state.clear()
+    title = (txt or "").strip()[:32] or "Новичок"
+    update_user(m.from_user.id, rank_title=title, is_scammer=0, is_donater=0, is_official=1)
+    await state.clear()
+    await m.reply(f"🎖 Личный ранг: <b>{esc(title)}</b>")
 
 
 async def mailing(m: Message, text: str):
@@ -4375,17 +4613,66 @@ def w_spend(u, bet: int, lo: int = 10) -> Optional[dict]:
     return None
 
 
-# ---------- арена: бесплатное соревнование без денежных ставок ----------
+# ---------- арена: квадратная сцена со ставками ----------
 AR: Dict[str, Any] = {}
 AR_HIST: List[dict] = []
 AR_CD, AR_ROLL, AR_SHOW, AR_MAX = 15, 7, 9, 10
-ARENA_COLORS = ["#ff8a3d", "#3d9bff", "#35d07f", "#b06bff", "#ffd23d", "#ff5c5c", "#2de2e6", "#c98bff", "#8dff6b", "#ff7ab8", "#111111"]
+AR_MIN_BET = 10_000
+ARENA_HEX = ["#ff8a3d", "#3d9bff", "#35d07f", "#b06bff", "#ffd23d", "#ff5c5c", "#2de2e6", "#c98bff", "#8dff6b", "#ff7ab8"]
+ARENA_BLACK = "#111111"
 
 
-def ar_reset():
+def _ar_round_bet() -> int:
+    for p in AR["players"].values():
+        return int(p.get("bet", 0) or 0)
+    return 0
+
+
+def _ar_refund():
+    for uid, p in list(AR["players"].items()):
+        bet = int(p.get("bet", 0) or 0)
+        if bet > 0:
+            add_coin(uid, bet)
+
+
+def _ar_save():
+    """Страховка от перезапуска: сохраняем ставки активного лобби."""
+    try:
+        kv_set("arena:web", json.dumps({str(k): int(v.get("bet", 0) or 0) for k, v in AR["players"].items()}))
+    except Exception:
+        log.debug("arena save failed", exc_info=True)
+
+
+def ar_restore():
+    """После перезапуска возвращаем ставки, которые не успели разыграть."""
+    raw = kv_get("arena:web")
+    if not raw or raw in ("{}", "null"):
+        return
+    try:
+        data = json.loads(raw)
+        refunded = 0
+        for uid, bet in (data or {}).items():
+            bet = int(bet or 0)
+            if bet > 0:
+                add_coin(int(uid), bet)
+                refunded += bet
+        if refunded:
+            log.warning("Арена: возвращены ставки после перезапуска — %s RCOIN", refunded)
+    except Exception:
+        log.exception("ar_restore")
+    kv_set("arena:web", "{}")
+
+
+def ar_reset(refund: bool = False):
+    if refund:
+        _ar_refund()
+        try:
+            kv_set("arena:web", "{}")
+        except Exception:
+            pass
     AR.clear()
     AR.update(phase="idle", players={}, t_cd=0.0, t_roll=0.0, t_done=0.0,
-              winner=None, land=0.5, created=time.time())
+              winner=None, created=time.time())
 
 
 ar_reset()
@@ -4399,24 +4686,38 @@ def ar_tick():
         if not ids:
             ar_reset()
             return None
-        AR["winner"] = random.choice(ids)
-        AR["land"] = random.uniform(0.15, 0.85)
+        weights = [max(1, int(AR["players"][i].get("bet", 0) or 0)) for i in ids]
+        AR["winner"] = random.choices(ids, weights=weights, k=1)[0]
         AR["phase"], AR["t_roll"] = "rolling", t
     elif ph == "rolling" and t >= AR["t_roll"] + AR_ROLL:
         winner = AR["winner"]
-        player = AR["players"].get(winner)
-        if player:
-            # Non-monetary participation reward: experience only.
+        players = dict(AR["players"])
+        pool = sum(int(p.get("bet", 0) or 0) for p in players.values())
+        rake = pool // 10 if pool else 0
+        prize = pool - rake if pool else 0
+        payout = 0
+        if pool > 0:
+            treasury_add(rake)
+            win_bet = int(players[winner].get("bet", 0) or 0)
+            payout = int(prize * win_mult(winner)) if prize > win_bet > 0 else prize
+            for uid, p in players.items():
+                settle(uid, "arena", int(p.get("bet", 0) or 0), prize if uid == winner else 0, "web arena")
+            AR_HIST.insert(0, {"name": players[winner]["name"], "reward": f"{fmt(payout)} RCOIN", "paid": True})
+        else:
             x("INSERT OR IGNORE INTO it_progress(user_id) VALUES(?)", (winner,))
             x("UPDATE it_progress SET xp=xp+25 WHERE user_id=?", (winner,))
-            AR_HIST.insert(0, {"name": player["name"], "reward": "25 XP"})
-            del AR_HIST[6:]
+            AR_HIST.insert(0, {"name": players[winner]["name"], "reward": "25 XP", "paid": False})
+        del AR_HIST[6:]
         AR["phase"], AR["t_done"] = "done", t
-        return winner, 25
+        try:
+            kv_set("arena:web", "{}")
+        except Exception:
+            pass
+        return winner, payout
     elif ph == "done" and t >= AR["t_done"] + AR_SHOW:
         ar_reset()
     elif ph == "waiting" and t - AR["created"] > 600:
-        ar_reset()
+        ar_reset(refund=True)
     return None
 
 
@@ -4425,7 +4726,11 @@ async def arena_loop():
         try:
             res = ar_tick()
             if res:
-                await _dm(res[0], "🏆 <b>Арена завершена!</b> Ты получил <b>25 XP</b> за победу.")
+                winner, prize = res
+                if prize:
+                    await _dm(winner, f"{E('win')} <b>Арена завершена!</b> Ты забрал <b>{fmt(prize)}</b> RCOIN.")
+                else:
+                    await _dm(winner, f"{E('win')} <b>Арена завершена!</b> Ты получил <b>25 XP</b> за победу.")
         except Exception:
             log.exception("arena_loop")
         await asyncio.sleep(0.5)
@@ -4437,15 +4742,20 @@ def ar_state(uid: int) -> dict:
     ids = list(pl)
     count = len(ids)
     ph = AR["phase"]
-    players = [{"id": i, "name": pl[i]["name"], "color": pl[i]["color"],
-                "pct": round(100 / max(count, 1), 1), "avatar": pl[i].get("avatar", "")}
-               for i in ids]
+    pool = sum(int(p.get("bet", 0) or 0) for p in pl.values())
+    players = []
+    for i in ids:
+        bet = int(pl[i].get("bet", 0) or 0)
+        pct = round(bet * 100 / pool, 1) if pool else round(100 / max(count, 1), 1)
+        players.append({"id": i, "name": pl[i]["name"], "color": pl[i]["color"], "pct": pct,
+                        "avatar": pl[i].get("avatar", ""), "bet": bet, "you": i == uid})
     winner_idx = ids.index(AR["winner"]) if AR.get("winner") in ids else -1
-    return {"phase": ph, "players": players, "pool": 0, "you": uid in pl,
+    return {"phase": ph, "players": players, "pool": pool, "bet": _ar_round_bet(), "you": uid in pl,
+            "your_bet": int(pl[uid].get("bet", 0) or 0) if uid in pl else 0,
             "cd_left": max(0.0, AR["t_cd"] + AR_CD - t) if ph == "countdown" else 0,
             "roll_total": AR_ROLL, "roll_elapsed": min(AR_ROLL, t - AR["t_roll"]) if ph == "rolling" else (AR_ROLL if ph == "done" else 0),
-            "winner_idx": winner_idx, "land": AR["land"], "history": AR_HIST,
-            "max": AR_MAX, "min_bet": 0}
+            "winner_idx": winner_idx, "history": AR_HIST, "max": AR_MAX,
+            "min_bet": AR_MIN_BET, "rake": pool // 10, "prize": pool - pool // 10, "free": pool == 0}
 
 
 def a_arena(u, body):
@@ -4456,25 +4766,42 @@ def a_arena(u, body):
 def a_arena_join(u, body):
     ar_tick()
     uid = u["user_id"]
+    if uid in AR["players"]:
+        return {"ok": True, "state": ar_state(uid)}
     if AR["phase"] not in ("idle", "waiting", "countdown"):
         return w_err("Раунд уже идёт — дождись следующего")
-    if uid not in AR["players"] and len(AR["players"]) >= AR_MAX:
+    if len(AR["players"]) >= AR_MAX:
         return w_err("Арена заполнена")
-    if uid not in AR["players"]:
-        name = re.sub(r"<[^>]+>", "", uname(u, False))
-        requested = str(body.get("color", "")).lower()
-        if requested == "#111111" and not is_premium(uid):
-            requested = ""
-        color = requested if requested in ARENA_COLORS else ARENA_COLORS[len(AR["players"]) % 10]
-        photo = str(body.get("photo_url", ""))[:500]
-        if not (photo.startswith("https://t.me/i/userpic/") or photo.startswith("https://telegram.org/")):
-            photo = ""
-        AR["players"][uid] = {"name": name, "color": color, "avatar": photo}
+    try:
+        bet = int(float(body.get("bet", 0) or 0))
+    except (TypeError, ValueError):
+        bet = 0
+    if bet < 0:
+        return w_err("Неверная ставка")
+    if bet and bet < AR_MIN_BET:
+        return w_err(f"Минимальная ставка {fmt(AR_MIN_BET)} RCOIN")
+    round_bet = _ar_round_bet()
+    if AR["players"] and bet != round_bet:
+        return w_err(f"Ставка раунда {fmt(round_bet)} RCOIN")
+    if not AR["players"]:
+        round_bet = bet
+    if round_bet and not spend(uid, round_bet):
+        return w_err("Недостаточно RCOIN")
+    name = re.sub(r"<[^>]+>", "", uname(u, False))
+    requested = str(body.get("color", "")).lower()
+    if requested == ARENA_BLACK and not is_premium(uid):
+        requested = ""
+    color = requested if requested in ARENA_HEX else ARENA_HEX[len(AR["players"]) % len(ARENA_HEX)]
+    photo = str(body.get("photo_url", ""))[:500]
+    if not (photo.startswith("https://t.me/i/userpic/") or photo.startswith("https://telegram.org/")):
+        photo = ""
+    AR["players"][uid] = {"name": name, "color": color, "avatar": photo, "bet": round_bet}
     t = time.time()
     if len(AR["players"]) == 1:
         AR["phase"], AR["created"] = "waiting", t
     elif AR["phase"] != "countdown":
         AR["phase"], AR["t_cd"] = "countdown", t
+    _ar_save()
     return {"ok": True, "state": ar_state(uid)}
 
 
@@ -4482,9 +4809,13 @@ def a_arena_leave(u, body):
     uid = u["user_id"]
     if AR["phase"] != "waiting" or uid not in AR["players"]:
         return w_err("Покинуть лобби можно до начала отсчёта")
+    bet = int(AR["players"][uid].get("bet", 0) or 0)
     del AR["players"][uid]
+    if bet:
+        add_coin(uid, bet)
     if not AR["players"]:
         ar_reset()
+    _ar_save()
     return {"ok": True, "state": ar_state(uid)}
 
 
@@ -4508,7 +4839,9 @@ def a_me(u, body):
     return {"ok": True, "name": re.sub(r"<[^>]+>", "", uname(u, False)), "id": uid,
             "balance": u["balance_coin"], "rbp": u["balance_point"], "games": stats["n"] or 0,
             "wins": u["total_wins"] or stats["w"] or 0, "lost": int(stats["lost"] or 0),
-            "rank": u["rank_title"] or "Новичок", "badges": [f"{BADGES[b]['fallback']} {BADGES[b]['role']}" for b in profile_badges(uid) if b in BADGES],
+            "rank": u["rank_title"] or "Новичок",
+            "badges": [{"key": b, "role": BADGES[b]["role"], "title": BADGES[b]["title"],
+                        "emoji_id": BADGES[b].get("id") or ""} for b in profile_badges(uid) if b in BADGES],
             "photo_url": str(body.get("photo_url", ""))[:500]}
 
 
@@ -4652,12 +4985,53 @@ WEBAPP_HTML = r"""<!doctype html>
 .nav{border-radius:18px;background:#0d151fee;border-color:#2b3d4f}.nav button{border-radius:12px;transition:background .15s,color .15s}.nav button i{width:23px;height:23px;margin:0 auto 5px;display:grid;place-items:center}.nav button.active{background:linear-gradient(145deg,#1a3b55,#142b40);box-shadow:inset 0 0 0 1px #3a7199}
 .panel h2 .glyph{width:21px;height:21px;margin-right:7px;color:#8dc8f5}
 .action:focus-visible,.btn:focus-visible,.tile:focus-visible{outline:2px solid #79bfff;outline-offset:3px}
+.ce{width:1.15em;height:1.15em;object-fit:contain;vertical-align:-.18em;margin:0 1px;display:inline-block}
+.arena-panel{padding:14px}
+.arena-top{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:10px;gap:10px}
+.arena-bank{font-size:clamp(22px,6vw,30px);font-weight:950;letter-spacing:-.5px;color:#eaf6ff;line-height:1.1}
+.arena-bank small{font-size:12px;color:#7fb6e0;font-weight:800}
+.arena-count{text-align:right;color:#8fb7d4;font-size:11px;font-weight:800}
+.arena-count b{display:block;font-size:18px;color:#fff}
+.arena-square{position:relative;width:100%;aspect-ratio:1;border-radius:24px;overflow:hidden;border:1px solid #2c4258;background:#0b121a;box-shadow:inset 0 0 60px #0008,0 16px 40px #0005;isolation:isolate;touch-action:manipulation}
+.arena-sectors{position:absolute;inset:-1px;transition:background .35s}
+.arena-square:before{content:"";position:absolute;inset:0;background-image:linear-gradient(#ffffff0b 1px,transparent 1px),linear-gradient(90deg,#ffffff0b 1px,transparent 1px);background-size:12.5% 12.5%;z-index:2;pointer-events:none}
+.arena-square:after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 50% 45%,transparent 30%,#00000055 78%,#00000088 100%);z-index:3;pointer-events:none}
+.arena-players{position:absolute;inset:0;z-index:4}
+.arena-player{position:absolute;transform:translate(-50%,-50%);width:36%;text-align:center;color:#fff;text-shadow:0 2px 12px #000b;transition:transform .25s}
+.arena-player .ap-ava{width:clamp(54px,16vw,76px);aspect-ratio:1;border-radius:50%;margin:0 auto 8px;padding:3px;background:linear-gradient(135deg,var(--c),#ffffff66);box-shadow:0 0 0 1px #ffffff2e,0 12px 28px #0008}
+.arena-player .ap-ava>span{display:grid;place-items:center;width:100%;height:100%;border-radius:50%;background:#101a24;font-size:24px;font-weight:950;overflow:hidden;color:#dff2ff}
+.arena-player img{width:100%;height:100%;object-fit:cover;border-radius:50%}
+.arena-player b{display:block;font-size:12px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.arena-player small{display:block;font-size:9.5px;color:#d7ecff;opacity:.9;margin-top:3px;font-weight:800}
+.arena-player.you b:after{content:" · ты";color:#7dffbf;font-size:9px;font-weight:900}
+.arena-player.win .ap-ava{animation:winpulse .9s ease-in-out infinite alternate;box-shadow:0 0 0 3px #fff,0 0 42px var(--c)}
+@keyframes winpulse{to{transform:scale(1.08)}}
+.arena-pointer{position:absolute;left:50%;top:50%;width:28%;height:8px;z-index:6;transform-origin:0 50%;pointer-events:none;will-change:transform}
+.arena-pointer:before{content:"";position:absolute;left:10%;right:0;top:50%;height:4px;margin-top:-2px;border-radius:4px;background:linear-gradient(90deg,#ffffff88,#fff);box-shadow:0 0 14px #fff8}
+.arena-pointer:after{content:"";position:absolute;right:-4px;top:50%;transform:translateY(-50%);border-left:18px solid #fff;border-top:11px solid transparent;border-bottom:11px solid transparent;filter:drop-shadow(0 0 8px #fff)}
+.arena-hub{position:absolute;left:-20px;top:50%;transform:translateY(-50%);width:40px;height:40px;border-radius:50%;background:radial-gradient(circle at 35% 28%,#fff,#d3dde7 58%,#8d9aa8);box-shadow:0 6px 20px #000b,inset 0 1px 0 #fff;display:grid;place-items:center;z-index:7}
+.arena-hub:before{content:"";width:12px;height:12px;border-radius:50%;border:3px solid #33404e}
+.arena-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;font-weight:950;font-size:11px;letter-spacing:.18em;color:#ffffff80;text-shadow:0 2px 10px #000;pointer-events:none;margin-top:28px}
+.bet-row{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
+.chip{flex:1;min-width:62px;padding:10px 6px;border-radius:12px;border:1px solid #33495e;background:#121d28;color:#cfe4f6;font-weight:850;font-size:12px;transition:.15s}
+.chip.on{background:linear-gradient(145deg,#1d6ea8,#154d79);border-color:#5cb3e8;color:#fff;box-shadow:0 0 0 1px #5cb3e855,0 6px 16px #0005}
+.chip:disabled{opacity:.45}
+.betbar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:10px}
+.betbar .muted{font-size:11px}
+.arena-square.many .arena-player{width:27%}
+.arena-square.many .ap-ava{width:clamp(38px,11vw,56px)}
+.arena-square.many .arena-player b{font-size:10.5px}
+.arena-square.many .arena-player small{font-size:8px}
+.arena-square.dense .arena-player{width:23%}
+.arena-square.dense .ap-ava{width:clamp(30px,8vw,44px)}
+.arena-square.dense .arena-player b{font-size:9px}
+.arena-square.dense .arena-player small{font-size:7px}
 </style></head><body><main class="wrap">
 <header class="top"><div class="brand">RCOIN<span>·</span>BOT</div><div class="wallet"><small>RCOIN</small><span id="topBal">—</span></div></header>
 <section class="hero"><div class="eyebrow">ТВОЙ ИГРОВОЙ СЧЁТ</div><div class="balance" id="heroBal">— <small>RCOIN</small></div><div class="subline">Нажми на моно-строку ниже, чтобы скопировать баланс</div><button class="copy" id="copyBal" onclick="copyBalance()">·····················</button><div class="actions"><button class="action" onclick="sendBotAction('bonus')">🎁 Бонус</button><button class="action" onclick="sendBotAction('daily')">📅 Ежедневный</button><button class="action" onclick="go('career')">💼 Заработать</button></div></section>
 <div class="stats"><div class="stat"><span>🎮 Сыграно игр</span><b id="games">—</b></div><div class="stat"><span>🏅 Ранг</span><b id="rank">—</b></div><div class="stat"><span>⚔️ Победы в дуэлях</span><b id="wins">—</b></div><div class="stat"><span>📉 Проиграно RCOIN</span><b id="lost">—</b></div></div>
 <section id="home" class="page active"><div class="panel"><div class="profile-head"><img id="profilePhoto" class="profile-photo" src="" alt="Аватар"><div><h2 id="playerName">Игрок</h2><div class="muted" id="profileRank">Профиль RCOIN</div></div></div><div id="badges"></div><p class="muted" style="margin-top:10px">Твои достижения и статус отображаются здесь. Управление галочками — команда «Галочки» в боте.</p></div><div class="gridcards"><div class="tile" onclick="go('arena')"><div class="ico">🎯</div><b>Арена</b><small>Соревнование до 10 игроков</small></div><div class="tile" onclick="go('career')"><div class="ico">💻</div><b>IT-карьера</b><small>Задания и опыт</small></div><div class="tile" onclick="go('trade')"><div class="ico">📈</div><b>Трейдинг</b><small>Курс и портфель</small></div><div class="tile" onclick="go('events')"><div class="ico">🎄</div><b>Ивенты</b><small>Сезонные активности</small></div><div class="tile" onclick="go('nft')"><div class="ico">🖼️</div><b>NFT-коллекция</b><small>Твои цифровые предметы</small></div><div class="tile" onclick="toast('Команды: /зп · /работа · /трейдинг · Галочки')"><div class="ico">📚</div><b>Команды</b><small>Все возможности бота</small></div></div></section>
-<section id="arena" class="page"><div class="panel"><h2>🎯 ARENA <span class="muted" id="arenaCount">0/10</span></h2><div class="arena"><canvas id="arenaCanvas" width="340" height="260"></canvas></div><div class="status" id="arenaStatus">Подключаем арену…</div><p class="muted" id="arenaHint" style="text-align:center">Вход бесплатный. При двух игроках начинается отсчёт 15 секунд.</p><div class="color-picks"><button class="color-pick selected" data-color="#ff8a3d" style="background:#ff8a3d" onclick="setArenaColor('#ff8a3d')"></button><button class="color-pick" data-color="#3d9bff" style="background:#3d9bff" onclick="setArenaColor('#3d9bff')"></button><button class="color-pick" data-color="#35d07f" style="background:#35d07f" onclick="setArenaColor('#35d07f')"></button><button class="color-pick" data-color="#b06bff" style="background:#b06bff" onclick="setArenaColor('#b06bff')"></button><button class="color-pick" data-color="#111111" style="background:#111111" onclick="setArenaColor('#111111')" title="Premium"></button></div><div class="progress"><span id="arenaProgress"></span></div><button class="btn" id="joinBtn" onclick="arenaJoin()">Войти в лобби</button><button class="btn ghost hide" id="leaveBtn" onclick="arenaLeave()">Покинуть лобби</button></div><div class="panel"><h2>👥 Участники</h2><div class="players" id="players"><p class="muted">Пока никого нет.</p></div></div><div class="panel"><h2>🏆 Последние победители</h2><div id="arenaHistory" class="muted">Пока нет завершённых раундов.</div></div></section>
+<section id="arena" class="page"><div class="panel arena-panel"><div class="arena-top"><div><div class="eyebrow">БАНК</div><div class="arena-bank" id="arenaBank">0 <small>RCOIN</small></div></div><div class="arena-count"><b id="arenaCount">0/10</b>игроков</div></div><div class="arena-square" id="arenaSquare"><div class="arena-sectors" id="arenaSectors"></div><div class="arena-players" id="arenaPlayersBox"></div><div class="arena-center" id="arenaCenter">ARENA</div><div class="arena-pointer" id="arenaPointer"><div class="arena-hub"></div></div></div><div class="status" id="arenaStatus">Подключаем арену…</div><p class="muted" id="arenaHint" style="text-align:center">Вход бесплатный или со ставкой. Победитель забирает банк минус 10%.</p><div class="progress"><span id="arenaProgress"></span></div><div class="betbar"><span class="muted">Твоя ставка</span><span class="muted" id="arenaYourBet">—</span></div><div class="bet-row" id="betRow"><button class="chip" data-bet="0" onclick="setArenaBet(0)">Бесплатно</button><button class="chip on" data-bet="10000" onclick="setArenaBet(10000)">10к</button><button class="chip" data-bet="100000" onclick="setArenaBet(100000)">100к</button><button class="chip" data-bet="1000000" onclick="setArenaBet(1000000)">1кк</button></div><button class="btn" id="joinBtn" onclick="arenaJoin()">Войти в лобби</button><button class="btn ghost hide" id="leaveBtn" onclick="arenaLeave()">Покинуть лобби</button></div><div class="panel"><h2>Участники</h2><div class="players" id="players"><p class="muted">Пока никого нет.</p></div></div><div class="panel"><h2>Последние победители</h2><div id="arenaHistory" class="muted">Пока нет завершённых раундов.</div></div><div class="panel"><h2>Как это работает</h2><p class="muted">Собери до 10 игроков. Когда в лобби два и более участника, начинается отсчёт 15 секунд. Стрелка выбирает победителя: шанс пропорционален ставке. Победитель забирает банк, 10% уходит в казну. Без ставки — бесплатный раунд с наградой 25 XP.</p></div></section>
 <section id="career" class="page"><div class="panel"><h2>💻 IT-карьера <span class="badge" id="jobStage">Стажёр</span></h2><div class="stats"><div class="stat"><span>Уровень</span><b id="jobLevel">1</b></div><div class="stat"><span>Опыт</span><b id="jobXp">0 XP</b></div><div class="stat"><span>Заработано</span><b id="jobCoins">0</b></div><div class="stat"><span>Заданий</span><b id="jobTasks">0</b></div></div><p class="muted" id="jobCooldown">Выполняй задания, повышай уровень и открывай новые должности.</p><button class="btn green" id="taskBtn" onclick="doTask()">🚀 Получить IT-задание</button></div><div class="panel"><h2>💼 Зарплата за активность</h2><p class="muted">Пиши сообщения в групповых чатах. Команда /зп покажет начисление и позволит забрать ежедневную зарплату.</p><button class="btn ghost" onclick="toast('Открой чат с ботом и отправь /зп')">Как получить зарплату</button></div></section>
 <section id="trade" class="page"><div class="panel"><h2>📈 RCOIN MARKET <span class="badge">LIVE</span></h2><div class="row"><div><div class="muted">Текущий курс v-RCOIN</div><div class="price" id="price">—</div></div><div style="text-align:right"><div class="muted">Изменение</div><b id="change">—</b></div></div><canvas id="chart" class="chart" width="640" height="190"></canvas><p class="muted" style="margin-top:8px">Внутриигровой симулятор курса. Это не реальные деньги и не финансовый инструмент.</p></div><div class="panel"><h2>💼 Портфель</h2><div class="stats"><div class="stat"><span>v-RCOIN</span><b id="holding">0</b></div><div class="stat"><span>Стоимость</span><b id="value">0</b></div><div class="stat"><span>Вложено</span><b id="invested">0</b></div><div class="stat"><span>Результат</span><b id="profit">0</b></div></div></div><div class="panel"><h2>Обмен</h2><input id="amount" type="number" min="1000" step="1000" value="100000" placeholder="Сумма RCOIN"><div class="trade-buttons" style="margin-top:10px"><button class="btn green" onclick="buy()">🟢 Купить</button><button class="btn red" onclick="sell()">🔴 Продать всё</button></div></div></section>
 <section id="events" class="page"><div class="panel"><h2>⛄ СНЕЖНЫЙ МАРАФОН <span class="badge">DAILY TOP 3</span></h2><div class="stats"><div class="stat"><span>Снежки</span><b id="snowballs">0</b></div><div class="stat"><span>Снеговики сегодня</span><b id="snowmen">0</b></div></div><p class="muted">Собирай снежки каждые 20 секунд. Из 20 снежков можно слепить снеговика. Топ-3 дня получают случайную награду из казны от 1 до 10 млрд RCOIN, если средств достаточно.</p><div class="row"><button class="btn" onclick="snowCollect()">❄️ Собрать снежки</button><button class="btn green" onclick="snowBuild()">☃️ Слепить</button></div><div class="panel"><h2>🏆 Рейтинг дня</h2><div id="snowTop" class="muted">Загрузка рейтинга…</div></div></div><div class="panel"><h2>🎄 СЕЗОННЫЕ ИВЕНТЫ</h2><p class="muted">Собирай коллекционные предметы, выполняй задания и открывай награды. Новогодние эмодзи доступны в сообщениях бота при поддержке Telegram Premium Emoji.</p><div class="gridcards" style="margin-top:12px"><div class="tile"><div class="ico">❄️</div><b>Снежный марафон</b><small>Ежедневные задания</small></div><div class="tile"><div class="ico">🎅</div><b>Помощь Санте</b><small>Сезонная цепочка</small></div><div class="tile"><div class="ico">🐻‍❄️</div><b>Полярная коллекция</b><small>Собери предметы</small></div><div class="tile"><div class="ico">🎁</div><b>NFT-чеканка</b><small>Создай предмет в коллекцию</small></div></div><button class="btn" onclick="toast('Открой в боте команду «ивенты» для полного списка заданий')">Открыть задания в боте</button></div></section>
@@ -4699,14 +5073,29 @@ function go(p){document.querySelectorAll('.page').forEach(e=>e.classList.toggle(
 function setBalance(v){const x=fmt(v);$('topBal').textContent=x;$('heroBal').innerHTML=x+' <small>RCOIN</small>';$('copyBal').textContent=x}
 async function copyBalance(){const value=ME?Number(ME.balance||0).toLocaleString('en-US').replace(/,/g,"'"):'0';try{await navigator.clipboard.writeText(value);toast('Баланс '+value+' скопирован')}catch(e){toast('Баланс: '+value)}}
 function sendBotAction(action){if(!tg||typeof tg.sendData!=='function'){toast('Открой приложение через кнопку бота в Telegram');return}try{tg.sendData(action)}catch(e){toast('Не удалось передать действие боту')}}
-async function loadMe(){if(!INIT){$('arenaStatus').textContent='Открой веб-приложение через меню бота в Telegram';return}const j=await api('me');if(!j.ok)return toast(j.err||'Не удалось загрузить профиль');ME=j;setBalance(j.balance);$('playerName').textContent=j.name||'Игрок';$('profileRank').textContent=j.rank||'Новичок';const ph=$('profilePhoto');if(j.photo_url){ph.src=j.photo_url;ph.style.display='block'}else{ph.style.display='none'}$('games').textContent=fmt(j.games);$('rank').textContent=j.rank||'Новичок';$('wins').textContent=fmt(j.wins);$('lost').textContent=fmt(j.lost);$('badges').innerHTML=(j.badges||[]).map(x=>'<span class="badge">'+safe(x)+'</span>').join('')||'<span class="muted">Пока нет выбранных галочек</span>'}
+async function loadMe(){if(!INIT){$('arenaStatus').textContent='Открой веб-приложение через меню бота в Telegram';return}const j=await api('me');if(!j.ok)return toast(j.err||'Не удалось загрузить профиль');ME=j;setBalance(j.balance);$('playerName').textContent=j.name||'Игрок';$('profileRank').textContent=j.rank||'Новичок';const ph=$('profilePhoto');const pv=j.photo_url||TU.photo_url||'';if(pv){ph.src=pv;ph.style.display='block'}else{ph.style.display='none'}$('games').textContent=fmt(j.games);$('rank').textContent=j.rank||'Новичок';$('wins').textContent=fmt(j.wins);$('lost').textContent=fmt(j.lost);$('badges').innerHTML=(j.badges||[]).map(x=>typeof x==='string'?'<span class="badge">'+safe(x)+'</span>':'<span class="badge">'+(x.emoji_id?'<img class="ce" src="/emoji/'+x.emoji_id+'.webp" alt="" onerror="this.remove()"> ':'')+safe(x.title||x.role||'')+'</span>').join('')||'<span class="muted">Пока нет выбранных галочек</span>'}
 function safe(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-/* Free arena */
-const ac=$('arenaCanvas'),ax=ac.getContext('2d');let ball=0;
-function drawArena(){const w=340,h=260;ax.clearRect(0,0,w,h);ax.save();ax.translate(w/2,h/2);ax.beginPath();ax.arc(0,0,92,0,Math.PI*2);ax.strokeStyle='#29465d';ax.lineWidth=18;ax.stroke();const n=AS?.players?.length||0;for(let i=0;i<n;i++){const a=(i/n)*Math.PI*2-Math.PI/2;ax.beginPath();ax.arc(0,0,92,a,a+Math.PI*2/n);ax.strokeStyle=AS.players[i].color;ax.lineWidth=17;ax.stroke()}const rolling=AS?.phase==='rolling'||AS?.phase==='done';const a=rolling?ball:(performance.now()/1600);const x=Math.cos(a)*65,y=Math.sin(a)*65;ax.beginPath();ax.arc(x,y,9,0,Math.PI*2);ax.fillStyle='#fff';ax.shadowColor='#65caff';ax.shadowBlur=20;ax.fill();ax.shadowBlur=0;ax.fillStyle='#eaf5ff';ax.textAlign='center';ax.font='800 18px sans-serif';ax.fillText(AS?.phase==='countdown'?String(Math.ceil(Math.max(0,AS.cd_left-(performance.now()-AT)/1000))):rolling?'●':'ARENA',0,5);ax.restore();requestAnimationFrame(drawArena)}requestAnimationFrame(drawArena);
-function renderArena(){if(!AS)return;const n=AS.players.length,ph=AS.phase;const left=Math.max(0,AS.cd_left-(performance.now()-AT)/1000);$('arenaCount').textContent=n+'/10';let title=ph==='idle'?'Лобби свободно':ph==='waiting'?'Ожидаем второго игрока':ph==='countdown'?'Старт через '+Math.ceil(left)+' сек.':ph==='rolling'?'Шарик выбирает победителя…':'Раунд завершён';if(ph==='done'&&AS.winner_idx>=0)title='🏆 Победитель: '+AS.players[AS.winner_idx].name;$('arenaStatus').textContent=title;$('arenaHint').textContent=ph==='idle'?'Вход бесплатный. Собери до 10 участников.':ph==='waiting'?'Нужен ещё один игрок — затем начнётся отсчёт 15 секунд.':'У каждого участника равные шансы. Победитель получает 25 XP.';$('arenaProgress').style.width=ph==='countdown'?((15-left)/15*100)+'%':ph==='rolling'?((AS.roll_elapsed||0)/7*100)+'%':ph==='done'?'100%':'0%';$('joinBtn').classList.toggle('hide',AS.you||!['idle','waiting','countdown'].includes(ph));$('joinBtn').disabled=!['idle','waiting','countdown'].includes(ph);$('leaveBtn').classList.toggle('hide',!(AS.you&&ph==='waiting'));const box=$('players');box.innerHTML='';if(!n)box.innerHTML='<p class="muted">Пока никого нет.</p>';AS.players.forEach(p=>{const d=document.createElement('div');d.className='player';const a=document.createElement('div');a.className='avatar';a.style.background=p.color;if(p.avatar){const im=document.createElement('img');im.src=p.avatar;im.alt='';im.style.cssText='width:35px;height:35px;border-radius:50%;object-fit:cover';a.append(im)}else{a.textContent=(p.name||'?').slice(0,1).toUpperCase()}const t=document.createElement('div');t.innerHTML='<b>'+safe(p.name)+'</b><small>'+safe(String(p.pct||0))+'% шанс · '+(p.color||'')+'</small>';d.append(a,t);box.append(d)});$('arenaHistory').textContent=AS.history?.length?AS.history.map(x=>x.name+' · '+x.reward).join('  •  '):'Пока нет завершённых раундов'}
+/* Custom emoji for web app */
+const CE_IDS={games:'5841551282321497604',dice:'5312533460324199794',roulette:'6228608791529656524',fortune:'5434093331292377553',mines:'5370692462882857093',crash:'5283080528818360566',basket:'5384327463629233871',darts:'5310278924616356636',blackjack:'5285420684699260907',sun:'5391270767889497941',hunt:'5370553185683394181',spin:'5915833712368424979',football:'5413474404485061402',pyramid:'5224257782013769471',miner:'5370692462882857093',hi_lo:'5926783847453692661',ttt:'5222158908805632010',door:'5259067694396474462',profile:'5202216593966244027',balance:'5197491391206281629',bank:'5881948563591666817',diamond:'5438496463044752972',star:'5438496463044752972',lock:'5305621469134857194',nft:'5262517101578443800',referral:'5942877472163892475',check:'5810189259327413739',treasury:'5798678875823153004',win:'5305747221996177787',lose:'5305474786400690766',settings:'5258096772776991776',admin:'6129805886383723340',donate:'5438496463044752972',ad:'5213391561999526028',market:'5278702045883292456',question:'5436113877181941026',item_1:'5332717942599618048',item_2:'5404752966584394198',item_3:'5280924618444514633',item_4:'5368488358681000659',item_5:'5398024200235529935',item_6:'5449449325434266744',item_7:'5201924046563852634',item_8:'5199959030306456092',item_9:'5316599316884766402',black:'5789386473560088107',blue:'5810189259327413739',rubin:'5341454906807034418',moder:'5766894601709296405',support:'5888937609253623352',tester:'5888937609253623352',ny:'5954111328493771983',dev:'5251635454041675257'};
+const CE_CHARS={'🎮':'games','🎲':'dice','🎰':'spin','🎡':'fortune','💣':'mines','🚀':'crash','🏀':'basket','🎯':'darts','🃏':'blackjack','☀':'sun','🏹':'hunt','⚽':'football','🔺':'pyramid','⛏':'miner','🎴':'hi_lo','❌':'ttt','🚪':'door','👤':'profile','💰':'balance','💸':'balance','🏦':'bank','💎':'diamond','⭐':'star','🔒':'lock','🖼':'nft','👥':'referral','✅':'check','🏛':'treasury','🏆':'win','💔':'lose','⚙':'settings','👑':'admin','🎁':'donate','📢':'ad','🛒':'market','❔':'question','❄':'item_1','🍬':'item_2','🧦':'item_3','🧤':'item_4','🍪':'item_5','🔔':'item_7','🧊':'item_8','☕':'item_9','☑':'black','✔':'blue','💠':'rubin','🛡':'moder','🎧':'support','🧪':'tester','🎄':'ny','👨':'dev'};
+const CE_SEQ=[['👨‍💻','dev'],['☑️','black'],['✔️','blue'],['❄️','item_1'],['☀️','sun'],['⚙️','settings'],['🎄','ny']];
+const CE_SEQ_RE=new RegExp(CE_SEQ.map(x=>x[0]).join('|'),'g');
+const CE_RE=/[\u{1F000}-\u{1FAFF}\u2600-\u27BF\u{2B00}-\u{2BFF}\u2300-\u23FF\uFE0F\u200D\u20E3]/gu;
+const CE_HAS=new RegExp('(?:'+CE_SEQ.map(x=>x[0]).join('|')+')|'+CE_RE.source,'u');
+function ceImg(k){const id=CE_IDS[k];if(!id)return '';return '<img class="ce" src="/emoji/'+id+'.webp" alt="" loading="lazy" onerror="this.remove()">'}
+function ceText(t){let s=t.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));s=s.replace(CE_SEQ_RE,m=>{const row=CE_SEQ.find(x=>x[0]===m);return row?ceImg(row[1]):''});s=s.replace(CE_RE,m=>{const k=CE_CHARS[m]||CE_CHARS[m.replace(/\uFE0F/g,'')];return k?ceImg(k):''});return s}
+function premiumize(root){const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{acceptNode:n=>{const p=n.parentElement;if(!p||p.closest('script,style,textarea,input,select,canvas,.ce'))return NodeFilter.FILTER_REJECT;return NodeFilter.FILTER_ACCEPT}});const a=[];while(w.nextNode())a.push(w.currentNode);a.forEach(n=>{const t=n.nodeValue;if(!t||!CE_HAS.test(t))return;const h=ceText(t);if(h!==t){const s=document.createElement('span');s.innerHTML=h;n.replaceWith(s)}})}
+let _ceT=false;const _ceObs=new MutationObserver(()=>{if(_ceT)return;_ceT=true;requestAnimationFrame(()=>{_ceT=false;premiumize(document.body)})});
+/* Square arena with stakes */
+let arenaBet=10000, AP=0, ALAND=false, _apt=0;
+function apAngle(i,n){return 90+(i+0.5)*360/Math.max(n,1)}
+function arenaSectors(){if(!AS)return;const n=AS.players.length;const el=$('arenaSectors');if(!n){el.style.background='conic-gradient(from 90deg,#1a2836 0 100%)';return}const parts=[];AS.players.forEach((p,i)=>{parts.push(p.color+' '+(i*100/n)+'% '+((i+1)*100/n)+'%')});el.style.background='conic-gradient(from 90deg,'+parts.join(',')+')'}
+function renderPointer(dt){const p=$('arenaPointer');if(!AS)return;const n=AS.players.length;if(AS.phase==='done'&&AS.winner_idx>=0){if(!ALAND){ALAND=true;const target=apAngle(AS.winner_idx,n);const cur=AP%360;const delta=(target-cur+720)%360;AP+=360+delta;p.style.transition='transform 1.45s cubic-bezier(.16,.9,.2,1)';p.style.transform='rotate('+AP+'deg)'}return}p.style.transition='none';const sp=AS.phase==='rolling'?12:AS.phase==='countdown'?.9:.16;AP+=sp*dt/16;p.style.transform='rotate('+AP+'deg)'}
+function pointerLoop(t){const dt=Math.min(50,t-_apt||16);_apt=t;renderPointer(dt);requestAnimationFrame(pointerLoop)}requestAnimationFrame(pointerLoop);
+function renderArena(){if(!AS)return;const n=AS.players.length,ph=AS.phase;const left=Math.max(0,AS.cd_left-(performance.now()-AT)/1000);$('arenaSquare').classList.toggle('many',n>4);$('arenaSquare').classList.toggle('dense',n>6);$('arenaCount').textContent=n+'/'+AS.max;$('arenaBank').innerHTML=fmt(AS.pool)+' <small>RCOIN</small>';let title=ph==='idle'?'Лобби свободно':ph==='waiting'?'Ожидаем второго игрока':ph==='countdown'?'Старт через '+Math.ceil(left)+' сек.':ph==='rolling'?'Стрелка выбирает победителя…':'Раунд завершён';if(ph==='done'&&AS.winner_idx>=0)title='Победитель: '+AS.players[AS.winner_idx].name;$('arenaStatus').textContent=title;$('arenaHint').textContent=ph==='idle'?(AS.free?'Вход бесплатный. Собери до 10 участников.':'Ставка раунда '+fmt(AS.bet)+' RCOIN. Победитель забирает банк минус 10%.'):ph==='waiting'?'Нужен ещё один игрок — затем начнётся отсчёт 15 секунд.':AS.free?'У каждого равные шансы. Победитель получает 25 XP.':'Шанс пропорционален ставке. Победитель забирает '+fmt(AS.prize)+' RCOIN.';$('arenaProgress').style.width=ph==='countdown'?((15-left)/15*100)+'%':ph==='rolling'?((AS.roll_elapsed||0)/7*100)+'%':ph==='done'?'100%':'0%';$('joinBtn').classList.toggle('hide',AS.you||!['idle','waiting','countdown'].includes(ph));$('joinBtn').disabled=!['idle','waiting','countdown'].includes(ph);$('leaveBtn').classList.toggle('hide',!(AS.you&&ph==='waiting'));$('arenaYourBet').textContent=AS.you?(AS.your_bet?fmt(AS.your_bet)+' RCOIN':'бесплатно'):'—';const locked=n>0;document.querySelectorAll('#betRow .chip').forEach(c=>{const v=Number(c.dataset.bet);c.disabled=locked||!['idle','waiting','countdown'].includes(ph);c.classList.toggle('on',locked?v===AS.bet:v===arenaBet)});const box=$('arenaPlayersBox');box.innerHTML='';AS.players.forEach((p,i)=>{const a=apAngle(i,n),rad=n===1?0:30,x=50+Math.cos(a*Math.PI/180)*rad,y=50+Math.sin(a*Math.PI/180)*rad;const d=document.createElement('div');d.className='arena-player'+(p.you?' you':'')+((ph==='done'&&AS.winner_idx===i)?' win':'');d.style.left=x+'%';d.style.top=y+'%';d.style.setProperty('--c',p.color);const av=document.createElement('div');av.className='ap-ava';const sp=document.createElement('span');if(p.avatar){const im=document.createElement('img');im.src=p.avatar;im.alt='';im.onerror=()=>{im.remove();sp.textContent=(p.name||'?').slice(0,1).toUpperCase()};sp.append(im)}else sp.textContent=(p.name||'?').slice(0,1).toUpperCase();av.append(sp);const b=document.createElement('b');b.textContent=p.name;const sm=document.createElement('small');sm.textContent=(AS.free?'бесплатно':fmt(p.bet)+' RCOIN')+' · '+p.pct+'%';d.append(av,b,sm);box.append(d)});arenaSectors();$('arenaCenter').textContent=ph==='countdown'?String(Math.ceil(left)):ph==='rolling'?'...':'ARENA';const list=$('players');list.innerHTML='';if(!n)list.innerHTML='<p class="muted">Пока никого нет.</p>';AS.players.forEach(p=>{const d=document.createElement('div');d.className='player';const a=document.createElement('div');a.className='avatar';a.style.background=p.color;if(p.avatar){const im=document.createElement('img');im.src=p.avatar;im.alt='';im.style.cssText='width:35px;height:35px;border-radius:50%;object-fit:cover';a.append(im)}else{a.textContent=(p.name||'?').slice(0,1).toUpperCase()}const t=document.createElement('div');t.innerHTML='<b>'+safe(p.name)+'</b><small>'+(AS.free?'бесплатно':fmt(p.bet)+' RCOIN')+' · '+safe(String(p.pct||0))+'% шанс</small>';d.append(a,t);list.append(d)});$('arenaHistory').textContent=AS.history?.length?AS.history.map(x=>x.name+' · '+x.reward).join('  •  '):'Пока нет завершённых раундов';if(ph!=='done')ALAND=false}
 async function pollArena(){if(!INIT)return;const j=await api('arena');if(j.ok){AS=j.state;AT=performance.now();renderArena()}arenaTimer=setTimeout(pollArena,AS&&['countdown','rolling'].includes(AS.phase)?450:1300)}function startArena(){if(!arenaTimer)pollArena()}
-async function arenaJoin(){const j=await api('arena_join',{color:arenaColor});if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();haptic();toast('Ты в лобби!')}async function arenaLeave(){const j=await api('arena_leave');if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();toast('Ты покинул лобби')}
+function setArenaBet(v){arenaBet=v;document.querySelectorAll('#betRow .chip').forEach(c=>c.classList.toggle('on',Number(c.dataset.bet)===v))}
+async function arenaJoin(){const bet=(AS&&AS.players&&AS.players.length)?AS.bet:arenaBet;const j=await api('arena_join',{color:arenaColor,bet});if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);haptic();toast('Ты в лобби!')}async function arenaLeave(){const j=await api('arena_leave');if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);toast('Ты покинул лобби')}
 /* IT career */
 async function loadCareer(){const j=await api('it_state');if(!j.ok)return;$('jobStage').textContent=j.stage;$('jobLevel').textContent=j.level;$('jobXp').textContent=fmt(j.xp)+' XP';$('jobCoins').textContent=fmt(j.coins);$('jobTasks').textContent=fmt(j.tasks);$('jobCooldown').textContent=j.cooldown>0?'Следующее задание через '+Math.ceil(j.cooldown)+' сек.':'Можно брать новое задание.';$('taskBtn').disabled=j.cooldown>0}
 async function doTask(){const j=await api('it_task');if(!j.ok)return toast(j.err||'Не удалось выполнить задание');toast(j.msg||'Задание завершено');setBalance(j.balance);loadCareer()}
@@ -4721,7 +5110,7 @@ async function loadSnowman(){const j=await api('snowman_state');if(!j.ok)return;
 async function snowCollect(){const j=await api('snowman_collect');if(!j.ok)return toast(j.err||'Не удалось собрать снежки');toast('+'+j.gained+' снежков!');loadSnowman();haptic()}
 async function snowBuild(){const j=await api('snowman_build');if(!j.ok)return toast(j.err||'Не удалось слепить снеговика');toast('Слеплено снеговиков: '+j.built+' ☃️');loadSnowman();haptic()}
 function setArenaColor(c){arenaColor=c;document.querySelectorAll('.color-pick').forEach(x=>x.classList.toggle('selected',x.dataset.color===c))}
-applyCustomIcons();loadMe();setInterval(()=>{if(AS?.phase==='rolling')ball+=.28;},80);
+applyCustomIcons();premiumize(document.body);_ceObs.observe(document.body,{childList:true,subtree:true,characterData:true});loadMe();
 </script></body></html>"""
 
 
@@ -4760,7 +5149,8 @@ async def start_web():
     app.router.add_get("/health", health)
     app.router.add_get("/healthz", health)
     app.router.add_get("/nft/{nid}", nft_asset)
-    # The Web App exposes only non-wagering activities, the free arena, career and simulated market.
+    app.router.add_get("/emoji/{eid}", emoji_asset)
+    # Веб-приложение: бесплатная арена со ставками в игровой валюте, карьера и симулятор рынка.
     routes = {"me": a_me, "arena": a_arena, "arena_join": a_arena_join, "arena_leave": a_arena_leave,
               "snowman_state": a_snowman_state, "snowman_collect": a_snowman_collect, "snowman_build": a_snowman_build}
     routes.update({"trade_state": api_trade_state, "trade_buy": api_trade_buy,
@@ -4814,7 +5204,9 @@ async def main():
         log.error("BOT_TOKEN не задан! Создай/перевыпусти токен в @BotFather и добавь переменную окружения BOT_TOKEN.")
         return
     init_db()
+    ar_restore()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot.session.middleware(PremiumOut())
     bot.session.middleware(EmojiFallback())
     try:
         me = await bot.get_me()
@@ -4857,13 +5249,13 @@ async def main():
 #                          ГАЛОЧКИ (BADGES)
 # =====================================================================
 BADGES = {
-    "dev": {"id": "5251635454041675257", "fallback": "👨‍💻", "title": "Developer", "role": "Developer",
+    "dev": {"id": "5251635454041675257", "fallback": "👑", "title": "Владелец", "role": "Owner",
             "price_coin": 0, "price_stars": 0, "buyable": False},
-    "moder": {"id": "5766894601709296405", "fallback": "🛡", "title": "Moder", "role": "Moder",
+    "moder": {"id": "5766894601709296405", "fallback": "🛡", "title": "Модератор", "role": "Moder",
               "price_coin": 0, "price_stars": 0, "buyable": False},
-    "support": {"id": "5888937609253623352", "fallback": "🎧", "title": "Support", "role": "Support",
+    "support": {"id": "5888937609253623352", "fallback": "🎧", "title": "Поддержка", "role": "Support",
                 "price_coin": 0, "price_stars": 0, "buyable": False},
-    "tester": {"id": "5888937609253623352", "fallback": "🧪", "title": "Tester", "role": "Tester",
+    "tester": {"id": "5888937609253623352", "fallback": "🧪", "title": "Тестер", "role": "Tester",
                 "price_coin": 0, "price_stars": 0, "buyable": False},
     "premium2": {"id": "5789568614533176726", "fallback": "💎", "title": "Premium", "role": "Premium",
                  "price_coin": 0, "price_stars": 0, "buyable": False},
@@ -4871,12 +5263,23 @@ BADGES = {
               "price_coin": 0, "price_stars": 299, "buyable": True, "premium": True},
     "black": {"id": "5789386473560088107", "fallback": "☑️", "title": "Чёрная галочка", "role": "Donate",
               "price_coin": 5_000_000_000, "price_stars": 500, "buyable": True},
-    "blue": {"id": "5444856076954520455", "fallback": "✔️", "title": "Синяя галочка", "role": "Donate",
+    "blue": {"id": "5810189259327413739", "fallback": "✔️", "title": "Синяя галочка", "role": "Verified",
              "price_coin": 2_500_000_000, "price_stars": 250, "buyable": True},
     "ny": {"id": "5954111328493771983", "fallback": "🎄", "title": "Новогодняя", "role": "Event",
            "price_coin": 5_000_000_000, "price_stars": 0, "buyable": True},
 }
 BADGE_ORDER = ["dev", "moder", "support", "tester", "premium2", "rubin", "black", "blue", "ny"]
+BADGE_RANK = {
+    "dev": ("Владелец", {"is_official": 1}),
+    "moder": ("Moder", {"is_official": 1}),
+    "support": ("Support", {"is_official": 1}),
+    "tester": ("Tester", {"is_official": 1}),
+    "rubin": ("Premium", {"is_donater": 1}),
+    "premium2": ("Premium", {"is_donater": 1}),
+    "black": ("Donate", {"is_donater": 1}),
+    "blue": ("Verified", {"is_official": 1}),
+    "ny": ("Event", {"is_official": 1}),
+}
 MAX_PROFILE_BADGES = 4
 
 
@@ -4920,29 +5323,55 @@ def give_badge(uid: int, key: str) -> bool:
     if key not in BADGES:
         return False
     created = x("INSERT OR IGNORE INTO user_badges(user_id,badge,got_at,slot) VALUES(?,?,?,0)", (uid, key, now()))[0]
-    if created and BADGES[key].get("premium"):
-        set_premium(uid, 30 * 86400)
+    if created:
+        if BADGES[key].get("premium"):
+            set_premium(uid, 30 * 86400)
+        sync_badge_rank(uid)
     return bool(created)
 
 
 def take_badge(uid: int, key: str) -> bool:
     if key not in BADGES:
         return False
+    if uid == OWNER_ID and key == "dev":
+        return False
     removed = x("DELETE FROM user_badges WHERE user_id=? AND badge=?", (uid, key))[0]
-    if removed and BADGES[key].get("premium"):
-        x("UPDATE user_premium SET until=0 WHERE user_id=?", (uid,))
+    if removed:
+        if BADGES[key].get("premium"):
+            x("UPDATE user_premium SET until=0 WHERE user_id=?", (uid,))
+        u = get_user(uid)
+        title = BADGE_RANK.get(key, (None,))[0]
+        if title and (u["rank_title"] or "Новичок") == title:
+            if not sync_badge_rank(uid):
+                update_user(uid, rank_title="Новичок")
     return bool(removed)
 
 
 def my_badges(uid: int):
+    if uid == OWNER_ID and "dev" in BADGES and not has_badge(uid, "dev"):
+        give_badge(uid, "dev")
     have = {r["badge"] for r in q("SELECT badge FROM user_badges WHERE user_id=?", (uid,))}
     return [b for b in BADGE_ORDER if b in have]
 
 
+def sync_badge_rank(uid: int) -> Optional[str]:
+    """Ставит ранг по старшей галочке игрока. Возвращает название ранга."""
+    have = set(my_badges(uid))
+    for key in BADGE_ORDER:
+        if key in have and key in BADGE_RANK:
+            title, flags = BADGE_RANK[key]
+            update_user(uid, rank_title=title, **flags)
+            return title
+    return None
+
+
 def profile_badges(uid: int):
+    owned = my_badges(uid)
     pinned = [r["badge"] for r in q("SELECT badge FROM user_badges WHERE user_id=? AND slot=1", (uid,)) if r["badge"] in BADGES]
     if not pinned:
-        pinned = my_badges(uid)
+        pinned = owned
+    if uid == OWNER_ID and "dev" in owned:
+        pinned = ["dev"] + [b for b in pinned if b != "dev"]
     order = {b: i for i, b in enumerate(BADGE_ORDER)}
     pinned.sort(key=lambda b: order.get(b, 99))
     return pinned[:MAX_PROFILE_BADGES]
@@ -5538,7 +5967,9 @@ def badges_view(uid: int):
     have = my_badges(uid)
     pinned = profile_badges(uid)
     prem = premium_left(uid)
-    lines = ["🛡 <b>ГАЛОЧКИ</b>\n"]
+    rank = get_user(uid)["rank_title"] or "Новичок"
+    lines = ["🛡 <b>ГАЛОЧКИ</b>\n",
+             f"🏷 Твой ранг: <b>{esc(rank)}</b>\n"]
     if have:
         lines.append("<b>Твои галочки:</b>")
         for b in have:
@@ -5550,6 +5981,7 @@ def badges_view(uid: int):
     lines.append(f"\n<b>Профиль:</b> {' '.join(badge(b) for b in pinned) if pinned else '—'} ({len(pinned)}/{MAX_PROFILE_BADGES})")
     if prem:
         lines.append(f"💠 Premium: <b>{dur(prem)}</b> · шанс победы ×1.5 · бонус ×2 · смена ника")
+    lines.append("\n<i>При покупке галочки ранг профиля меняется автоматически.</i>")
     rows = []
     if have:
         rows.append([btn("➕ Добавить в профиль", "badges:add")])
@@ -5575,7 +6007,7 @@ def badges_pin_view(uid: int, remove: bool = False):
         is_in = q("SELECT 1 FROM user_badges WHERE user_id=? AND badge=? AND slot=1", (uid, b), one=True)
         if remove and not is_in:
             continue
-        mark = "✅" if is_in else "▫️"
+        mark = "•" if is_in else "○"
         rows.append([btn(f"{mark} {BADGES[b]['title']}", f"badges:{'unpin' if remove else 'pin'}:{b}", icon=b)])
     if not rows:
         return "В профиле сейчас нет галочек.", kb([btn("Назад", "badges:menu", "door")])
@@ -5636,7 +6068,8 @@ async def cb_badges_action(cb: CallbackQuery):
             if not spend(uid, price):
                 return await ans(cb, f"Нужно {fmt(price)} RCOIN", True)
             give_badge(uid, b)
-            await ans(cb, f"Куплено: {BADGES[b]['title']}!", True)
+            rank = get_user(uid)["rank_title"] or "Новичок"
+            await ans(cb, f"Куплено: {BADGES[b]['title']}! Ранг: {rank}", True)
         else:
             await ans(cb, f"Оплата Stars: {BADGES[b]['price_stars']}⭐ — напиши админу", True)
             return await safe_edit(cb, (f"{badge(b)} <b>{BADGES[b]['title']}</b>\n\n"
@@ -5654,10 +6087,11 @@ async def cb_badges_action(cb: CallbackQuery):
 # =====================================================================
 def adm_badges_view(uid: int):
     text = "🛡 <b>УПРАВЛЕНИЕ ГАЛОЧКАМИ</b>\n\nВыбери галочку, затем введи ID или @ник игрока."
-    rows = [[btn(f"Выдать {badge_text(b)}", f"adm:bg:{b}")] for b in BADGE_ORDER]
+    rows = [[btn(f"Выдать {BADGES[b]['title']}", f"adm:bg:{b}", icon=b)] for b in BADGE_ORDER]
     rows.append([btn("Снять галочку", "adm:bgrm")])
-    rows.append([btn("💠 Premium 30 дней", "adm:bgprem")])
-    rows.append([btn("Себе Premium", "adm:bgself")])
+    rows.append([btn("💠 Premium 30 дней", "adm:bgprem", icon="diamond")])
+    rows.append([btn("🎖 Выдать себе", "adm:self")])
+    rows.append([btn("Назад", "adm:menu", "door")])
     return text, kb(*rows)
 
 
@@ -5668,9 +6102,12 @@ async def cb_adm_badges(cb: CallbackQuery, state: FSMContext):
     parts = cb.data.split(":")
     act = parts[1]
     if act == "bg":
-        return await ask(cb, state, "adm_badge", f"Выдать {BADGES[parts[2]]['title']}\nВведи ID игрока:", badge=parts[2])
+        key = parts[2]
+        if key == "dev" and cb.from_user.id != OWNER_ID:
+            return await ans(cb, "Галочку владельца может выдать только владелец", True)
+        return await ask(cb, state, "adm_badge", f"Выдать {BADGES[key]['title']}\nВведи ID игрока:", badge=key)
     if act == "bgrm":
-        rows = [[btn(f"Снять {badge_text(b)}", f"adm:bgd:{b}")] for b in BADGE_ORDER]
+        rows = [[btn(f"Снять {BADGES[b]['title']}", f"adm:bgd:{b}", icon=b)] for b in BADGE_ORDER]
         rows.append([btn("Назад", "adm:badges", "door")])
         return await (safe_edit(cb, "Снять какую галочку?", kb(*rows)) or ans(cb))
     if act == "bgd":
@@ -5687,13 +6124,18 @@ async def cb_adm_badges(cb: CallbackQuery, state: FSMContext):
 
 
 async def _badge_flow(m: Message, state: FSMContext, key: str, remove: bool = False):
+    if key == "dev" and m.from_user.id != OWNER_ID:
+        await state.clear()
+        return await m.reply("⛔ Галочку владельца может выдавать только владелец.")
     t = find_user((m.text or "").strip())
     if not t:
         return await m.reply("❌ Игрок не найден. Введи ID или @ник.")
     await state.clear()
     if remove:
-        take_badge(t["user_id"], key)
-        await m.reply(f"✅ Снята {BADGES[key]['title']} у {esc(t['display_name'] or str(t['user_id']))}")
+        if take_badge(t["user_id"], key):
+            await m.reply(f"✅ Снята {BADGES[key]['title']} у {esc(t['display_name'] or str(t['user_id']))}")
+        else:
+            await m.reply("⛔ Эту галочку снять нельзя.")
     else:
         give_badge(t["user_id"], key)
         await m.reply(f"✅ Выдана {BADGES[key]['title']} игроку {esc(t['display_name'] or str(t['user_id']))}")
@@ -5862,6 +6304,53 @@ def api_nft_state(u, body):
 def api_nft_mint(u, body):
     ok, msg = mint_nft(u["user_id"])
     return {"ok": ok, "msg": re.sub(r"<[^>]+>", "", msg)}
+
+
+EMOJI_CACHE: Dict[str, Tuple[bytes, str]] = {}
+_emoji_lock: Optional[asyncio.Lock] = None
+
+
+async def emoji_asset(request: web.Request):
+    """Отдаёт статичную картинку кастомного эмодзи для веб-приложения."""
+    eid = re.sub(r"\D", "", request.match_info["eid"].split(".")[0])
+    if not eid:
+        raise web.HTTPNotFound()
+    hit = EMOJI_CACHE.get(eid)
+    if hit:
+        return web.Response(body=hit[0], content_type=hit[1], headers={"Cache-Control": "public, max-age=604800"})
+    global _emoji_lock
+    if _emoji_lock is None:
+        _emoji_lock = asyncio.Lock()
+    async with _emoji_lock:
+        hit = EMOJI_CACHE.get(eid)
+        if hit:
+            return web.Response(body=hit[0], content_type=hit[1], headers={"Cache-Control": "public, max-age=604800"})
+        try:
+            stickers = await bot.get_custom_emoji_stickers(custom_emoji_ids=[eid])
+        except Exception as e:
+            log.debug("emoji fetch %s: %s", eid, e)
+            stickers = []
+        if not stickers:
+            raise web.HTTPNotFound()
+        sticker = stickers[0]
+        thumb = getattr(sticker, "thumbnail", None)
+        file_id = thumb.file_id if thumb else sticker.file_id
+        try:
+            f = await bot.get_file(file_id)
+            buf = await bot.download_file(f.file_path)
+            raw = buf.getvalue()
+            mime = "image/webp"
+            if raw[:8] == b"\x89PNG\r\n\x1a\n":
+                mime = "image/png"
+            elif raw[:4] == b"GIF8":
+                mime = "image/gif"
+            elif raw[:2] == b"\xff\xd8":
+                mime = "image/jpeg"
+            EMOJI_CACHE[eid] = (raw, mime)
+            return web.Response(body=raw, content_type=mime, headers={"Cache-Control": "public, max-age=604800"})
+        except Exception as e:
+            log.warning("emoji download %s: %s", eid, e)
+            raise web.HTTPNotFound()
 
 
 async def nft_asset(request: web.Request):
