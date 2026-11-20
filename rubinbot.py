@@ -48,7 +48,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (BotCommand, BufferedInputFile, CallbackQuery, ErrorEvent, FSInputFile,
                            InlineKeyboardButton, InlineKeyboardMarkup, InlineQuery, InlineQueryResultArticle,
-                           InputTextMessageContent, LabeledPrice, Message, PreCheckoutQuery, WebAppInfo)
+                           InputTextMessageContent, LabeledPrice, LinkPreviewOptions, Message, PreCheckoutQuery, WebAppInfo)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -3604,13 +3604,37 @@ BGS = [("Обычный", 1.0, 30), ("Морозный", 1.2, 25), ("Празд�
 PHOTOS = ["🎄", "🎁", "⛄", "❄️", "🎅", "🤶", "🦌", "🎀", "✨", "🌲", "🔔", "🍊", "🥂", "🧸", "🐧", "🐲", "🦄", "🤖", "🌌", "👑"]
 
 
+def _sync_nft_sequence():
+    if not DATABASE_URL:
+        return
+    try:
+        x("SELECT setval(pg_get_serial_sequence('nft_items','id'), (SELECT MAX(id) FROM nft_items))")
+    except Exception:
+        log.debug("nft sequence sync failed", exc_info=True)
+
+
 def make_nft(owner: int, name: str, rarity: str, photo: str = None, desc: str = "", price: int = None,
-             model: str = None, background: str = None) -> int:
+             model: str = None, background: str = None, nft_id: Optional[int] = None) -> int:
     if photo is None:
         photo = next((e for n, e in NFT_POOL.get(rarity, []) if n == name), random.choice(PHOTOS))
     price = price or RARITY_BASE.get(rarity, 50_000)
     model = model or random.choices(MODELS, weights=[w for _, _, w in MODELS])[0][0]
     background = background or random.choices(BGS, weights=[w for _, _, w in BGS])[0][0]
+    if nft_id and int(nft_id) > 0:
+        nft_id = int(nft_id)
+        exists = q("SELECT 1 FROM nft_items WHERE id=?", (nft_id,), one=True)
+        if exists:
+            x("UPDATE nft_items SET owner_id=?, name=?, base_name=?, level=1, rarity=?, price=?, "
+              "description=?, photo=?, model=?, background=? WHERE id=?",
+              (owner, name, name, rarity, price, desc, photo, model, background, nft_id))
+        else:
+            x("INSERT INTO nft_items(id,owner_id,name,base_name,level,rarity,price,created_at,description,photo,model,background) "
+              "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+              (nft_id, owner, name, name, 1, rarity, price, now(), desc, photo, model, background))
+            _sync_nft_sequence()
+        for key in ("nftpng", "nftsvg", "nftimg"):
+            kv_set(f"{key}:{nft_id}", "")
+        return nft_id
     return x("INSERT INTO nft_items(owner_id,name,base_name,level,rarity,price,created_at,description,photo,model,background) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
              (owner, name, name, 1, rarity, price, now(), desc, photo, model, background))[1]
 
@@ -4950,7 +4974,7 @@ ADMIN_ACTIONS = {
     "treasury": ("🏦 Доступ к казне (вкл/выкл)", True, []),
     "info": ("ℹ️ Инфо об игроке", True, []),
     "history": ("📜 История игр игрока", True, []),
-    "nft_create": ("🎨 Создать NFT игроку", True, ["Название NFT", "Редкость: common / uncommon / rare / epic / legendary", "Оценка в RCOIN (или 0 — по редкости)", "Описание (или «-»)"]),
+    "nft_create": ("🎨 Создать NFT игроку", True, ["Название NFT", "Редкость: common / uncommon / rare / epic / legendary", "Оценка в RCOIN (или 0 — по редкости)", "Описание (или «-»)", "Номер NFT (ID) или 0 — авто"]),
     "gift_give": ("💌 Выдать подарок-бокс игроку", True, ["Редкость: common / uncommon / rare / epic / legendary / random"]),
     "gift_gen": ("🎁 Сгенерировать подарок (код)", False, ["Редкость: common / uncommon / rare / epic / legendary / random"]),
     "mailing": ("📨 Рассылка", False, ["Текст рассылки (HTML разрешён)"]),
@@ -5051,8 +5075,15 @@ def admin_exec(action: str, tid: Optional[int], a: List[str], by: int) -> str:
         if rar not in RARITY_BASE:
             return "❌ Неверная редкость."
         price = parse_amount(a[2]) or RARITY_BASE[rar]
-        nid = make_nft(tid, a[0][:30], rar, None, "" if a[3] == "-" else a[3][:200], price)
-        return f"🎨 NFT создан и выдан {nm}:\n{nft_card(q('SELECT * FROM nft_items WHERE id=?', (nid,), one=True))}"
+        try:
+            want_id = int((a[4] if len(a) > 4 else "0").strip() or 0)
+        except (TypeError, ValueError):
+            want_id = 0
+        occupied = bool(want_id > 0 and q("SELECT 1 FROM nft_items WHERE id=?", (want_id,), one=True))
+        nid = make_nft(tid, a[0][:30], rar, None, "" if a[3] == "-" else a[3][:200], price, nft_id=want_id)
+        note = " Номер уже существовал — данные и владелец перезаписаны." if occupied else ""
+        return (f"🎨 NFT выдан {nm}:{note}\n"
+                f"{nft_card(q('SELECT * FROM nft_items WHERE id=?', (nid,), one=True))}")
     elif action in ("gift_give", "gift_gen"):
         rar = a[0].lower()
         if rar == "random":
@@ -6901,7 +6932,7 @@ def nft_public_url(url: str) -> str:
     return ""
 
 
-def balance_kb(uid: int, photo_url: str = "") -> InlineKeyboardMarkup:
+def balance_kb(uid: int) -> InlineKeyboardMarkup:
     """Кнопки баланса — вертикально, недоступные бонусы скрываются."""
     rows = []
     if bonus_state(get_user(uid))[0]:
@@ -6909,8 +6940,6 @@ def balance_kb(uid: int, photo_url: str = "") -> InlineKeyboardMarkup:
     if daily5_available(uid):
         rows.append([btn("Ежедневный", "bal:daily", "star", style="success")])
     rows.append([btn("Заработать", "bal:earn", "balance", style="primary")])
-    if photo_url:
-        rows.append([btn("Открыть фото", url=photo_url, icon="nft", style="primary")])
     return kb(*rows)
 
 
@@ -6918,88 +6947,23 @@ async def send_balance(message: Message, uid: int):
     url, cap = nft_photo(uid, "balance")
     public = nft_public_url(url)
     text = balance_text(uid)
-    markup = balance_kb(uid, public)
-    if public:
-        tail = f'\n\n<a href="{public}">Открыть полное фото</a>'
-        caption = text[:max(1, 1024 - len(tail))] + tail
-    else:
-        caption = text[:1024]
-    if url.startswith("db:"):
-        try:
-            image_id = int(url.split(":", 1)[1])
-            raw = base64.b64decode(kv_get(f"nftpng:{image_id}"), validate=True)
-            await message.answer_photo(BufferedInputFile(raw, filename=f"rcoin_nft_{image_id}.png"),
-                                       caption=caption, reply_markup=markup)
-            return
-        except Exception as e:
-            log.warning("Не удалось отправить NFT из БД: %s", e)
-    if url and not url.startswith("http"):
-        try:
-            from aiogram.types import FSInputFile
-            await message.answer_photo(FSInputFile(url), caption=caption, reply_markup=markup)
-            return
-        except Exception:
-            pass
-    if url.startswith("http"):
-        try:
-            await message.answer_photo(url, caption=caption, reply_markup=markup)
-            return
-        except Exception:
-            pass
-    if BALANCE_BANNER.exists():
-        try:
-            await message.answer_photo(FSInputFile(str(BALANCE_BANNER)), caption=caption, reply_markup=markup)
-            return
-        except Exception:
-            pass
-    await message.reply(text, reply_markup=markup)
+    markup = balance_kb(uid)
+    preview = LinkPreviewOptions(url=public, prefer_large_media=True, show_above_text=True) if public else None
+    await message.reply(text, reply_markup=markup, link_preview_options=preview)
 
 
 async def send_profile_photo(message: Message, uid: int):
     url, cap = nft_photo(uid, "profile")
     public = nft_public_url(url)
     text = (f"{E('profile')} <b>Профиль</b>\n{rank_line(uid)}\n{cap}").strip()
-    markup = kb([btn("Открыть фото", url=public, icon="nft", style="primary")]) if public else None
-    if public:
-        tail = f'\n\n<a href="{public}">Открыть полное фото</a>'
-        caption = text[:max(1, 1024 - len(tail))] + tail
-    else:
-        caption = text[:1024]
-    if url.startswith("db:"):
-        try:
-            image_id = int(url.split(":", 1)[1])
-            raw = base64.b64decode(kv_get(f"nftpng:{image_id}"), validate=True)
-            await message.answer_photo(BufferedInputFile(raw, filename=f"profile_{image_id}.png"),
-                                       caption=caption, reply_markup=markup)
-            return
-        except Exception as e:
-            log.warning("Не удалось отправить NFT профиля: %s", e)
-    if url and not url.startswith("http"):
-        try:
-            await message.answer_photo(FSInputFile(url), caption=caption, reply_markup=markup)
-            return
-        except Exception:
-            pass
-    if url.startswith("http"):
-        try:
-            await message.answer_photo(url, caption=caption, reply_markup=markup)
-            return
-        except Exception:
-            pass
-    if BALANCE_BANNER.exists():
-        try:
-            await message.answer_photo(FSInputFile(str(BALANCE_BANNER)), caption=caption, reply_markup=markup)
-            return
-        except Exception:
-            pass
-    await message.reply(text, reply_markup=markup)
+    preview = LinkPreviewOptions(url=public, prefer_large_media=True, show_above_text=True) if public else None
+    await message.reply(text, link_preview_options=preview)
 
 
 @dp.callback_query(F.data == "bal:main")
 async def cb_balance(cb: CallbackQuery):
     uid = cb.from_user.id
-    url, _ = nft_photo(uid, "balance")
-    await safe_edit(cb, balance_text(uid), balance_kb(uid, nft_public_url(url)))
+    await safe_edit(cb, balance_text(uid), balance_kb(uid))
     await ans(cb)
 
 
@@ -7012,8 +6976,7 @@ async def cb_bonus(cb: CallbackQuery):
     update_user(uid, bonus_last_time=now())
     amount = BONUS_AMOUNT * bonus_mult(uid)
     add_coin(uid, amount)
-    url, _ = nft_photo(uid, "balance")
-    await safe_edit(cb, balance_text(uid), balance_kb(uid, nft_public_url(url)))
+    await safe_edit(cb, balance_text(uid), balance_kb(uid))
     await ans(cb, f"+{fmt(amount)} RCOIN", True)
 
 
