@@ -107,6 +107,7 @@ EMOJI_IDS = {
     "item_1": "5332717942599618048", "item_2": "5404752966584394198", "item_3": "5280924618444514633",
     "item_4": "5368488358681000659", "item_5": "5398024200235529935", "item_6": "5449449325434266744",
     "item_7": "5201924046563852634", "item_8": "5199959030306456092", "item_9": "5316599316884766402",
+    "snowflake": "5449449325434266744",
 }
 FALLBACK = {
     "games": "🎮", "dice": "🎲", "roulette": "🎰", "fortune": "🎡", "mines": "💣", "crash": "🚀",
@@ -116,7 +117,7 @@ FALLBACK = {
     "nft": "🖼", "referral": "👥", "check": "✅", "treasury": "🏛", "win": "🏆", "lose": "💔",
     "settings": "⚙️", "admin": "👑", "donate": "🎁", "ad": "📢", "market": "🛒", "question": "❔",
     "item_1": "❄️", "item_2": "🍬", "item_3": "🧦", "item_4": "🧤", "item_5": "🍪", "item_6": "⭐",
-    "item_7": "🔔", "item_8": "🧊", "item_9": "☕",
+    "item_7": "🔔", "item_8": "🧊", "item_9": "☕", "snowflake": "❄️",
 }
 SOUVENIRS = {"item_1": "Снежный шар", "item_2": "Леденец-трость", "item_3": "Носок с подарками",
              "item_4": "Варежка Деда Мороза", "item_5": "Пряник-драчун", "item_6": "Ёлочная звезда",
@@ -270,7 +271,7 @@ EMOJI_ALIASES = {
     "🏦": "bank", "💎": "diamond", "⭐": "star", "🔒": "lock", "🖼": "nft",
     "👥": "referral", "✅": "check", "🏛": "treasury", "🏆": "win", "💔": "lose",
     "⚙": "settings", "👑": "admin", "🎁": "donate", "📢": "ad", "🛒": "market",
-    "❔": "question", "❄": "item_1", "🍬": "item_2", "🧦": "item_3", "🧤": "item_4",
+    "❔": "question", "❄": "snowflake", "❄️": "snowflake", "🍬": "item_2", "🧦": "item_3", "🧤": "item_4",
     "🍪": "item_5", "🔔": "item_7", "🧊": "item_8", "☕": "item_9",
     "☑": "black", "✔": "blue", "💠": "rubin", "🛡": "moder", "🎧": "support",
     "🧪": "tester", "🎄": "ny", "👨": "dev",
@@ -950,7 +951,7 @@ PROTECTED = {
     "дс", "очко", "банк", "барабан", "краш", "пирамида", "майнер", "хило", "маркет", "кн", "башня", "арена",
     "охота", "спин", "футбол", "склад", "ивенты", "санте", "обмен", "чек", "дать", "нк", "перевод", "антилудо",
     "ежедневный", "бонус", "казна", "рекл", "донат", "помочь", "инвентарь", "antiludo",
-    "игра", "сыграть", "зимняя", "зимние", "эмодзи", "смайл", "лабиринт", "лаб",
+    "игра", "сыграть", "зимняя", "зимние", "эмодзи", "смайл", "лабиринт", "лаб", "нг",
 }
 _sub_cache: Dict[int, float] = {}
 
@@ -1442,16 +1443,17 @@ def mines_cash(sid: int, uid: int) -> dict:
 
 def mines_kb(sid: int, st: dict, over: bool = False) -> InlineKeyboardMarkup:
     opened, mines = set(st["open"]), set(st["mines"])
+    safe_icon = "snowflake" if st.get("ev") else "diamond"
     rows = []
     for r in range(5):
         row = []
         for c in range(5):
             i = r * 5 + c
             if over:
-                icon = "mines" if i in mines else ("diamond" if i in opened else "question")
+                icon = "mines" if i in mines else (safe_icon if i in opened else "question")
                 row.append(btn("\u2800", "noop", icon=icon))
             elif i in opened:
-                row.append(btn("\u2800", "noop", icon="diamond"))
+                row.append(btn("\u2800", "noop", icon=safe_icon))
             else:
                 row.append(qbtn(f"mn:o:{sid}:{i}"))
         rows.append(row)
@@ -1589,6 +1591,7 @@ def climb_cash(sid: int, uid: int) -> dict:
 
 def climb_kb(sid: int, st: dict, over: bool = False) -> InlineKeyboardMarkup:
     picks, cols, levels = st["picks"], st["cols"], st["levels"]
+    safe_icon = "snowflake" if st.get("ev") else "diamond"
     lvl = len(picks)
     rows = []
     if st["kind"] == "tower":
@@ -1600,7 +1603,7 @@ def climb_kb(sid: int, st: dict, over: bool = False) -> InlineKeyboardMarkup:
             for c in range(cols):
                 bomb = c in st["bombs"][r]
                 if c == picks[r]:
-                    icon = "crash" if bomb else "diamond"
+                    icon = "crash" if bomb else safe_icon
                 elif over and bomb:
                     icon = "mines"
                 else:
@@ -2394,7 +2397,7 @@ def reg_view(name: str, *words: str):
 
 
 reg_view("main", "меню", "menu", "старт")
-reg_view("games", "игры", "games", "игра")
+reg_view("games", "игры", "games")
 reg_view("profile", "профиль", "profile")
 reg_view("help", "помощь", "help")
 reg_view("history", "история")
@@ -4320,6 +4323,13 @@ def ev_add_pot(n: int):
     kv_set(EV_POT, str(ev_pot() + n))
 
 
+def ev_award_snow(uid: int, bet: int) -> int:
+    n = max(1, int(bet) // 10_000)
+    u = get_user(uid)
+    update_user(uid, ev_points=int(u.get("ev_points") or 0) + n)
+    return n
+
+
 EV_MINES_MIN = 10_000
 EV_TOWER_MIN = 10_000
 EV_ALIASES = {
@@ -4342,7 +4352,8 @@ def ev_games_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
     pot = ev_pot()
     lines = [f"{badge('ny')} <b>НОВОГОДНИЕ ИГРЫ</b> {E('item_6')}",
              f"<blockquote>{E('balance')} Баланс: <b>{fmt(u['balance_coin'])}</b> RCOIN\n"
-             f"{E('item_7')} Джекпот ивентов: <b>{fmt(pot)}</b> RCOIN</blockquote>", ""]
+             f"{E('item_7')} Джекпот ивентов: <b>{fmt(pot)}</b> RCOIN\n"
+             f"{E('snowflake')} Снежинки: <b>{fmt(u.get('ev_points') or 0)}</b></blockquote>", ""]
     for i, g in SNOW_GAMES.items():
         lines.append(f"{E('item_' + str(i))} <b>{g['name']}</b> — {g['desc']}\n"
                      f"   Мин. <b>{fmt(g['min'])}</b> · выплата <b>x{g['bp'][0]:.1f}</b>")
@@ -4636,10 +4647,16 @@ async def f_ev_bet(m: Message, state: FSMContext, d, txt):
         if key == "mines":
             sid = mines_start(m.from_user.id, bet, 3)
             st = sess_get(sid)["state"]
+            st["ev"] = True
+            sess_save(sid, st)
+            ev_award_snow(m.from_user.id, bet)
             return await m.reply(mines_text(u, bet, st, "\n❄️ <i>Снежные мины: 3 мины</i>"),
                                  reply_markup=mines_kb(sid, st))
         sid = climb_start(m.from_user.id, bet, "tower", 1)
         st = sess_get(sid)["state"]
+        st["ev"] = True
+        sess_save(sid, st)
+        ev_award_snow(m.from_user.id, bet)
         return await m.reply(climb_text(u, bet, st, "\n❄️ <i>Снежная башня</i>"),
                              reply_markup=climb_kb(sid, st))
     g = next((x for x in SNOW_GAMES.values() if x["key"] == key), None)
@@ -4651,6 +4668,7 @@ async def f_ev_bet(m: Message, state: FSMContext, d, txt):
     if bet < g["min"]:
         return await m.reply(f"Минимальная ставка <b>{fmt(g['min'])}</b> RCOIN. Введи сумму ещё раз или «отмена».")
     await state.clear()
+    ev_award_snow(m.from_user.id, bet)
     idx = ev_game_index(key)
     await m.reply(run_snow(m.from_user.id, bet, key),
                   reply_markup=kb([btn("Играть ещё", f"evg:{key}", icon=f"item_{idx}"),
@@ -4658,7 +4676,7 @@ async def f_ev_bet(m: Message, state: FSMContext, d, txt):
                                   [btn("К ивентам", "menu:events", "door")]))
 
 
-@dp.message(P("игра", "игры", "зимняя игра", "зимние игры", "сыграть"))
+@dp.message(P("игра", "зимняя игра", "зимние игры", "сыграть"))
 async def cmd_play_event(message: Message, state: FSMContext):
     u = await gate(message, 1.5)
     if not u:
@@ -4697,10 +4715,66 @@ async def cmd_play_event(message: Message, state: FSMContext):
                           key=key)
     if bet < g["min"]:
         return await message.reply(f"Минимальная ставка <b>{fmt(g['min'])}</b> RCOIN.")
+    ev_award_snow(u["user_id"], bet)
     await message.reply(run_snow(u["user_id"], bet, key),
                         reply_markup=kb([btn("Играть ещё", f"evg:{key}", icon=f"item_{ev_game_index(key)}"),
                                          btn("Все игры", "ev:games!", icon="games")],
                                         [btn("К ивентам", "menu:events", "door")]))
+
+
+@dp.message(P("нг"))
+async def cmd_ng(message: Message, state: FSMContext):
+    u = await gate(message, 1.5)
+    if not u:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        return await message.reply(
+            "Формат без кнопок:\n"
+            "<code>нг мины 10000 3</code>\n"
+            "<code>нг башня 10000 1</code>\n"
+            "<code>нг лабиринт 10000</code>")
+    game = parts[1].lower()
+    bet = parse_amount(parts[2], u["balance_coin"])
+    if bet <= 0:
+        return await message.reply("Введи положительную ставку.")
+    if game in ("мины", "мин", "mines"):
+        cnt = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 3
+        if not 1 <= cnt <= 10:
+            return await message.reply("Мин от 1 до 10.")
+        if bet < EV_MINES_MIN:
+            return await message.reply(f"Минимальная ставка <b>{fmt(EV_MINES_MIN)}</b> RCOIN.")
+        if not spend(u["user_id"], bet):
+            return await message.reply("Недостаточно RCOIN.")
+        sid = mines_start(u["user_id"], bet, cnt)
+        st = sess_get(sid)["state"]
+        st["ev"] = True
+        sess_save(sid, st)
+        n = ev_award_snow(u["user_id"], bet)
+        return await message.reply(
+            mines_text(u, bet, st, f"\n{E('snowflake')} Снежинок: <b>+{n}</b>"),
+            reply_markup=mines_kb(sid, st))
+    if game in ("башня", "башн", "tower"):
+        bombs = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+        if not 1 <= bombs <= 3:
+            return await message.reply("Мин в ряду от 1 до 3.")
+        if bet < EV_TOWER_MIN:
+            return await message.reply(f"Минимальная ставка <b>{fmt(EV_TOWER_MIN)}</b> RCOIN.")
+        if not spend(u["user_id"], bet):
+            return await message.reply("Недостаточно RCOIN.")
+        sid = climb_start(u["user_id"], bet, "tower", bombs)
+        st = sess_get(sid)["state"]
+        st["ev"] = True
+        sess_save(sid, st)
+        n = ev_award_snow(u["user_id"], bet)
+        return await message.reply(
+            climb_text(u, bet, st, f"\n{E('snowflake')} Снежинок: <b>+{n}</b>"),
+            reply_markup=climb_kb(sid, st))
+    if game in ("лабиринт", "лаб", "lab"):
+        if bet < LAB_MIN:
+            return await message.reply(f"Минимальная ставка <b>{fmt(LAB_MIN)}</b> RCOIN.")
+        return await lab_offer(message, bet)
+    return await message.reply("Игра не найдена. Доступно: мины, башня, лабиринт.")
 
 
 @dp.callback_query(F.data == "ev:games!")
@@ -4891,7 +4965,7 @@ def admin_kb() -> InlineKeyboardMarkup:
               [a("reset_coin"), a("reset_bank")], [a("reset_rbp"), a("reset_all")],
               [a("rank_scammer"), a("rank_admin")], [a("rank_donater"), a("rank_official")],
               [a("rank_custom"), a("rank_owner")],
-              [btn("🎖 Выдать себе", "adm:self", icon="admin")],
+              [btn("🎖 Выдать себе", "adm:self", icon="admin"), btn("🛡 Галочки игроку", "adm:badges", "check")],
               [a("rank_clear"), a("treasury")],
               [btn("📊 Статистика", "adm:stats"), btn("👥 Игроки", "adm:users")],
               [a("mailing"), btn("💾 Выгрузка БД", "adm:export")],
@@ -5018,6 +5092,8 @@ async def cb_admin(cb: CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id):
         return await ans(cb, "Нет прав", True)
     action = cb.data.split(":")[1]
+    if action == "badges" or action.startswith("bg"):
+        return await cb_adm_badges(cb, state)
     if action == "menu":
         await safe_edit(cb, f"{E('admin')} <b>АДМИН-ПАНЕЛЬ</b>\n\nВыберите действие:", admin_kb())
         return await ans(cb)
@@ -5109,16 +5185,29 @@ async def f_adm_selfrank(m: Message, state: FSMContext, d, txt):
     await m.reply(f"🎖 Личный ранг: <b>{esc(title)}</b>")
 
 
+MAILING_ACTIVE = False
+
+
 async def mailing(m: Message, text: str):
+    global MAILING_ACTIVE
+    if MAILING_ACTIVE:
+        return await m.reply("⏳ Рассылка уже идёт.")
+    MAILING_ACTIVE = True
     ids = [r["user_id"] for r in q("SELECT user_id FROM users")]
     ok = fail = 0
-    for uid in ids:
-        try:
-            await bot.send_message(uid, text)
-            ok += 1
-        except Exception:
-            fail += 1
-        await asyncio.sleep(0.05)
+    try:
+        for uid in ids:
+            try:
+                try:
+                    await bot.send_message(uid, text[:4096], parse_mode=ParseMode.HTML)
+                except TelegramBadRequest:
+                    await bot.send_message(uid, text[:4096])
+                ok += 1
+            except Exception:
+                fail += 1
+            await asyncio.sleep(0.07)
+    finally:
+        MAILING_ACTIVE = False
     try:
         await m.reply(f"✅ <b>Рассылка завершена</b>\n👥 Всего: {len(ids)}\n✅ Доставлено: {ok}\n❌ Ошибок: {fail}")
     except Exception:
@@ -5946,7 +6035,7 @@ async function pollArena(){if(!INIT)return;const j=await api('arena');if(j.ok){A
 function setArenaBet(v,fill){v=Math.max(0,Math.floor(Number(v)||0));arenaBet=v;const inp=$('arenaBetInput');if(inp&&(fill||document.activeElement!==inp))inp.value=v;document.querySelectorAll('#betRow .chip').forEach(c=>c.classList.toggle('on',Number(c.dataset.bet)===v))}
 async function arenaJoin(){let bet=Math.max(1,Math.floor(Number(arenaBet)||0));const j=await api('arena_join',{color:arenaColor,bet,photo_url:arenaAvatar||TU.photo_url||''});if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);haptic();toast('Ты в лобби!')}async function arenaLeave(){const j=await api('arena_leave');if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);toast('Ты покинул лобби')}
 async function arenaAdd(){const extra=Math.max(1,Math.floor(Number(arenaBet)||0));const j=await api('arena_add',{bet:extra});if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);toast('Ставка увеличена')}
-async function loadArenaGifts(){if(!INIT)return;const box=$('arenaGifts');if(!box)return;const j=await api('nft_state');if(!j.ok){box.innerHTML='<p class="muted">Не удалось загрузить подарки.</p>';return}if(!j.items||!j.items.length){box.innerHTML='<p class="muted">Нет NFT — создай его в коллекции.</p>';return}box.innerHTML='';j.items.forEach(x=>{const d=document.createElement('div');d.className='gift-card';const im=document.createElement('img');im.src=x.url;im.alt=x.name;const b=document.createElement('b');b.textContent='#'+x.id;const bt=document.createElement('button');bt.className='btn mini '+(arenaAvatar===x.url?'green':'ghost');bt.textContent=arenaAvatar===x.url?'Выбран':'В арену';bt.onclick=()=>setArenaGift(x.url);d.append(im,b,bt);box.append(d)})}
+async function loadArenaGifts(){if(!INIT)return;const box=$('arenaGifts');if(!box)return;const j=await api('nft_state');if(!j.ok){box.innerHTML='<p class="muted">Не удалось загрузить подарки.</p>';return}if(!j.items||!j.items.length){box.innerHTML='<p class="muted">Нет NFT — создай его в коллекции.</p>';return}box.innerHTML='';j.items.forEach(x=>{const d=document.createElement('div');d.className='gift-card';const im=document.createElement('img');im.src=x.url;im.alt=x.name;const lnk=document.createElement('a');lnk.href=x.url;lnk.target='_blank';lnk.rel='noopener';lnk.append(im);const b=document.createElement('b');b.textContent='#'+x.id;const bt=document.createElement('button');bt.className='btn mini '+(arenaAvatar===x.url?'green':'ghost');bt.textContent=arenaAvatar===x.url?'Выбран':'В арену';bt.onclick=()=>setArenaGift(x.url);d.append(lnk,b,bt);box.append(d)})}
 function setArenaGift(url){arenaAvatar=url||'';try{localStorage.setItem('rcoin_arena_avatar',arenaAvatar)}catch(e){}toast(arenaAvatar?'NFT будет аватаром в арене':'Аватар сброшен');loadArenaGifts()}
 function applyLook(){let t='dark',w='gradient';try{t=localStorage.getItem('rcoin_theme')||'dark';w=localStorage.getItem('rcoin_wall')||'gradient'}catch(e){}document.body.classList.remove('theme-blue','theme-purple','theme-green');if(t!=='dark')document.body.classList.add('theme-'+t);document.body.classList.toggle('wall-banner',w==='banner');document.body.classList.toggle('wall-plain',w==='plain');document.querySelectorAll('#themeRow .theme-chip').forEach(b=>b.classList.toggle('on',b.dataset.theme===t));document.querySelectorAll('#wallRow .chip').forEach(b=>b.classList.toggle('on',b.dataset.wall===w))}
 function setTheme(t){try{localStorage.setItem('rcoin_theme',t)}catch(e){}applyLook()}
@@ -5955,7 +6044,7 @@ function setWall(w){try{localStorage.setItem('rcoin_wall',w)}catch(e){}applyLook
 async function loadCareer(){const j=await api('it_state');if(!j.ok)return;$('jobStage').textContent=j.stage;$('jobLevel').textContent=j.level;$('jobXp').textContent=fmt(j.xp)+' XP';$('jobCoins').textContent=fmt(j.coins);$('jobTasks').textContent=fmt(j.tasks);$('jobCooldown').textContent=j.cooldown>0?'Следующее задание через '+Math.ceil(j.cooldown)+' сек.':'Можно брать новое задание.';$('taskBtn').disabled=j.cooldown>0}
 async function doTask(){const j=await api('it_task');if(!j.ok)return toast(j.err||'Не удалось выполнить задание');toast(j.msg||'Задание завершено');setBalance(j.balance);loadCareer()}
 /* NFT inventory */
-async function loadNft(){const j=await api('nft_state');if(!j.ok)return;const g=$('nftGrid');g.innerHTML='';$('nftCount').textContent=j.items.length+' предметов';if(!j.items.length){g.innerHTML='<p class="muted">Коллекция пока пуста. Создай первый NFT.</p>';return}j.items.forEach(x=>{const d=document.createElement('div');d.className='nft';const im=document.createElement('img');im.src=x.url;im.alt=x.name;const b=document.createElement('b');b.textContent=x.name+' #'+x.id;if(x.emoji_id){const ic=document.createElement('img');ic.className='ce';ic.src='/emoji/'+x.emoji_id+'.webp';ic.alt='';ic.onerror=()=>ic.remove();b.prepend(ic)}const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity;const acts=document.createElement('div');acts.className='nft-actions';const bb=document.createElement('button');bb.className='btn mini '+(x.in_balance?'red':'ghost');bb.textContent=x.in_balance?'Убрать из баланса':'В баланс';bb.onclick=()=>nftSet(x.id,'balance');const pb=document.createElement('button');pb.className='btn mini '+(x.in_profile?'red':'ghost');pb.textContent=x.in_profile?'Убрать из профиля':'В профиль';pb.onclick=()=>nftSet(x.id,'profile');acts.append(bb,pb);d.append(im,b,sm,acts);g.append(d)})}
+async function loadNft(){const j=await api('nft_state');if(!j.ok)return;const g=$('nftGrid');g.innerHTML='';$('nftCount').textContent=j.items.length+' предметов';if(!j.items.length){g.innerHTML='<p class="muted">Коллекция пока пуста. Создай первый NFT.</p>';return}j.items.forEach(x=>{const d=document.createElement('div');d.className='nft';const im=document.createElement('img');im.src=x.url;im.alt=x.name;const lnk=document.createElement('a');lnk.href=x.url;lnk.target='_blank';lnk.rel='noopener';lnk.append(im);const b=document.createElement('b');b.textContent=x.name+' #'+x.id;if(x.emoji_id){const ic=document.createElement('img');ic.className='ce';ic.src='/emoji/'+x.emoji_id+'.webp';ic.alt='';ic.onerror=()=>ic.remove();b.prepend(ic)}const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity;const acts=document.createElement('div');acts.className='nft-actions';const bb=document.createElement('button');bb.className='btn mini '+(x.in_balance?'red':'ghost');bb.textContent=x.in_balance?'Убрать из баланса':'В баланс';bb.onclick=()=>nftSet(x.id,'balance');const pb=document.createElement('button');pb.className='btn mini '+(x.in_profile?'red':'ghost');pb.textContent=x.in_profile?'Убрать из профиля':'В профиль';pb.onclick=()=>nftSet(x.id,'profile');acts.append(bb,pb);d.append(lnk,b,sm,acts);g.append(d)})}
 async function nftSet(id,target){const j=await api('nft_set',{id,target});if(!j.ok)return toast(j.err||'Не удалось закрепить');toast(j.msg||'Готово');loadNft();loadMe()}
 async function mintNft(){const j=await api('nft_mint');if(!j.ok)return toast(j.err||'Не удалось создать NFT');setBalance(j.balance);toast(j.msg||'NFT создан');loadNft()}
 /* Live simulated market */
@@ -6799,7 +6888,20 @@ def daily5_available(uid: int) -> bool:
     return len(opened) < db5_cfg(int(row["streak"] or 1))[0]
 
 
-def balance_kb(uid: int) -> InlineKeyboardMarkup:
+def nft_public_url(url: str) -> str:
+    if not url:
+        return ""
+    if url.startswith("http"):
+        return url
+    if url.startswith("db:") and WEBAPP_URL:
+        try:
+            return f"{WEBAPP_URL}/nft/{int(url.split(':', 1)[1])}"
+        except (TypeError, ValueError):
+            return ""
+    return ""
+
+
+def balance_kb(uid: int, photo_url: str = "") -> InlineKeyboardMarkup:
     """Кнопки баланса — вертикально, недоступные бонусы скрываются."""
     rows = []
     if bonus_state(get_user(uid))[0]:
@@ -6807,38 +6909,46 @@ def balance_kb(uid: int) -> InlineKeyboardMarkup:
     if daily5_available(uid):
         rows.append([btn("Ежедневный", "bal:daily", "star", style="success")])
     rows.append([btn("Заработать", "bal:earn", "balance", style="primary")])
+    if photo_url:
+        rows.append([btn("Открыть фото", url=photo_url, icon="nft", style="primary")])
     return kb(*rows)
 
 
 async def send_balance(message: Message, uid: int):
     url, cap = nft_photo(uid, "balance")
+    public = nft_public_url(url)
     text = balance_text(uid)
-    markup = balance_kb(uid)
+    markup = balance_kb(uid, public)
+    if public:
+        tail = f'\n\n<a href="{public}">Открыть полное фото</a>'
+        caption = text[:max(1, 1024 - len(tail))] + tail
+    else:
+        caption = text[:1024]
     if url.startswith("db:"):
         try:
             image_id = int(url.split(":", 1)[1])
             raw = base64.b64decode(kv_get(f"nftpng:{image_id}"), validate=True)
             await message.answer_photo(BufferedInputFile(raw, filename=f"rcoin_nft_{image_id}.png"),
-                                       caption=text[:1000], reply_markup=markup)
+                                       caption=caption, reply_markup=markup)
             return
         except Exception as e:
             log.warning("Не удалось отправить NFT из БД: %s", e)
     if url and not url.startswith("http"):
         try:
             from aiogram.types import FSInputFile
-            await message.answer_photo(FSInputFile(url), caption=text[:1000], reply_markup=markup)
+            await message.answer_photo(FSInputFile(url), caption=caption, reply_markup=markup)
             return
         except Exception:
             pass
     if url.startswith("http"):
         try:
-            await message.answer_photo(url, caption=text[:1000], reply_markup=markup)
+            await message.answer_photo(url, caption=caption, reply_markup=markup)
             return
         except Exception:
             pass
     if BALANCE_BANNER.exists():
         try:
-            await message.answer_photo(FSInputFile(str(BALANCE_BANNER)), caption=text[:1000], reply_markup=markup)
+            await message.answer_photo(FSInputFile(str(BALANCE_BANNER)), caption=caption, reply_markup=markup)
             return
         except Exception:
             pass
@@ -6847,39 +6957,49 @@ async def send_balance(message: Message, uid: int):
 
 async def send_profile_photo(message: Message, uid: int):
     url, cap = nft_photo(uid, "profile")
+    public = nft_public_url(url)
     text = (f"{E('profile')} <b>Профиль</b>\n{rank_line(uid)}\n{cap}").strip()
+    markup = kb([btn("Открыть фото", url=public, icon="nft", style="primary")]) if public else None
+    if public:
+        tail = f'\n\n<a href="{public}">Открыть полное фото</a>'
+        caption = text[:max(1, 1024 - len(tail))] + tail
+    else:
+        caption = text[:1024]
     if url.startswith("db:"):
         try:
             image_id = int(url.split(":", 1)[1])
             raw = base64.b64decode(kv_get(f"nftpng:{image_id}"), validate=True)
-            await message.answer_photo(BufferedInputFile(raw, filename=f"profile_{image_id}.png"), caption=text[:1000])
+            await message.answer_photo(BufferedInputFile(raw, filename=f"profile_{image_id}.png"),
+                                       caption=caption, reply_markup=markup)
             return
         except Exception as e:
             log.warning("Не удалось отправить NFT профиля: %s", e)
     if url and not url.startswith("http"):
         try:
-            await message.answer_photo(FSInputFile(url), caption=text[:1000])
+            await message.answer_photo(FSInputFile(url), caption=caption, reply_markup=markup)
             return
         except Exception:
             pass
     if url.startswith("http"):
         try:
-            await message.answer_photo(url, caption=text[:1000])
+            await message.answer_photo(url, caption=caption, reply_markup=markup)
             return
         except Exception:
             pass
     if BALANCE_BANNER.exists():
         try:
-            await message.answer_photo(FSInputFile(str(BALANCE_BANNER)), caption=text[:1000])
+            await message.answer_photo(FSInputFile(str(BALANCE_BANNER)), caption=caption, reply_markup=markup)
             return
         except Exception:
             pass
-    await message.reply(text)
+    await message.reply(text, reply_markup=markup)
 
 
 @dp.callback_query(F.data == "bal:main")
 async def cb_balance(cb: CallbackQuery):
-    await safe_edit(cb, balance_text(cb.from_user.id), balance_kb(cb.from_user.id))
+    uid = cb.from_user.id
+    url, _ = nft_photo(uid, "balance")
+    await safe_edit(cb, balance_text(uid), balance_kb(uid, nft_public_url(url)))
     await ans(cb)
 
 
@@ -6892,7 +7012,8 @@ async def cb_bonus(cb: CallbackQuery):
     update_user(uid, bonus_last_time=now())
     amount = BONUS_AMOUNT * bonus_mult(uid)
     add_coin(uid, amount)
-    await safe_edit(cb, balance_text(uid), balance_kb(uid))
+    url, _ = nft_photo(uid, "balance")
+    await safe_edit(cb, balance_text(uid), balance_kb(uid, nft_public_url(url)))
     await ans(cb, f"+{fmt(amount)} RCOIN", True)
 
 
