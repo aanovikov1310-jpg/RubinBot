@@ -47,8 +47,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (BotCommand, BufferedInputFile, CallbackQuery, ErrorEvent, FSInputFile,
-                           InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message,
-                           PreCheckoutQuery, WebAppInfo)
+                           InlineKeyboardButton, InlineKeyboardMarkup, InlineQuery, InlineQueryResultArticle,
+                           InputTextMessageContent, LabeledPrice, Message, PreCheckoutQuery, WebAppInfo)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -627,6 +627,8 @@ EXTRA_COLS = {
     "nft_items": {"photo": "TEXT DEFAULT '🎨'", "model": "TEXT DEFAULT 'Стандартный'",
                   "background": "TEXT DEFAULT 'Обычный'", "base_name": "TEXT DEFAULT ''"},
     "gifts": {"expires_at": "INTEGER DEFAULT 0"},
+    "treasury_settings": {"daily_enabled": "INTEGER DEFAULT 1", "daily_amount": "INTEGER DEFAULT 100000",
+                          "daily_hour": "INTEGER DEFAULT 12"},
 }
 
 
@@ -773,11 +775,13 @@ def tset_get() -> Dict[str, Any]:
         x("INSERT OR IGNORE INTO treasury_settings(id) VALUES(1)")
         r = q("SELECT * FROM treasury_settings WHERE id=1", one=True)
     return r or {"auto_fri": 1, "auto_sat": 1, "fri_amount": 1_000_000,
-                 "sat_amount": 500_000, "auto_slots": 50, "chat_ids": ""}
+                 "sat_amount": 500_000, "auto_slots": 50, "chat_ids": "",
+                 "daily_enabled": 1, "daily_amount": 100_000, "daily_hour": 12}
 
 
 def tset_update(**kw):
-    allowed = {"auto_fri", "auto_sat", "fri_amount", "sat_amount", "auto_slots", "chat_ids"}
+    allowed = {"auto_fri", "auto_sat", "fri_amount", "sat_amount", "auto_slots", "chat_ids",
+               "daily_enabled", "daily_amount", "daily_hour"}
     data = {k: v for k, v in kw.items() if k in allowed}
     if not data:
         return
@@ -2843,11 +2847,14 @@ def treasury_auto_view():
          f"сумма <b>{fmt(st.get('fri_amount') or 0)}</b>\n"
          f"Суббота: <b>{'вкл' if int(st.get('auto_sat') or 0) else 'выкл'}</b> · "
          f"сумма <b>{fmt(st.get('sat_amount') or 0)}</b>\n"
+         f"Каждый день: <b>{'вкл' if int(st.get('daily_enabled') or 0) else 'выкл'}</b> · "
+         f"сумма <b>{fmt(st.get('daily_amount') or 0)}</b> · в <b>{int(st.get('daily_hour') or 12)}:00</b>\n"
          f"Активаций в чеке: <b>{fmt(st.get('auto_slots') or 0)}</b>\n\n"
          "Если указаны чаты — бот публикует чек-ссылку в них. Если нет — начисляет всем игрокам.")
     rows = [
         [btn("Пятница вкл/выкл", "tr:t:fri", "settings"), btn("Суббота вкл/выкл", "tr:t:sat", "settings")],
         [btn("Сумма пятницы", "tr:a:fri", "balance"), btn("Сумма субботы", "tr:a:sat", "balance")],
+        [btn("Ежедневно вкл/выкл", "tr:t:daily", "settings"), btn("Сумма дня", "tr:a:daily", "balance")],
         [btn("Активаций", "tr:slots", "check")],
         [btn("Назад", "tr:home", "door")],
     ]
@@ -2892,14 +2899,17 @@ async def cb_treasury(cb: CallbackQuery, state: FSMContext):
         t, k = treasury_event_view()
         await safe_edit(cb, t, k)
         return await ans(cb)
-    if act == "t" and len(parts) > 2 and parts[2] in ("fri", "sat"):
+    if act == "t" and len(parts) > 2 and parts[2] in ("fri", "sat", "daily"):
         st = tset_get()
-        val = 0 if int(st.get("auto_" + parts[2]) or 0) else 1
-        tset_update(**{"auto_" + parts[2]: val})
+        col = "auto_daily" if parts[2] == "daily" else "auto_" + parts[2]
+        val = 0 if int(st.get(col) or 0) else 1
+        tset_update(**{col: val})
         t, k = treasury_auto_view()
         await safe_edit(cb, t, k)
         return await ans(cb, "Авточек обновлён", True)
-    if act == "a" and len(parts) > 2 and parts[2] in ("fri", "sat"):
+    if act == "a" and len(parts) > 2 and parts[2] in ("fri", "sat", "daily"):
+        if parts[2] == "daily":
+            return await ask(cb, state, "tr_ad", "Введи сумму ежедневного чека:")
         return await ask(cb, state, "tr_af" if parts[2] == "fri" else "tr_as", "Введи сумму RCOIN:")
     if act == "slots":
         return await ask(cb, state, "tr_slots", "Сколько активаций в одном чеке?")
@@ -2949,6 +2959,16 @@ async def f_tr_as(m: Message, state: FSMContext, d, txt):
     await m.reply(f"✅ Сумма субботнего чека: {fmt(n)}")
 
 
+@flow("tr_ad")
+async def f_tr_ad(m: Message, state: FSMContext, d, txt):
+    n = parse_amount(txt)
+    if n <= 0:
+        return await m.reply("Введи положительную сумму.")
+    tset_update(daily_amount=n)
+    await state.clear()
+    await m.reply(f"✅ Ежедневный чек: {fmt(n)}")
+
+
 @flow("tr_slots")
 async def f_tr_slots(m: Message, state: FSMContext, d, txt):
     if not txt.strip().isdigit() or not 1 <= int(txt) <= 100_000:
@@ -2973,6 +2993,53 @@ async def cmd_check_book(message: Message):
     await message.reply(t, reply_markup=k)
 
 
+@dp.inline_query()
+async def inline_checks(query: InlineQuery):
+    raw = (query.query or "").strip()
+    low = raw.lower()
+    uid = query.from_user.id
+    u = get_user(uid)
+    results = []
+    if low.startswith(("чек", "check")):
+        parts = raw.split(maxsplit=1)
+        amount = parse_amount(parts[1], u["balance_coin"]) if len(parts) > 1 else 0
+        if amount > 0:
+            results.append(InlineQueryResultArticle(
+                id=f"check:{amount}",
+                title=f"Чек на {fmt(amount)} RCOIN",
+                description=f"Создать чек на {fmt(amount)} RCOIN · баланс {fmt(u['balance_coin'])}",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"{E('check')} <b>Чек на {fmt(amount)} RCOIN</b>\n"
+                                 "Нажми кнопку, чтобы создать чек.",
+                    parse_mode=ParseMode.HTML),
+                reply_markup=kb([btn(f"Создать чек · {fmt(amount)}", f"ck:inl:{amount}",
+                                     icon="check", style="success")]),
+            ))
+        else:
+            results.append(InlineQueryResultArticle(
+                id="check-hint",
+                title="Чек: укажи сумму",
+                description="Например: чек 1000",
+                input_message_content=InputTextMessageContent(
+                    message_text="Напиши в инлайн-режиме: <code>чек 1000</code>",
+                    parse_mode=ParseMode.HTML),
+            ))
+    else:
+        rows = q("SELECT user_id,display_name,username,balance_coin FROM users ORDER BY balance_coin DESC LIMIT 10")
+        lines = [f"{E('win')} <b>ТОП RCOIN</b>"]
+        for i, r in enumerate(rows, 1):
+            name = r.get("display_name") or r.get("username") or str(r.get("user_id") or "")
+            lines.append(f"{i}. {esc(str(name))} — <b>{fmt(r['balance_coin'])}</b> RCOIN")
+        text = "\n".join(lines) if rows else "Пока нет игроков."
+        results.append(InlineQueryResultArticle(
+            id="top",
+            title="Топ RCOIN",
+            description="Топ-10 игроков по балансу",
+            input_message_content=InputTextMessageContent(message_text=text, parse_mode=ParseMode.HTML),
+        ))
+    await query.answer(results[:20], cache_time=0, is_personal=True)
+
+
 @view("checks")
 async def v_checks(uid: int, private: bool):
     u = get_user(uid)
@@ -2985,6 +3052,31 @@ async def cb_checks(cb: CallbackQuery, state: FSMContext):
     parts = cb.data.split(":")
     uid = cb.from_user.id
     act = parts[1]
+    if act == "inl":
+        try:
+            amount = int(parts[2])
+        except (IndexError, ValueError):
+            return await ans(cb, "Неверная сумма", True)
+        if amount <= 0:
+            return await ans(cb, "Неверная сумма", True)
+        if not spend(uid, amount):
+            return await ans(cb, "Недостаточно RCOIN", True)
+        cid = gen_code()
+        x("INSERT INTO checks(check_id,owner_id,amount,max_activations,description,created_at) VALUES(?,?,?,?,?,?)",
+          (cid, uid, amount, 1, "Инлайн-чек", now()))
+        text = box(f"{E('check')} <b>Чек создан!</b>", f"💰 {fmt(amount)} RCOIN",
+                   "Отправь ссылку тому, кому хочешь передать чек.")
+        markup = kb([btn(f"Забрать {fmt(amount)}", url=deeplink("check_" + cid), icon="check")])
+        if getattr(cb, "inline_message_id", None):
+            try:
+                await bot.edit_message_text(text, inline_message_id=cb.inline_message_id,
+                                            reply_markup=markup, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                log.warning("inline edit: %s", e)
+                await bot.send_message(uid, text, reply_markup=markup)
+        else:
+            await safe_edit(cb, text, markup)
+        return await ans(cb, "Чек создан", True)
     if act == "new":
         return await ask(cb, state, "ck_amount", "Сумма RCOIN <b>на одну активацию</b>:")
     if act == "my":
@@ -4228,6 +4320,8 @@ def ev_add_pot(n: int):
     kv_set(EV_POT, str(ev_pot() + n))
 
 
+EV_MINES_MIN = 10_000
+EV_TOWER_MIN = 10_000
 EV_ALIASES = {
     "снежки": "snow", "снежок": "snow", "1": "snow",
     "лёд": "ice", "лед": "ice", "ледяная": "ice", "дорожка": "ice", "2": "ice",
@@ -4254,12 +4348,18 @@ def ev_games_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
                      f"   Мин. <b>{fmt(g['min'])}</b> · выплата <b>x{g['bp'][0]:.1f}</b>")
     lines.append(f"{E('item_8')} <b>Ледяной лабиринт</b> — 3 развилки, выплата до <b>x5</b>\n"
                  f"   Мин. <b>{fmt(LAB_MIN)}</b>")
+    lines.append(f"{E('mines')} <b>Снежные мины</b> — 5×5, 3 мины, забирай выигрыш до взрыва\n"
+                 f"   Мин. <b>{fmt(EV_MINES_MIN)}</b>")
+    lines.append(f"{E('games')} <b>Снежная башня</b> — 5 колонок, 9 уровней, до <b>x3.5</b>\n"
+                 f"   Мин. <b>{fmt(EV_TOWER_MIN)}</b>")
     lines += ["", "<b>Как играть:</b> <code>игра снежки 10000</code>",
               "или нажми на игру — бот спросит ставку."]
     items = list(SNOW_GAMES.items())
     rows = []
     for j in range(0, len(items), 2):
         rows.append([btn(g["name"], f"evg:{g['key']}", icon=f"item_{i}") for i, g in items[j:j + 2]])
+    rows.append([btn("Снежные мины", "evg:mines", "mines", style="success"),
+                 btn("Снежная башня", "evg:tower", "games", style="success")])
     rows.append([btn("Ледяной лабиринт", "lab:new", icon="item_8", style="success")])
     rows.append([btn("Снежный марафон", "snowman:open", icon="item_1"),
                  btn("К ивентам", "menu:events", icon="door")])
@@ -4269,6 +4369,16 @@ def ev_games_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
 @dp.callback_query(F.data.startswith("evg:"))
 async def cb_game_hint(cb: CallbackQuery, state: FSMContext):
     key = cb.data.split(":")[1]
+    if key in ("mines", "tower"):
+        name = "Снежные мины" if key == "mines" else "Снежная башня"
+        min_bet = EV_MINES_MIN if key == "mines" else EV_TOWER_MIN
+        desc = ("5×5, 3 мины. Открывай клетки и забирай выигрыш до взрыва."
+                if key == "mines" else
+                "5 колонок, 9 уровней. Выбирай безопасную клетку и поднимайся выше.")
+        return await ask(cb, state, "ev_bet",
+                         f"❄️ <b>{name}</b>\n\n{desc}\n"
+                         f"Минимальная ставка: <b>{fmt(min_bet)}</b> RCOIN.\n\nВведи сумму ставки:",
+                         key=key)
     g = next((x for x in SNOW_GAMES.values() if x["key"] == key), None)
     if not g:
         return await ans(cb, "Игра не найдена", True)
@@ -4513,6 +4623,25 @@ async def f_ev_bet(m: Message, state: FSMContext, d, txt):
             return await m.reply(f"Минимальная ставка <b>{fmt(LAB_MIN)}</b> RCOIN. Введи сумму ещё раз или «отмена».")
         await state.clear()
         return await lab_offer(m, bet)
+    if key in ("mines", "tower"):
+        u = get_user(m.from_user.id)
+        bet = parse_amount(txt, u["balance_coin"])
+        min_bet = EV_MINES_MIN if key == "mines" else EV_TOWER_MIN
+        if bet < min_bet:
+            return await m.reply(f"Минимальная ставка <b>{fmt(min_bet)}</b> RCOIN. Введи сумму ещё раз.")
+        if not spend(m.from_user.id, bet):
+            await state.clear()
+            return await m.reply("Недостаточно RCOIN.")
+        await state.clear()
+        if key == "mines":
+            sid = mines_start(m.from_user.id, bet, 3)
+            st = sess_get(sid)["state"]
+            return await m.reply(mines_text(u, bet, st, "\n❄️ <i>Снежные мины: 3 мины</i>"),
+                                 reply_markup=mines_kb(sid, st))
+        sid = climb_start(m.from_user.id, bet, "tower", 1)
+        st = sess_get(sid)["state"]
+        return await m.reply(climb_text(u, bet, st, "\n❄️ <i>Снежная башня</i>"),
+                             reply_markup=climb_kb(sid, st))
     g = next((x for x in SNOW_GAMES.values() if x["key"] == key), None)
     if not g:
         await state.clear()
@@ -5032,6 +5161,38 @@ async def distribute_check(kind: str) -> bool:
     chats = tset_chats()
     title = "🎄 ПЯТНИЧНЫЙ АВТО-ЧЕК" if kind == "fri" else "❄️ СУББОТНИЙ ИВЕНТ-ЧЕК"
 
+    if kind == "daily":
+        amount = max(1, int(st.get("daily_amount") or 100_000))
+        ids = [r["user_id"] for r in q("SELECT user_id FROM users WHERE banned_until<=?", (now(),))]
+        if not ids:
+            return False
+        total = amount * len(ids)
+        if not treasury_take(total):
+            log.warning("Авто-чек daily: в казне не хватает %s", fmt(total))
+            await _dm(OWNER_ID, f"⚠️ Ежедневный чек не выдан: в казне {fmt(treasury_get())}, нужно {fmt(total)}.")
+            return False
+        cid = gen_code()
+        x("INSERT INTO checks(check_id,owner_id,amount,max_activations,description,created_at) VALUES(?,?,?,?,?,?)",
+          (cid, 0, amount, len(ids), "Ежедневный чек", now()))
+        text = box("<b>🎁 ЕЖЕДНЕВНЫЙ ЧЕК</b>", f"💰 Тебе: <b>{fmt(amount)} RCOIN</b>",
+                   "Нажми кнопку — чек активируется один раз.")
+        markup = kb([btn(f"Забрать {fmt(amount)}", url=deeplink("check_" + cid), icon="check")])
+        sent = 0
+        for uid2 in ids:
+            try:
+                await bot.send_message(uid2, text, reply_markup=markup)
+                sent += 1
+            except Exception as e:
+                log.debug("daily check dm %s: %s", uid2, e)
+            await asyncio.sleep(0.04)
+        if not sent:
+            x("UPDATE checks SET is_active=0 WHERE check_id=?", (cid,))
+            treasury_add(total)
+            await _dm(OWNER_ID, "⚠️ Ежедневный чек не доставлен ни одному игроку.")
+            return False
+        log.info("Ежедневный чек %s: %s × %s", cid, fmt(amount), sent)
+        return True
+
     if chats:
         if slots <= 0:
             slots = max(1, min(100, len(q("SELECT user_id FROM users"))))
@@ -5107,6 +5268,10 @@ async def scheduler_loop():
                 if int(tset_get().get("auto_sat") or 0):
                     kv_set("auto:sat:" + d, "1")
                     await distribute_check("sat")
+            if n.hour >= int(tset_get().get("daily_hour") or 12) and not kv_get("auto:daily:" + d):
+                if int(tset_get().get("daily_enabled") or 0):
+                    kv_set("auto:daily:" + d, "1")
+                    await distribute_check("daily")
         except Exception:
             log.exception("scheduler")
         await asyncio.sleep(30)
@@ -5741,7 +5906,7 @@ let _ceT=false;const _ceObs=new MutationObserver(()=>{if(_ceT)return;_ceT=true;r
 /* Square arena with stakes */
 let arenaBet=10000, BX=50, BY=50, BVX=0, BVY=0, BANG=0, BSTATE='', _bt=0, BTRAIL=[], BLAND=null, BT=[];
 function apAngle(i,n){return 90+(i+0.5)*360/Math.max(n,1)}
-function arenaSectors(){if(!AS)return;const n=AS.players.length;const el=$('arenaSectors');if(!n){el.style.background='conic-gradient(from 90deg,#1a2836 0 100%)';return}const parts=[];AS.players.forEach((p,i)=>{parts.push(p.color+' '+(i*100/n)+'% '+((i+1)*100/n)+'%')});el.style.background='conic-gradient(from 90deg,'+parts.join(',')+')'}
+function arenaSectors(){if(!AS)return;const n=AS.players.length;const el=$('arenaSectors');if(!n){el.style.background='conic-gradient(from 90deg,#1a2836 0 100%)';return}const total=AS.players.reduce((s,p)=>s+Math.max(0,Number(p.bet)||0),0)||n;let acc=0;const parts=[];AS.players.forEach(p=>{const w=(Math.max(0,Number(p.bet)||0)||1)/total*100;const a=acc;acc+=w;parts.push(p.color+' '+a+'% '+acc+'%')});el.style.background='conic-gradient(from 90deg,'+parts.join(',')+')'}
 function initBallTrails(){const sq=$('arenaSquare');if(!sq||BT.length)return;for(let i=0;i<8;i++){const d=document.createElement('div');d.className='ball-trail';sq.append(d);BT.push(d)}}
 function setBall(x,y){const b=$('arenaBall');if(!b)return;b.style.left=x+'%';b.style.top=y+'%';b.style.transform='translate(-50%,-50%) rotate('+BANG+'deg)'}
 function trailTick(){if(!BT.length)return;BTRAIL.unshift({x:BX,y:BY});if(BTRAIL.length>10)BTRAIL.pop();BT.forEach((el,i)=>{const p=BTRAIL[i];if(!p){el.style.opacity=0;return}const k=1-i/BT.length;el.style.left=p.x+'%';el.style.top=p.y+'%';el.style.opacity=(k*.45).toFixed(2);el.style.transform='translate(-50%,-50%) scale('+(0.35+k*.8)+')'})}
@@ -6123,15 +6288,13 @@ def mono(n: int) -> str:
 
 
 def nft_photo(uid: int, kind: str = "balance"):
-    """Фото NFT для баланса/профиля: выбранное игроком или последнее."""
+    """Фото NFT для баланса/профиля: только явно выбранное игроком."""
     u = get_user(uid)
     col = "profile_nft_id" if kind == "profile" else "balance_nft_id"
     chosen = int(u.get(col) or 0)
-    r = None
-    if chosen:
-        r = q("SELECT id,name,photo,model,background,rarity,level FROM nft_items WHERE id=? AND owner_id=?", (chosen, uid), one=True)
-    if not r:
-        r = q("SELECT id,name,photo,model,background,rarity,level FROM nft_items WHERE owner_id=? ORDER BY id DESC LIMIT 1", (uid,), one=True)
+    if not chosen:
+        return "", ""
+    r = q("SELECT id,name,photo,model,background,rarity,level FROM nft_items WHERE id=? AND owner_id=?", (chosen, uid), one=True)
     if not r:
         return "", ""
     cap = f"🖼 #{r['id']} · {r['name']}"
@@ -6158,7 +6321,7 @@ def nft_photo(uid: int, kind: str = "balance"):
 
 
 NFT_BG_PALETTES = {
-    "Обычный": ((12, 18, 30), (30, 48, 66), (90, 175, 255)),
+    "Обычный": ((83, 45, 146), (132, 78, 188), (255, 170, 240)),
     "Морозный": ((7, 18, 34), (16, 60, 86), (120, 225, 255)),
     "Праздничный": ((30, 10, 24), (95, 22, 44), (255, 170, 90)),
     "Звёздный": ((10, 8, 30), (42, 22, 82), (185, 150, 255)),
@@ -6519,14 +6682,23 @@ def _nft_center_text(d, w: int, y: int, text: str, font, fill):
     d.text(((w - (box[2] - box[0])) / 2, y), text, font=font, fill=fill)
 
 
+def _nft_tile(d, x: int, y: int, s: int, alpha: int):
+    """Полупрозрачный подарочный жетон на фоне, как на референсе."""
+    d.rounded_rectangle((x - s, y - s * .75, x + s, y + s * .9), radius=max(3, s // 3),
+                        fill=(255, 255, 255, alpha // 4), outline=(255, 255, 255, alpha), width=2)
+    d.rectangle((x - s * .12, y - s * .75, x + s * .12, y + s * .9), fill=(255, 255, 255, alpha // 2))
+    d.ellipse((x - s * .58, y - s * 1.15, x - s * .02, y - s * .62), outline=(255, 255, 255, alpha), width=2)
+    d.ellipse((x + s * .02, y - s * 1.15, x + s * .58, y - s * .62), outline=(255, 255, 255, alpha), width=2)
+    d.ellipse((x - s * .28, y - s * .05, x + s * .28, y + s * .42), outline=(255, 255, 255, alpha), width=2)
+
+
 def png_nft(seed: int, title: str, photo: str = "", model: str = "",
             background: str = "", rarity: str = "common", level: int = 1) -> bytes:
-    """Рисует коллекционную NFT-карточку: фон, аура модели и персонаж."""
+    """NFT в стиле референса: фон-паттерн, крупный пиксельный персонаж, номер."""
     rnd = random.Random(seed)
-    w, h = 720, 480
+    w, h = 720, 420
     top, bottom, accent = NFT_BG_PALETTES.get(str(background), NFT_BG_PALETTES["Обычный"])
     accent = NFT_MODEL_ACCENT.get(str(model), accent)
-    rar_col = NFT_RARITY_COLOR.get(str(rarity), NFT_RARITY_COLOR["common"])
 
     im = Image.new("RGB", (w, h))
     px = im.load()
@@ -6538,27 +6710,26 @@ def png_nft(seed: int, title: str, photo: str = "", model: str = "",
 
     ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     od = ImageDraw.Draw(ov)
-    for rr, alpha in ((290, 46), (215, 40), (140, 34)):
-        od.ellipse((w // 2 - rr, 225 - rr, w // 2 + rr, 225 + rr), fill=accent + (alpha,))
+    od.ellipse((w // 2 - 230, -90, w // 2 + 230, 310), fill=(255, 255, 255, 38))
+    od.ellipse((w // 2 - 160, -40, w // 2 + 160, 260), fill=accent + (34,))
     im = Image.alpha_composite(im.convert("RGBA"), ov).convert("RGB")
     d = ImageDraw.Draw(im, "RGBA")
 
-    for _ in range(85):
-        x0, y0 = rnd.randrange(w), rnd.randrange(h)
-        r0 = rnd.choice([1, 1, 1, 2, 2, 3])
-        d.ellipse((x0 - r0, y0 - r0, x0 + r0, y0 + r0), fill=(255, 255, 255, rnd.randint(70, 210)))
-    for _ in range(7):
-        x0, y0 = rnd.randrange(30, w - 30), rnd.randrange(30, h - 30)
-        rr = rnd.randint(4, 10)
-        d.line((x0 - rr, y0, x0 + rr, y0), fill=(255, 245, 220, 150), width=2)
-        d.line((x0, y0 - rr, x0, y0 + rr), fill=(255, 245, 220, 150), width=2)
+    for row in range(-1, 6):
+        for col in range(0, 8):
+            x = 45 + col * 105 + (row % 2) * 52
+            y = 42 + row * 92
+            _nft_tile(d, x, y, 20, 28)
 
-    d.rounded_rectangle((12, 12, w - 12, h - 12), radius=34, outline=rar_col + (190,), width=3)
-    d.rounded_rectangle((190, 68, 530, 344), radius=44, fill=(5, 9, 16, 150),
-                        outline=(255, 255, 255, 34), width=2)
-    cx, cy = w // 2, 218
-    d.ellipse((cx - 118, cy - 118, cx + 118, cy + 118), fill=accent + (30,))
-    _nft_aura(d, str(model), cx, cy, accent, rnd)
+    for _ in range(18):
+        x0, y0 = rnd.randrange(w), rnd.randrange(h)
+        rr = rnd.choice([1, 1, 2])
+        d.ellipse((x0 - rr, y0 - rr, x0 + rr, y0 + rr), fill=(255, 255, 255, rnd.randint(40, 120)))
+
+    # Персонаж рисуется на отдельном слое и пикселизируется.
+    char = Image.new("RGBA", (400, 400), (0, 0, 0, 0))
+    cd = ImageDraw.Draw(char, "RGBA")
+    cd.ellipse((80, 330, 320, 392), fill=(0, 0, 0, 55))
     kind = _nft_kind(photo, title)
     {
         "tree": _nft_tree, "gift": _nft_gift, "snowman": _nft_snowman,
@@ -6569,34 +6740,29 @@ def png_nft(seed: int, title: str, photo: str = "", model: str = "",
         "sock": _nft_sock, "dumpling": _nft_dumpling, "bubble": _nft_bubble,
         "salad": _nft_salad, "dragon": _nft_dragon, "unicorn": _nft_unicorn,
         "deer": _nft_deer,
-    }[kind](d, cx, cy, accent)
+    }[kind](cd, 200, 195, accent)
+    char = char.resize((180, 180), Image.NEAREST).resize((360, 360), Image.NEAREST)
+    im.paste(char, (w // 2 - 180, 28), char)
 
-    font_small = _nft_font(False, 16)
-    font_meta = _nft_font(False, 15)
-    font_bold = _nft_font(True, 34)
+    font_logo = _nft_font(True, 34)
+    font_tiny = _nft_font(False, 13)
+    d.text((38, 24), "RCOIN", font=font_logo, fill=(255, 255, 255, 235))
+    d.polygon(_nft_star_points(178, 40, 12, 5), fill=(255, 238, 160, 235))
+    d.text((40, 64), "NFT COLLECTION", font=font_tiny, fill=(255, 255, 255, 145))
 
-    d.text((34, 28), "RCOIN · NFT", font=font_small, fill=(255, 255, 255, 180))
     rar_text = RARITY_NAME.get(str(rarity), str(rarity) or "NFT")
-    rb = d.textbbox((0, 0), rar_text, font=font_meta)
-    rw = rb[2] - rb[0]
-    d.rounded_rectangle((w - 34 - rw - 24, 24, w - 34, 56), radius=16,
-                        fill=rar_col + (48,), outline=rar_col + (170,), width=1)
-    d.text((w - 34 - rw - 12, 30), rar_text, font=font_meta, fill=(255, 255, 255, 235))
+    d.text((40, h - 34), f"{rar_text} · {model or 'Стандартный'}", font=font_tiny,
+           fill=(255, 255, 255, 140))
 
-    title_text = str(title or "NFT")[:32]
-    size = 34
-    while size > 20:
-        try:
-            font_title = _nft_font(True, size)
-        except Exception:
-            font_title = font_bold
-        if d.textbbox((0, 0), title_text, font=font_title)[2] <= 650:
-            break
-        size -= 2
-    _nft_center_text(d, w, 368, title_text, font_title, (255, 255, 255, 248))
-    meta = f"{RARITY_NAME.get(str(rarity), '—')} · {model or 'Стандартный'} · {background or 'Обычный'} · ур. {level}"
-    _nft_center_text(d, w, 416, meta[:62], font_meta, (220, 235, 250, 190))
-    _nft_center_text(d, w, 444, f"#{seed}  ·  RCOIN COLLECTION", font_small, (190, 210, 230, 150))
+    num = Image.new("RGBA", (300, 120), (0, 0, 0, 0))
+    nd = ImageDraw.Draw(num, "RGBA")
+    num_text = f"#{seed}"
+    nf = _nft_font(True, 62)
+    nb = nd.textbbox((0, 0), num_text, font=nf)
+    nd.text(((300 - (nb[2] - nb[0])) / 2, (120 - (nb[3] - nb[1])) / 2 - nb[1]),
+            num_text, font=nf, fill=(255, 255, 255, 215))
+    num = num.rotate(-24, expand=True, resample=Image.BICUBIC)
+    im.paste(num, (w - num.width - 2, h - num.height - 4), num)
 
     out = io.BytesIO()
     im.save(out, format="PNG", optimize=True)
