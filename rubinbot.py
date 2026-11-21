@@ -984,7 +984,7 @@ GAME_WORDS = {
     "дс", "очко", "краш", "пирамида", "майнер", "хило", "кн", "башня", "арена", "охота", "спин", "футбол",
     "ивенты", "санте", "ежедневный", "игра", "сыграть", "зимняя", "зимние", "лабиринт", "лаб", "нг", "апгрейдер",
 }
-GAME_PREFIXES = ("gm:", "mn:", "cl:", "bj:", "ttt:", "lab:", "evg:", "ar:", "upg:", "snowman:")
+GAME_PREFIXES = ("gm:", "mn:", "cl:", "bj:", "ttt:", "lab:", "evg:", "ar:", "upg:", "qg:", "snowman:")
 _sub_cache: Dict[int, float] = {}
 
 
@@ -2489,7 +2489,7 @@ async def v_help(uid: int, private: bool):
          "<code>топ</code> · <code>история</code> · <code>статистика</code> · <code>рефералы</code> · <code>настройки</code>\n\n"
          "<b>Игры:</b> <code>куб</code> <code>рулетка</code> <code>фортуна</code> <code>баскет</code> <code>дартс</code> <code>футбол</code> <code>спин</code> "
          "<code>солнце</code> <code>краш</code> <code>охота</code> <code>очко</code> <code>мины</code> <code>башня</code> <code>пирамида</code> <code>хило</code> "
-         "<code>арена</code> <code>кн</code> (ответом) <code>майнер</code> — список и формат: <code>игры</code>\n\n"
+         "<code>арена</code> <code>кн</code> (ответом) <code>майнер</code> — список: <code>игры</code>; в чате: <code>/play куб 100 3</code>\n\n"
          "<b>Деньги:</b> <code>дать 100к @ник</code> · <code>нк 1000 ID</code> · <code>перевод 5 @ник</code> (RBP) · <code>банк</code> · <code>обмен</code> · "
          "<code>чек</code> · <code>промо КОД</code> · <code>казна</code> · <code>донат</code> · <code>барабан</code>\n\n"
          "<b>NFT и склад:</b> <code>маркет</code> · <code>склад</code> · <code>подарок КОД</code> · <code>передать нфт ID @ник</code> · "
@@ -2743,34 +2743,23 @@ EVENT_GAME_BUTTONS = [
 
 
 def games_page(page: int = 0, plain: bool = False):
-    """Старая большая панель: все игры сразу, ивентовые — на втором экране."""
-    page = 1 if int(page or 0) else 0
-    rows = []
-    if page == 0:
-        row = []
-        for i, (icon, name, _) in enumerate(GAMES):
-            row.append(_game_button(name, f"gm:i:{i}", icon, plain))
-            if len(row) == 2:
-                rows.append(row)
-                row = []
-        if row:
+    """Старая полная панель: все игры и все ивенты сразу, без «Дальше»."""
+    rows, row = [], []
+    for i, (icon, name, _) in enumerate(GAMES):
+        row.append(_game_button(name, f"gm:i:{i}", icon, plain))
+        if len(row) == 2:
             rows.append(row)
-        rows.append([
-            _game_button("Новогодние игры", "ev:games!", "star", plain),
-            _game_button("Дальше ▶️", "gm:p:1", "door", plain),
-        ])
-        text = (f"{E('games')} <b>ВСЕ ИГРЫ</b>\n"
-                f"Полный список — <b>{len(GAMES)}</b> игр. Выбери игру кнопкой ниже.\n"
-                f"{E('star')} Новогодние игры — кнопка внизу или «Дальше».")
-    else:
-        for j in range(0, len(EVENT_GAME_BUTTONS), 2):
-            rows.append([_game_button(text, data, icon, plain)
-                         for text, data, icon in EVENT_GAME_BUTTONS[j:j + 2]])
-        rows.append([_game_button("◀️ Все игры", "gm:p:0", "door", plain)])
-        text = (f"{E('star')} <b>НОВОГОДНИЕ ИГРЫ</b>\n"
-                "Зимние режимы и мини-игры. Выбери игру кнопкой ниже.")
+            row = []
+    if row:
+        rows.append(row)
+    for j in range(0, len(EVENT_GAME_BUTTONS), 2):
+        rows.append([_game_button(text, data, icon, plain)
+                     for text, data, icon in EVENT_GAME_BUTTONS[j:j + 2]])
     rows.append([_game_button("Апгрейдер", "upg:open", "spin", plain)])
     rows.append([_game_button("Назад", "menu:main", "door", plain)])
+    text = (f"{E('games')} <b>ВСЕ ИГРЫ</b>\n"
+            f"<b>{len(GAMES)}</b> игр + <b>{len(EVENT_GAME_BUTTONS)}</b> новогодних. "
+            "Выбери игру кнопкой ниже.")
     if plain:
         text = re.sub(r"<[^>]+>", "", text)
     return text, kb(*rows)
@@ -2786,15 +2775,208 @@ async def cb_games(cb: CallbackQuery):
         if name == "Майнер":
             t, k = await v_miner(cb.from_user.id, True)
         else:
-            t, k = f"{E(key)} <b>{name}</b>\n\n{text}", kb([btn("К играм", "gm:p:0", "games")])
+            t, k = (f"{E(key)} <b>{name}</b>\n\n{text}",
+                    kb([btn("⚡ Играть", f"qg:g:{v}", "win", style="success")],
+                       [btn("К играм", "gm:p:0", "games")]))
     await safe_edit(cb, t, k)
     await ans(cb)
+
+
+@dp.callback_query(F.data.startswith("qg:"))
+async def cb_quick_game(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    uid = cb.from_user.id
+    act = parts[1]
+    try:
+        idx = int(parts[2])
+    except (IndexError, ValueError):
+        return await ans(cb, "Игра не найдена", True)
+    if idx < 0 or idx >= len(GAMES):
+        return await ans(cb, "Игра не найдена", True)
+    key, name, desc = GAMES[idx]
+    if act == "g":
+        rows = [[btn("1 000", f"qg:b:{idx}:1000", "balance"),
+                 btn("10 000", f"qg:b:{idx}:10000", "balance")],
+                [btn("100 000", f"qg:b:{idx}:100000", "balance")],
+                [btn("К играм", "gm:p:0", "door")]]
+        await safe_edit(cb, f"{E(key)} <b>{name}</b>\n\n{desc}\n\nВыбери ставку:", kb(*rows))
+        return await ans(cb)
+
+    if act != "b":
+        return await ans(cb, "Неизвестное действие", True)
+    try:
+        bet = int(parts[3])
+    except (IndexError, ValueError):
+        return await ans(cb, "Неверная ставка", True)
+    if bet <= 0:
+        return await ans(cb, "Неверная ставка", True)
+    u = get_user(uid)
+    await ans(cb)
+
+    if key == "miner":
+        t, k = await v_miner(uid, cb.message.chat.type == "private")
+        return await safe_edit(cb, t, k)
+    if key == "ttt":
+        return await safe_edit(cb, "❌ <b>Крестики-нолики</b>\n\nДуэль: ответь на сообщение соперника командой <code>кн 1000</code>.",
+                                kb([btn("К играм", "gm:p:0", "door")]))
+    if key == "games":
+        if not spend(uid, bet):
+            return await ans(cb, f"Нужно {fmt(bet)} RCOIN", True)
+        sid = climb_start(uid, bet, "tower", 1)
+        st = sess_get(sid)["state"]
+        return await safe_edit(cb, climb_text(u, bet, st), climb_kb(sid, st))
+    if key == "pyramid":
+        if not spend(uid, bet):
+            return await ans(cb, f"Нужно {fmt(bet)} RCOIN", True)
+        sid = climb_start(uid, bet, "pyramid", 1)
+        st = sess_get(sid)["state"]
+        return await safe_edit(cb, climb_text(u, bet, st), climb_kb(sid, st))
+    if key == "mines":
+        if not spend(uid, bet):
+            return await ans(cb, f"Нужно {fmt(bet)} RCOIN", True)
+        sid = mines_start(uid, bet, 3)
+        st = sess_get(sid)["state"]
+        return await safe_edit(cb, mines_text(u, bet, st), mines_kb(sid, st))
+    if key == "blackjack":
+        if not spend(uid, bet):
+            return await ans(cb, f"Нужно {fmt(bet)} RCOIN", True)
+        deck = bj_deck()
+        st = {"deck": deck, "p": [deck.pop(), deck.pop()], "d": [deck.pop(), deck.pop()]}
+        while bj_val(st["p"]) < 17:
+            st["p"].append(deck.pop())
+        while bj_val(st["d"]) < 17:
+            st["d"].append(deck.pop())
+        pv, dv = bj_val(st["p"]), bj_val(st["d"])
+        pay = bet * 2 if (pv <= 21 and (dv > 21 or pv > dv)) else (bet if pv == dv and pv <= 21 else 0)
+        bal = settle(uid, "blackjack", bet, pay, f"{pv}:{dv}")
+        lines = [f"🎴 Ты: {' '.join(st['p'])} = {pv}", f"🎴 Дилер: {' '.join(st['d'])} = {dv}",
+                 f"💰 Баланс: {fmt(bal)} RCOIN"]
+        return await safe_edit(cb, result_text(u, "blackjack", "Очко", bet, pay, lines, bal),
+                                kb([btn("Ещё", f"qg:g:{idx}", "blackjack"), btn("К играм", "gm:p:0", "door")]))
+    if key == "hi_lo":
+        if not spend(uid, bet):
+            return await ans(cb, f"Нужно {fmt(bet)} RCOIN", True)
+        deck = bj_deck()
+        st = {"deck": deck, "cur": deck.pop(), "mult": 1.0, "round": 0}
+        sid = sess_new(uid, "hilo", bet, st)
+        return await safe_edit(cb, hl_text(u, bet, st), hl_kb(sid, st))
+
+    if not spend(uid, bet):
+        return await ans(cb, f"Нужно {fmt(bet)} RCOIN", True)
+    pay, title, lines = 0, name, []
+    if key == "dice":
+        roll = random.randint(1, 6)
+        pay = int(bet * 5.5) if roll == 3 else 0
+        lines = [f"🎲 Выпало: <b>{roll}</b>", "🎯 Ставка: 3"]
+    elif key == "roulette":
+        n = random.randint(0, 36)
+        pay = bet * 2 if n in RED else 0
+        lines = [f"🎰 Выпало: <b>{n}</b>", "🎯 Ставка: красное"]
+    elif key == "fortune":
+        mult = random.choices([0, 0.5, 1, 2, 5], weights=[36, 22, 20, 16, 6])[0]
+        pay = int(bet * mult)
+        lines = [f"📈 Множитель: <b>x{mult}</b>"]
+    elif key == "basket":
+        code = random.choice(["м", "м", "з", "п", "чп"])
+        pay = int(bet * 4.5) if code in ("п", "чп") else 0
+        lines = [f"🏀 Результат: <b>{code}</b>", "🎯 Ставка: попадание"]
+    elif key == "darts":
+        code = random.choice(["м", "к", "б", "к", "б", "ц"])
+        pay = int(bet * 5.5) if code == "ц" else 0
+        lines = [f"🎯 Сектор: <b>{code}</b>", "🎯 Ставка: центр"]
+    elif key == "football":
+        code = "г" if random.randint(1, 6) >= 3 else "м"
+        pay = int(bet * 1.5) if code == "г" else 0
+        lines = [f"⚽ Результат: <b>{'ГОЛ' if code == 'г' else 'МИМО'}</b>"]
+    elif key == "spin":
+        v = random.randint(0, 63)
+        a, b, c = v % 4, (v // 4) % 4, v // 16
+        mult = 20 if a == b == c == 3 else (5 if a == b == c else (0.7 if a == b or b == c or a == c else 0))
+        pay = int(bet * mult)
+        lines = [f"🎰 {a} | {b} | {c}", f"Множитель: x{mult}"]
+    elif key == "crash":
+        cp = crash_point()
+        pay = bet * 2 if cp >= 2 else 0
+        lines = [f"🚀 Долетело до <b>x{cp:.2f}</b>", "🎯 Цель: x2"]
+    elif key == "hunt":
+        r = random.random() * 100
+        if r < 0.5:
+            mult, animal = 100, "🐻 Медведь"
+        elif r < 1.5:
+            mult, animal = 10, "🐺 Волк"
+        elif r < 4:
+            mult, animal = 5, "🦊 Лиса"
+        elif r < 8:
+            mult, animal = 3, "🐰 Заяц"
+        else:
+            mult, animal = 0, "💨 Зверь убежал"
+        pay = bet * mult
+        lines = [f"🐾 {animal}" + (f" · x{mult}" if mult else "")]
+    elif key == "sun":
+        cells = [random.choice([0, 0, 0.5, 1, 2, 5]) for _ in range(9)]
+        mult = cells[0]
+        pay = int(bet * mult)
+        lines = [f"☀️ Выпало: <b>x{mult}</b>", "🎯 Ставка: клетка 1"]
+    elif key == "arena":
+        pay = bet
+        title = "Арена"
+        lines = ["🌐 Арена запускается в веб-приложении или командой <code>арена 500</code>."]
+    else:
+        pay = 0
+        lines = ["Режим пока недоступен кнопкой — используй команду из описания."]
+
+    bal = settle(uid, key, bet, pay, "quick")
+    await safe_edit(cb, result_text(u, key, title, bet, pay, lines, bal),
+                    kb([btn("Ещё", f"qg:g:{idx}", key), btn("К играм", "gm:p:0", "door")]))
 
 
 @dp.message(P("майнер"))
 async def cmd_miner(message: Message):
     t, k = await v_miner(message.from_user.id, True)
     await message.reply(t, reply_markup=k)
+
+
+GAME_COMMANDS = {
+    "куб": "g_dice", "кубик": "g_dice", "рулетка": "g_roulette", "рул": "g_roulette",
+    "фортуна": "g_fortune", "кф": "g_fortune", "баскет": "g_basket", "дартс": "g_darts",
+    "дс": "g_darts", "футбол": "g_football", "спин": "g_spin", "краш": "g_crash",
+    "охота": "g_hunt", "солнце": "g_sun", "мины": "g_mines", "башня": "g_tower",
+    "пирамида": "g_pyramid", "очко": "g_bj", "хило": "g_hilo", "кн": "g_ttt",
+    "крестики": "g_ttt", "арена": "g_arena", "майнер": "cmd_miner",
+}
+
+
+LATIN_GAME_COMMANDS = {
+    "dice": "куб", "roulette": "рулетка", "fortune": "фортуна", "basket": "баскет",
+    "darts": "дартс", "football": "футбол", "spin": "спин", "crash": "краш",
+    "hunt": "охота", "sun": "солнце", "mines": "мины", "tower": "башня",
+    "pyramid": "пирамида", "blackjack": "очко", "hilo": "хило", "ttt": "кн",
+    "arena": "арена", "miner": "майнер",
+}
+
+
+@dp.message(Command("play", "играть", *LATIN_GAME_COMMANDS))
+async def cmd_play_command(message: Message, command: CommandObject, state: FSMContext):
+    """Команды для чатов: /play куб 100 3 или /dice 100 3, /mines 100 3."""
+    cmd_word = _norm((message.text or "").split()[0]) if (message.text or "").split() else ""
+    rest = (command.args or "").strip()
+    if cmd_word in LATIN_GAME_COMMANDS:
+        args = (LATIN_GAME_COMMANDS[cmd_word] + " " + rest).strip()
+    else:
+        args = rest
+        if not args:
+            return await _open_games(message, state)
+    name = first_word(args)
+    if name in ("игры", "games", "меню"):
+        return await _open_games(message, state)
+    if name in ("апгрейдер", "апгрейд"):
+        t, k = await v_upgrader(message.from_user.id, message.chat.type == "private")
+        return await message.reply(t, reply_markup=k)
+    fn = globals().get(GAME_COMMANDS.get(name, ""))
+    if not fn:
+        return await message.reply("Неизвестная игра. Пример: <code>/play куб 100 3</code>")
+    fake = message.model_copy(update={"text": args})
+    await fn(fake)
 
 
 # ============================ ТОП ============================
@@ -6611,6 +6793,7 @@ async def main():
         await bot.set_my_commands([BotCommand(command="start", description="Главное меню и баланс"),
                                    BotCommand(command="menu", description="Меню"),
                                    BotCommand(command="games", description="Список игр"),
+                                   BotCommand(command="play", description="Играть: /play куб 100 3"),
                                    BotCommand(command="treyding", description="Трейдинг: курс, покупка, продажа"),
                                    BotCommand(command="rabota", description="Работа: IT-сфера, задания"),
                                    BotCommand(command="badges", description="Галочки профиля"),
