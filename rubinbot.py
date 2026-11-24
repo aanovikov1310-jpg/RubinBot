@@ -61,7 +61,7 @@ HAS_BUTTON_STYLE = "style" in _BTN_FIELDS
 HAS_BUTTON_ICON = "icon_custom_emoji_id" in _BTN_FIELDS
 
 # ============================ КОНФИГ ============================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9176453419:AAEXQzBO_7xUEXGTTYM6cYJHs-DoO-q_htI").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9176453419:AAHNmMOTd17-lKxERnixROhSOcRi91wIGto").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "5257618084") or 0)
 ADMIN_IDS = {OWNER_ID} | {int(v) for v in re.findall(r"\d+", os.getenv("ADMIN_IDS", "5257618084"))}
 ADMIN_IDS.discard(0)
