@@ -5708,6 +5708,21 @@ async def distribute_check(kind: str) -> bool:
     return True
 
 
+async def db_backup_loop():
+    """Раз в 30 минут копия SQLite-базы; старые копии чистятся."""
+    while True:
+        await asyncio.sleep(1800)
+        try:
+            path = backup_db()
+            if path:
+                folder = Path(path).parent
+                files = sorted(folder.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+                for old in files[12:]:
+                    old.unlink(missing_ok=True)
+        except Exception:
+            log.exception("db_backup_loop")
+
+
 async def scheduler_loop():
     while True:
         try:
@@ -6077,6 +6092,7 @@ def a_me(u, body):
             "wins": u["total_wins"] or stats["w"] or 0, "lost": int(stats["lost"] or 0),
             "rank": u["rank_title"] or "Новичок",
             "premium": is_premium(uid),
+            "is_admin": is_admin(uid),
             "badges": [{"key": b, "role": BADGES[b]["role"], "title": BADGES[b]["title"],
                         "emoji_id": BADGES[b].get("id") or ""} for b in profile_badges(uid) if b in BADGES],
             "nft_balance_url": f"/nft/{bid}" if bid else "",
@@ -6312,7 +6328,7 @@ body.wall-plain{background:var(--bg)}
 .mine-disc .ruby{position:relative;z-index:2;width:62px;height:62px;border-radius:14px;background:linear-gradient(150deg,#ff8fa3,#ff2d55 45%,#8e0d2b);box-shadow:0 0 26px #ff2d5599,inset 0 2px 6px #fff6,inset 0 -4px 10px #4a001188;transform:rotate(45deg)}
 @keyframes spin{to{transform:rotate(360deg)}}
 .upg-wheel{width:210px;height:210px;border-radius:50%;position:relative;display:grid;place-items:center;margin:14px auto 6px;background:conic-gradient(#35d07f 0 calc(var(--ch,30) * 1%),#26313c 0 100%);box-shadow:inset 0 0 0 10px #0c1219,inset 0 0 0 12px #31465a,0 16px 40px #0008;transition:transform 3.2s cubic-bezier(.12,.72,.1,1)}
-.upg-wheel.spin{transform:rotate(1440deg)}
+.upg-wheel.spin{transform:none}
 .upg-wheel:after{content:"";position:absolute;inset:34px;border-radius:50%;background:radial-gradient(circle at 40% 30%,#16212c,#0a1017 75%);box-shadow:inset 0 0 18px #000}
 .upg-chance{position:relative;z-index:2;font-size:34px;font-weight:950;letter-spacing:-1px;color:#eaf6ff}
 .upg-pointer{position:absolute;top:-12px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:13px solid transparent;border-right:13px solid transparent;border-top:22px solid #ffd23d;z-index:3;filter:drop-shadow(0 4px 8px #000a)}
@@ -6394,7 +6410,7 @@ input{background:#0f0f12!important;border:1px solid #2b2b31!important;border-rad
 .srv.owned{border-color:#2b4a6e}
 /* ---- апгрейдер ---- */
 .upg-wheel{width:212px;height:212px;border-radius:50%;position:relative;display:grid;place-items:center;margin:16px auto 12px;background:conic-gradient(#35d07f 0 calc(var(--ch,0) * 1%),#232327 0 100%);box-shadow:inset 0 0 0 10px #0b0b0d,inset 0 0 0 12px #2e2e35,0 18px 44px #000a;transition:transform 3.2s cubic-bezier(.12,.72,.1,1)}
-.upg-wheel.spin{transform:rotate(1440deg)}
+.upg-wheel.spin{transform:none}
 .upg-wheel:after{content:"";position:absolute;inset:34px;border-radius:50%;background:radial-gradient(circle at 40% 30%,#17171b,#0a0a0c 75%);box-shadow:inset 0 0 18px #000}
 .upg-chance{position:relative;z-index:2;font-size:34px;font-weight:950;letter-spacing:-1px;color:#fff}
 .upg-pointer{position:absolute;top:-12px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:13px solid transparent;border-right:13px solid transparent;border-top:22px solid #ffd23d;z-index:3;filter:drop-shadow(0 4px 8px #000a)}
@@ -6403,6 +6419,8 @@ input{background:#0f0f12!important;border:1px solid #2b2b31!important;border-rad
 .upg-pick .nft.on{border-color:#35d07f!important;box-shadow:0 0 0 1px #35d07f88!important}
 .upg-pick .nft.on:after{content:"✓";position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:50%;background:#35d07f;color:#08150f;font-weight:900;display:grid;place-items:center;font-size:13px}
 .arch-price{color:#8a8a92;font-size:10px;margin-top:3px}
+.upg-needle{position:absolute;left:50%;top:4%;width:6px;height:46%;margin-left:-3px;transform-origin:50% 100%;transform:rotate(0deg);z-index:4;border-radius:6px;background:linear-gradient(180deg,#ffe083,#ffab2e);box-shadow:0 0 14px #ffab2eaa}
+.upg-needle:after{content:"";position:absolute;top:-15px;left:50%;margin-left:-9px;border-left:9px solid transparent;border-right:9px solid transparent;border-bottom:17px solid #ffe083;filter:drop-shadow(0 0 6px #ffab2e)}
 </style></head><body><main class="wrap">
 <header class="top"><div class="brand">RUBIN<span>·</span>BOT</div><div class="wallet"><small>RCOIN</small><span id="topBal">—</span></div></header>
 <section class="hero"><img class="hero-art" id="heroArt" src="/banner" alt="" onerror="this.remove()"><div class="eyebrow">ТВОЙ ИГРОВОЙ СЧЁТ</div><div class="balance" id="heroBal">— <small>RCOIN</small></div><div class="subline">Нажми на моно-строку ниже, чтобы скопировать баланс</div><button class="copy" id="copyBal" onclick="copyBalance()">·····················</button><div class="actions"><button class="action" onclick="sendBotAction('bonus')">🎁 Бонус</button><button class="action" onclick="sendBotAction('daily')">📅 Дейлик</button><button class="action" onclick="go('career')">💼 Работа</button></div></section>
@@ -6412,7 +6430,7 @@ input{background:#0f0f12!important;border:1px solid #2b2b31!important;border-rad
 <section id="career" class="page"><div class="panel"><h2>💻 IT-карьера <span class="badge" id="jobStage">Стажёр</span></h2><div class="stats"><div class="stat"><span>Уровень</span><b id="jobLevel">1</b></div><div class="stat"><span>Опыт</span><b id="jobXp">0 XP</b></div><div class="stat"><span>Заработано</span><b id="jobCoins">0</b></div><div class="stat"><span>Заданий</span><b id="jobTasks">0</b></div></div><p class="muted" id="jobCooldown">Выполняй задания, повышай уровень и открывай новые должности.</p><button class="btn green" id="taskBtn" onclick="doTask()">🚀 Получить IT-задание</button></div><div class="panel"><h2>💼 Зарплата за активность</h2><p class="muted">Пиши сообщения в групповых чатах. Команда /зп покажет начисление и позволит забрать ежедневную зарплату.</p><button class="btn ghost" onclick="toast('Открой чат с ботом и отправь /зп')">Как получить зарплату</button></div></section>
 <section id="trade" class="page"><div class="panel"><h2>📈 RCOIN MARKET <span class="badge">LIVE</span></h2><div class="row"><div><div class="muted">Текущий курс v-RCOIN</div><div class="price" id="price">—</div></div><div style="text-align:right"><div class="muted">Изменение</div><b id="change">—</b></div></div><canvas id="chart" class="chart" width="640" height="190"></canvas><p class="muted" style="margin-top:8px">Внутриигровой симулятор курса. Это не реальные деньги и не финансовый инструмент.</p></div><div class="panel"><h2>💼 Портфель</h2><div class="stats"><div class="stat"><span>v-RCOIN</span><b id="holding">0</b></div><div class="stat"><span>Стоимость</span><b id="value">0</b></div><div class="stat"><span>Вложено</span><b id="invested">0</b></div><div class="stat"><span>Результат</span><b id="profit">0</b></div></div></div><div class="panel"><h2>Обмен</h2><input id="amount" type="number" min="1000" step="1000" value="100000" placeholder="Сумма RCOIN"><div class="trade-buttons" style="margin-top:10px"><button class="btn green" onclick="buy()">🟢 Купить</button><button class="btn red" onclick="sell()">🔴 Продать всё</button></div></div></section>
 <section id="events" class="page"><div class="panel"><h2>⛄ СНЕЖНЫЙ МАРАФОН <span class="badge">DAILY TOP 3</span></h2><div class="stats"><div class="stat"><span>Снежки</span><b id="snowballs">0</b></div><div class="stat"><span>Снеговики сегодня</span><b id="snowmen">0</b></div></div><p class="muted">Собирай снежки каждые 20 секунд. Из 20 снежков можно слепить снеговика. Топ-3 дня получают случайную награду из казны от 1 до 10 млрд RCOIN, если средств достаточно.</p><div class="row"><button class="btn" onclick="snowCollect()">❄️ Собрать снежки</button><button class="btn green" onclick="snowBuild()">☃️ Слепить</button></div><div class="panel"><h2>🏆 Рейтинг дня</h2><div id="snowTop" class="muted">Загрузка рейтинга…</div></div></div><div class="panel"><h2>🎄 СЕЗОННЫЕ ИВЕНТЫ</h2><p class="muted">Собирай коллекционные предметы, выполняй задания и открывай награды. Новогодние эмодзи доступны в сообщениях бота при поддержке Telegram Premium Emoji.</p><div class="gridcards" style="margin-top:12px"><div class="tile"><div class="ico">❄️</div><b>Снежный марафон</b><small>Ежедневные задания</small></div><div class="tile"><div class="ico">🎅</div><b>Помощь Санте</b><small>Сезонная цепочка</small></div><div class="tile"><div class="ico">🐻‍❄️</div><b>Полярная коллекция</b><small>Собери предметы</small></div><div class="tile"><div class="ico">🎁</div><b>NFT-чеканка</b><small>Создай предмет в коллекцию</small></div></div><button class="btn" onclick="toast('Открой в боте команду «ивенты» для полного списка заданий')">Открыть задания в боте</button></div></section>
-<section id="nft" class="page"><div class="panel"><h2>🖼️ NFT-коллекция <span class="muted" id="nftCount">0 предметов</span></h2><p class="muted">Твои сгенерированные цифровые предметы и коллекционные изображения.</p><div class="gridcards" id="nftGrid" style="margin-top:12px"><p class="muted">Загружаем коллекцию…</p></div><label class="btn ghost" style="display:flex;align-items:center;justify-content:center;cursor:pointer">📷 NFT из фото<input type="file" accept="image/*" style="display:none" onchange="nftPhoto(this)"></label><button class="btn" onclick="mintNft()">✨ Создать NFT · 10 000 RCOIN</button></div></section>
+<section id="nft" class="page"><div class="panel"><h2>🖼️ NFT-коллекция <span class="muted" id="nftCount">0 предметов</span></h2><p class="muted">Твои сгенерированные цифровые предметы и коллекционные изображения.</p><div class="gridcards" id="nftGrid" style="margin-top:12px"><p class="muted">Загружаем коллекцию…</p></div><label id="photoBtn" class="btn ghost hide" style="display:flex;align-items:center;justify-content:center;cursor:pointer">📷 NFT из фото<input type="file" accept="image/*" style="display:none" onchange="nftPhoto(this)"></label><button class="btn" onclick="mintNft()">✨ Случайный NFT · 10 000 RCOIN</button></div></section>
 <section id="mining" class="page">
 <div class="tc-card"><div class="tc-head"><div><div class="tc-label">Баланс</div><div class="tc-bal"><b id="mineBal">0</b> <span>RCOIN</span></div></div><div class="tc-head-r"><span class="tc-chip" id="mineServers">0 серверов</span></div></div><div class="tc-actions"><button class="tc-btn" onclick="mineScroll()">Купить</button><button class="tc-btn" onclick="toast('Награда за серверы копится сама — жми «Снять»')">Награды</button><button class="tc-btn" onclick="mineCheck()">Проверить</button></div></div>
 <div class="tc-turbine-wrap"><div class="tc-dot"></div><svg class="turbine" viewBox="0 0 220 220" aria-hidden="true"><defs><radialGradient id="ringG" cx="50%" cy="50%" r="50%"><stop offset="58%" stop-color="#241640"/><stop offset="100%" stop-color="#100a1d"/></radialGradient><linearGradient id="bladeG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c4a1ff"/><stop offset="55%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#4b21b0"/></linearGradient></defs><circle cx="110" cy="110" r="104" fill="url(#ringG)" stroke="#372a55" stroke-width="2"/><g class="fan"><g transform="rotate(0 110 110)"><path d="M110 110 C 126 96 148 74 172 77 C 184 98 170 121 143 126 C 126 129 114 121 110 110 Z" fill="url(#bladeG)"/></g><g transform="rotate(60 110 110)"><path d="M110 110 C 126 96 148 74 172 77 C 184 98 170 121 143 126 C 126 129 114 121 110 110 Z" fill="url(#bladeG)"/></g><g transform="rotate(120 110 110)"><path d="M110 110 C 126 96 148 74 172 77 C 184 98 170 121 143 126 C 126 129 114 121 110 110 Z" fill="url(#bladeG)"/></g><g transform="rotate(180 110 110)"><path d="M110 110 C 126 96 148 74 172 77 C 184 98 170 121 143 126 C 126 129 114 121 110 110 Z" fill="url(#bladeG)"/></g><g transform="rotate(240 110 110)"><path d="M110 110 C 126 96 148 74 172 77 C 184 98 170 121 143 126 C 126 129 114 121 110 110 Z" fill="url(#bladeG)"/></g><g transform="rotate(300 110 110)"><path d="M110 110 C 126 96 148 74 172 77 C 184 98 170 121 143 126 C 126 129 114 121 110 110 Z" fill="url(#bladeG)"/></g></g><circle cx="110" cy="110" r="34" fill="#1a1030" stroke="#7c53d8" stroke-width="3"/><circle cx="110" cy="110" r="21" fill="#2b1a4f"/><text x="110" y="117" text-anchor="middle" font-size="17" font-weight="700" fill="#d9c9ff">R</text></svg></div>
@@ -6424,8 +6442,9 @@ input{background:#0f0f12!important;border:1px solid #2b2b31!important;border-rad
 </section>
 <section id="archive" class="page">
 <div class="panel"><h2>◍ Апгрейдер</h2><p class="muted">Добавь до 5 NFT — чем реже карты, тем выше шанс. Победа: подарок из архива (или коины, если архив пуст). Провал: NFT уходят в архив.</p>
+<div class="eyebrow" style="text-align:center;margin-top:12px">Улучшить на</div>
 <div class="bet-row" id="upgTargetRow" style="justify-content:center;margin:6px 0 2px"><button class="chip on" data-t="" onclick="setUpgTarget('')">Любая</button><button class="chip" data-t="common" onclick="setUpgTarget('common')">Обычная</button><button class="chip" data-t="uncommon" onclick="setUpgTarget('uncommon')">Необычная</button><button class="chip" data-t="rare" onclick="setUpgTarget('rare')">Редкая</button><button class="chip" data-t="epic" onclick="setUpgTarget('epic')">Эпик</button><button class="chip" data-t="legendary" onclick="setUpgTarget('legendary')">Легенда</button></div>
-<div class="upg-wheel" id="upgWheel"><div class="upg-pointer"></div><div class="upg-chance" id="upgChance">0%</div></div>
+<div class="upg-wheel" id="upgWheel"><div class="upg-needle" id="upgNeedle"></div><div class="upg-chance" id="upgChance">0%</div></div>
 <div class="upg-stake" id="upgStake">Выбери до 5 NFT</div>
 <button class="btn ghost" id="upgAddBtn" onclick="toggleUpgInv()">＋ Добавить подарок</button>
 <div id="upgInv" class="hide" style="margin-top:12px"><div class="gridcards upg-pick" id="upgPick"><p class="muted">Загрузка…</p></div><button class="btn green" onclick="toggleUpgInv(false)">Добавить в круг</button></div>
@@ -6472,9 +6491,10 @@ async function api(p,b={}){try{const r=await fetch('/api/'+p,{method:'POST',head
 function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.remove('show'),2600)}function haptic(){try{tg.HapticFeedback.impactOccurred('light')}catch(e){}}
 function go(p){document.querySelectorAll('.page').forEach(e=>e.classList.toggle('active',e.id===p));document.querySelectorAll('.nav button').forEach(e=>e.classList.toggle('active',e.dataset.page===p));if(p==='arena'){startArena();loadArenaGifts()}if(p==='trade')startTrade();if(p==='career')loadCareer();if(p==='nft')loadNft();if(p==='events')loadSnowman();if(p==='mining')loadMining();if(p==='archive')loadArchive()}
 function setBalance(v){const x=fmt(v);$('topBal').textContent=x;$('heroBal').innerHTML=x+' <small>RCOIN</small>';$('copyBal').textContent=x}
+function applyAdminUi(){const b=$('photoBtn');if(b)b.classList.toggle('hide',!(ME&&ME.is_admin))}
 async function copyBalance(){const value=ME?Number(ME.balance||0).toLocaleString('en-US').replace(/,/g,"'"):'0';try{await navigator.clipboard.writeText(value);toast('Баланс '+value+' скопирован')}catch(e){toast('Баланс: '+value)}}
 function sendBotAction(action){if(!tg||typeof tg.sendData!=='function'){toast('Открой приложение через кнопку бота в Telegram');return}try{tg.sendData(action)}catch(e){toast('Не удалось передать действие боту')}}
-async function loadMe(){if(!INIT){$('arenaStatus').textContent='Открой веб-приложение через меню бота в Telegram';return}const j=await api('me');if(!j.ok)return toast(j.err||'Не удалось загрузить профиль');ME=j;setBalance(j.balance);$('playerName').textContent=j.name||'Игрок';$('profileRank').textContent=j.rank||'Новичок';const ph=$('profilePhoto');const pv=j.nft_profile_url||j.photo_url||TU.photo_url||'';if(pv){ph.src=pv;ph.style.display='block'}else{ph.style.display='none'}const ha=$('heroArt');if(ha&&j.nft_balance_url)ha.src=j.nft_balance_url;$('games').textContent=fmt(j.games);$('rank').textContent=j.rank||'Новичок';$('wins').textContent=fmt(j.wins);$('lost').textContent=fmt(j.lost);$('badges').innerHTML=(j.badges||[]).map(x=>typeof x==='string'?'<span class="badge">'+safe(x)+'</span>':'<span class="badge">'+(x.emoji_id?'<img class="ce" src="/emoji/'+x.emoji_id+'.webp" alt="" onerror="this.remove()"> ':'')+safe(x.title||x.role||'')+'</span>').join('')||'<span class="muted">Пока нет выбранных галочек</span>'}
+async function loadMe(){if(!INIT){applyAdminUi();$('arenaStatus').textContent='Открой веб-приложение через меню бота в Telegram';return}const j=await api('me');if(!j.ok)return toast(j.err||'Не удалось загрузить профиль');ME=j;applyAdminUi();setBalance(j.balance);$('playerName').textContent=j.name||'Игрок';$('profileRank').textContent=j.rank||'Новичок';const ph=$('profilePhoto');const pv=j.nft_profile_url||j.photo_url||TU.photo_url||'';if(pv){ph.src=pv;ph.style.display='block'}else{ph.style.display='none'}const ha=$('heroArt');if(ha&&j.nft_balance_url)ha.src=j.nft_balance_url;$('games').textContent=fmt(j.games);$('rank').textContent=j.rank||'Новичок';$('wins').textContent=fmt(j.wins);$('lost').textContent=fmt(j.lost);$('badges').innerHTML=(j.badges||[]).map(x=>typeof x==='string'?'<span class="badge">'+safe(x)+'</span>':'<span class="badge">'+(x.emoji_id?'<img class="ce" src="/emoji/'+x.emoji_id+'.webp" alt="" onerror="this.remove()"> ':'')+safe(x.title||x.role||'')+'</span>').join('')||'<span class="muted">Пока нет выбранных галочек</span>'}
 function safe(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 /* Custom emoji for web app */
 const CE_IDS={games:'5841551282321497604',dice:'5312533460324199794',roulette:'6228608791529656524',fortune:'5434093331292377553',mines:'5370692462882857093',crash:'5283080528818360566',basket:'5384327463629233871',darts:'5310278924616356636',blackjack:'5285420684699260907',sun:'5391270767889497941',hunt:'5370553185683394181',spin:'5915833712368424979',football:'5413474404485061402',pyramid:'5224257782013769471',miner:'5370692462882857093',hi_lo:'5926783847453692661',ttt:'5222158908805632010',door:'5259067694396474462',profile:'5202216593966244027',balance:'5197491391206281629',bank:'5881948563591666817',diamond:'5438496463044752972',star:'5438496463044752972',lock:'5305621469134857194',nft:'5262517101578443800',referral:'5942877472163892475',check:'5810189259327413739',treasury:'5798678875823153004',win:'5305747221996177787',lose:'5305474786400690766',settings:'5258096772776991776',admin:'6129805886383723340',donate:'5438496463044752972',ad:'5213391561999526028',market:'5278702045883292456',question:'5436113877181941026',item_1:'5332717942599618048',item_2:'5404752966584394198',item_3:'5280924618444514633',item_4:'5368488358681000659',item_5:'5398024200235529935',item_6:'5449449325434266744',item_7:'5201924046563852634',item_8:'5199959030306456092',item_9:'5316599316884766402',black:'5789386473560088107',blue:'5810189259327413739',rubin:'5341454906807034418',moder:'5766894601709296405',support:'5888937609253623352',tester:'5888937609253623352',ny:'5954111328493771983',dev:'5251635454041675257'};
@@ -6565,8 +6585,12 @@ function setArenaColor(c){if(c==='#111111'&&!(ME&&ME.premium)){toast('Чёрны
 let MINE=null;
 function mineScroll(){const b=$('mineServersBox');if(b)b.scrollIntoView({behavior:'smooth',block:'center'})}
 function mineCheck(){loadMining();toast('Данные обновлены')}
+let mineTimer=null,mineBase=0,mineRate=0,mineTs=0;
+function mineTick(){const add=mineRate*((Date.now()-mineTs)/1000)/86400;const el=$('minePending');if(el)el.textContent=fmt(Math.floor(mineBase+add))}
 async function loadMining(){const j=await api('mining_state');if(!j.ok)return toast(j.err||'Майнинг недоступен');MINE=j;
- $('minePending').textContent=fmt(j.pending);$('mineRate').textContent=fmt(j.rate);$('mineBal').textContent=fmt(ME?ME.balance:0);
+ mineBase=Number(j.pending)||0;mineRate=Number(j.rate)||0;mineTs=Date.now();
+ if(mineTimer)clearInterval(mineTimer);mineTimer=setInterval(mineTick,1000);mineTick();
+ $('mineRate').textContent=fmt(j.rate);$('mineBal').textContent=fmt(ME?ME.balance:0);
  const owned=j.servers.filter(s=>s.owned);$('mineServers').textContent=owned.length+' серверов';
  const perHour=Math.floor(j.rate/24);$('mineEta').textContent='≈ '+fmt(perHour)+' в час · вывод в любой момент';
  const box=$('mineShop');box.innerHTML='';
@@ -6574,6 +6598,7 @@ async function loadMining(){const j=await api('mining_state');if(!j.ok)return to
  j.servers.forEach(s=>{const d=document.createElement('div');d.className='srv'+(s.owned?' owned':'');const ic=document.createElement('div');ic.className='srv-ic';ic.innerHTML=glyph('wheel');const txt=document.createElement('div');const b=document.createElement('b');b.textContent=s.name;const sm=document.createElement('small');sm.textContent=(s.owned?'куплен · осталось '+Math.ceil(s.left/86400)+' дн.':'')+' '+fmt(s.per_day)+'/сутки';txt.append(b,sm);d.append(ic,txt);if(!s.owned){const bt=document.createElement('button');bt.className='srv-buy';bt.textContent=fmt(s.cost);bt.onclick=()=>mineBuy(s.tier);d.append(bt)}box.append(d)})}
 async function mineBuy(tier){const j=await api('mining_buy',{tier});if(!j.ok)return toast(j.err||'Не куплено');setBalance(j.balance);toast(j.msg);loadMining()}
 async function mineCollect(){const j=await api('mining_collect');if(!j.ok)return toast(j.err||'Пока пусто');setBalance(j.balance);toast(j.msg+(j.archived?' · '+fmt(j.archived)+' в Архив':''));loadMining()}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){const pg=document.getElementById('mining');if(pg&&pg.classList.contains('active'))loadMining()}});
 /* ---- ARCHIVE / UPGRADER ---- */
 let AR=null,upgSel=[],upgTarget='';
 function setUpgTarget(t){upgTarget=t;document.querySelectorAll('#upgTargetRow .chip').forEach(b=>b.classList.toggle('on',(b.dataset.t||'')===t));renderSel()}
@@ -6592,8 +6617,11 @@ function renderSel(){document.querySelectorAll('#upgPick .nft').forEach(d=>d.cla
  const w=$('upgWheel');if(w)w.style.setProperty('--ch',ch);$('upgChance').textContent=ch+'%';
  $('upgBtn').disabled=!items.length;
  $('upgStake').textContent=items.length?('В круге: '+items.map(x=>'#'+x.id).join(' · ')):'Выбери до 5 NFT'}
-async function upgSpin(){if(!upgSel.length)return;const w=$('upgWheel');w.classList.remove('spin');void w.offsetWidth;w.classList.add('spin');$('upgBtn').disabled=true;
- const j=await api('archive_spin',{ids:upgSel,target:upgTarget});await new Promise(r=>setTimeout(r,3200));w.classList.remove('spin');$('upgBtn').disabled=false;
+async function upgSpin(){if(!upgSel.length)return;const nd=$('upgNeedle');$('upgBtn').disabled=true;
+ nd.style.transition='transform 3.2s cubic-bezier(.12,.72,.1,1)';
+ nd.style.transform='rotate('+(1800+Math.floor(Math.random()*360))+'deg)';
+ const j=await api('archive_spin',{ids:upgSel,target:upgTarget});await new Promise(r=>setTimeout(r,3200));
+ nd.style.transition='none';nd.style.transform='rotate(0deg)';$('upgBtn').disabled=false;
  if(!j.ok)return toast(j.err||'Не удалось');
  if(j.win){$('upgStatus').textContent='Победа! '+j.name;$('upgStatus').style.color='#35d07f';confetti(90)}else{$('upgStatus').textContent='Провал — NFT ушли в архив';$('upgStatus').style.color='#ff5268'}
  setBalance(j.balance);upgSel=[];loadArchive()}
@@ -6732,6 +6760,7 @@ async def main():
     asyncio.create_task(warm_nft_emojis())
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(arena_loop())
+    asyncio.create_task(db_backup_loop())
     while True:
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
@@ -8632,6 +8661,8 @@ def api_nft_photo(u, body):
     except Exception:
         return w_err("Это не картинка")
     uid = u["user_id"]
+    if not is_admin(uid):
+        return w_err("NFT из фото создаёт только владелец")
     title = (str(body.get("name") or "").strip() or "Фото NFT")[:30]
     nid = make_nft(uid, title, "rare", "photo", "NFT из личного фото",
                    RARITY_BASE["rare"], model="Призрачный", background="Галактика")
