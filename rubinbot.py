@@ -3163,6 +3163,42 @@ async def cmd_assistant(message: Message):
     await message.reply((ans or "Не удалось получить ответ.")[:4000])
 
 
+@dp.callback_query(F.data == "adm:ai")
+async def cb_adm_ai(cb: CallbackQuery, state: FSMContext):
+    if not is_admin(cb.from_user.id):
+        return await ans(cb, "Нет доступа", True)
+    status = "✅ ключ задан" if GIGACHAT_AUTH else "❌ ключ не задан"
+    await safe_edit(cb, box("🤖 <b>НЕЙРОСЕТЬ</b>",
+                            f"Статус: {status}",
+                            "Команда: <code>ассистент добавь игру на реакцию</code>",
+                            "В инлайне: <code>@бот .ai вопрос</code>",
+                            "Ключ на хостинге: <code>GIGACHAT_AUTH</code>"),
+                    kb([btn("Спросить сейчас", "adm:ai:ask", "question")],
+                       [btn("Назад", "adm:menu", "door")]))
+    return await ans(cb)
+
+
+@dp.callback_query(F.data == "adm:ai:ask")
+async def cb_adm_ai_ask(cb: CallbackQuery, state: FSMContext):
+    if not is_admin(cb.from_user.id):
+        return await ans(cb, "Нет доступа", True)
+    if not GIGACHAT_AUTH:
+        return await ans(cb, "Сначала задай GIGACHAT_AUTH", True)
+    await ask(cb, state, "ai_task", "Что сделать? Опиши задачу или промпт:")
+
+
+@flow("ai_task")
+async def f_ai_task(m: Message, state: FSMContext, d, txt):
+    if not is_admin(m.from_user.id):
+        return
+    if not GIGACHAT_AUTH:
+        return await m.reply("Ключ не задан.")
+    await m.reply("⏳ Думаю…")
+    answer = await ai_answer(txt, system="Ты помощник разработчика Telegram-бота на aiogram. Отвечай кратко, код — блоками.")
+    await state.clear()
+    await m.reply((answer or "Не удалось получить ответ.")[:4000])
+
+
 @dp.callback_query(F.data == "ai:status")
 async def cb_ai_status(cb: CallbackQuery):
     await ans(cb, "Ключ задан" if GIGACHAT_AUTH else "Ключ не задан (GIGACHAT_AUTH)", True)
@@ -5399,7 +5435,8 @@ def admin_kb() -> InlineKeyboardMarkup:
               [a("mailing"), btn("💾 Выгрузка БД", "adm:export")],
               [a("info"), a("history")],
               [a("nft_self"), a("nft_create")], [a("gift_gen"), a("gift_give")],
-              [btn("📦 Список подарков", "adm:gift_list")])
+              [btn("📦 Список подарков", "adm:gift_list")],
+              [btn("🤖 Нейросеть", "adm:ai")])
 
 
 @dp.message(P("адм1308", "admin", "админ"))
@@ -6790,6 +6827,8 @@ async function upgSpin(){
  if(!j.ok)return toast(j.err||'Не удалось');
  if(j.win){toast('Победа! '+j.name);confetti(90);$('dialHint').textContent='Победа!'}else{$('dialHint').textContent='Провал'}
  setBalance(j.balance);upgSel=[];loadArchive()}
+function confetti(n=80){const box=document.createElement('div');box.className='confetti';const cols=['#ffd23d','#35d07f','#3d9bff','#ff7ab8','#ffffff'];for(let i=0;i<n;i++){const s=document.createElement('i');s.style.left=(Math.random()*100)+'%';s.style.top='-20px';s.style.background=cols[i%cols.length];s.style.animationDuration=(1.6+Math.random()*1.6)+'s';s.style.animationDelay=(Math.random()*.4)+'s';box.append(s)}document.body.append(box);setTimeout(()=>box.remove(),3800)}
+function arenaFx(ph){if((window._lastPhase||'')!==ph){window._lastPhase=ph;if(ph==='done'&&AS&&AS.winner_idx>=0){confetti(120);$('arenaSquare').classList.add('finish');setTimeout(()=>$('arenaSquare').classList.remove('finish'),2200)}else{$('arenaSquare').classList.remove('finish')}}}
 applyLook();try{arenaAvatar=localStorage.getItem('rcoin_arena_avatar')||''}catch(e){}applyCustomIcons();initBallTrails();premiumize(document.body);_ceObs.observe(document.body,{childList:true,subtree:true,characterData:true});loadMe();go('home');
 </script></body></html>"""
 
@@ -7836,21 +7875,54 @@ def _cut_bg(im):
 
 
 def _ai_art():
-    """Внешний арт (GigaChat/Kandinsky), случайный из набора."""
+    """Внешний арт (GigaChat/Kandinsky) с готовым фоном, случайный из набора."""
     if "imgs" in _AI_ART:
-        return random.choice(_AI_ART["imgs"]) if _AI_ART["imgs"] else None
+        return _AI_ART["imgs"][0] if _AI_ART["imgs"] else None
     imgs = []
-    for path in sorted(NFT_ART_DIR.glob("plush_*.jpg")):
+    for path in sorted(NFT_ART_DIR.glob("*.jpg")):
         try:
-            imgs.append(_cut_bg(Image.open(path)))
+            im = Image.open(path).convert("RGBA")
+            im.thumbnail((1000, 1000), Image.LANCZOS)
+            imgs.append(im)
         except Exception:
             log.exception("ai art %s", path.name)
     _AI_ART["imgs"] = imgs
-    return random.choice(imgs) if imgs else None
+    return imgs[0] if imgs else None
+
+
+def _nft_ai_card(seed: int, title: str, rarity: str, art: "Image.Image") -> bytes:
+    """Карточка Plush Pepe: арт с готовым узорным фоном + имя и Collectible #N."""
+    w = h = 1080
+    scale = max(w / art.width, h / art.height)
+    big = art.resize((int(art.width * scale) + 1, int(art.height * scale) + 1), Image.LANCZOS)
+    left = (big.width - w) // 2
+    top = (big.height - h) // 2
+    im = big.crop((left, top, left + w, top + h)).convert("RGBA")
+
+    scrim = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(scrim, "RGBA")
+    for y in range(h - 250, h):
+        k = (y - (h - 250)) / 250
+        sd.line((0, y, w, y), fill=(10, 10, 12, int(190 * k ** 1.5)))
+    im = Image.alpha_composite(im, scrim)
+
+    d = ImageDraw.Draw(im, "RGBA")
+    name = (title or "Plush Pepe")[:26]
+    d.text((w // 2, h - 148), name, font=_nft_font(True, 54), fill=(255, 255, 255, 248), anchor="mm")
+    d.text((w // 2, h - 76), f"Collectible #{seed}", font=_nft_font(False, 33),
+           fill=(176, 174, 186, 238), anchor="mm")
+
+    out = io.BytesIO()
+    im.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()
 
 
 def _nft_character_card(seed: int, title: str, photo: str, model: str,
                         background: str, rarity: str, level: int) -> bytes:
+    if photo != "photo":
+        ai = _ai_art()
+        if ai is not None:
+            return _nft_ai_card(seed, title, rarity, ai)
     w, h = 1280, 720
     accent = NFT_MODEL_ACCENT.get(str(model), NFT_RARITY_COLOR.get(str(rarity), (200, 190, 255)))
     im = _nft_premium_bg(w, h, accent, rarity, seed)
