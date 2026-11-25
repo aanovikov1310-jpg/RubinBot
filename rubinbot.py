@@ -3120,15 +3120,21 @@ async def cmd_check_book(message: Message):
 GIGACHAT_AUTH = os.getenv("GIGACHAT_AUTH", "").strip()
 
 
+def giga_auth() -> str:
+    """Ключ из базы (задан командой в боте) или из переменной окружения."""
+    return (kv_get("gigachat:auth") or GIGACHAT_AUTH or "").strip()
+
+
 async def ai_answer(prompt: str, system: str = "") -> Optional[str]:
     """Ответ внешней модели (GigaChat). Без ключа возвращает None."""
-    if not GIGACHAT_AUTH or not prompt.strip():
+    auth = giga_auth()
+    if not auth or not prompt.strip():
         return None
     import aiohttp
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
             async with s.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-                              headers={"Authorization": "Basic " + GIGACHAT_AUTH,
+                              headers={"Authorization": "Basic " + auth,
                                        "RqUID": gen_code(16, "0123456789abcdef"),
                                        "Content-Type": "application/x-www-form-urlencoded"},
                               data={"scope": "GIGACHAT_API_PERS"}) as r:
@@ -3147,6 +3153,27 @@ async def ai_answer(prompt: str, system: str = "") -> Optional[str]:
         return None
 
 
+@dp.message(P("ключ", "апиключ", "gigakey"))
+async def cmd_set_giga_key(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 3:
+        return await message.reply(
+            "🔑 <b>Ключ GigaChat</b>\n"
+            "1. В кабинете GigaChat нажми «Получить ключ» — получишь Client Secret.\n"
+            "2. Отправь сюда: <code>ключ CLIENT_ID SECRET</code>\n"
+            "3. Удали это сообщение из чата.")
+    cid, secret = parts[1].strip(), parts[2].strip()
+    token = base64.b64encode(f"{cid}:{secret}".encode()).decode()
+    kv_set("gigachat:auth", token)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await message.reply("✅ Ключ сохранён. Проверь: <code>ассистент привет</code> или <code>.ai привет</code> в инлайне.")
+
+
 @dp.message(P("ассистент", "ии", "ai"))
 async def cmd_assistant(message: Message):
     if not is_admin(message.from_user.id):
@@ -3155,7 +3182,7 @@ async def cmd_assistant(message: Message):
     if len(prompt) < 2:
         return await message.reply("🤖 <b>AI-ассистент</b>\nНапиши задачу: <code>ассистент добавь игру на реакцию</code>",
                                    reply_markup=kb([btn("Статус ключа", "ai:status")]))
-    if not GIGACHAT_AUTH:
+    if not giga_auth():
         return await message.reply("🔑 Нужен ключ GigaChat: задай переменную окружения <code>GIGACHAT_AUTH</code> "
                                    "(base64 client_id:client_secret). После этого ассистент заработает без правок кода.")
     await message.reply("⏳ Думаю…")
@@ -3167,7 +3194,7 @@ async def cmd_assistant(message: Message):
 async def cb_adm_ai(cb: CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id):
         return await ans(cb, "Нет доступа", True)
-    status = "✅ ключ задан" if GIGACHAT_AUTH else "❌ ключ не задан"
+    status = "✅ ключ задан" if giga_auth() else "❌ ключ не задан"
     await safe_edit(cb, box("🤖 <b>НЕЙРОСЕТЬ</b>",
                             f"Статус: {status}",
                             "Команда: <code>ассистент добавь игру на реакцию</code>",
@@ -3182,7 +3209,7 @@ async def cb_adm_ai(cb: CallbackQuery, state: FSMContext):
 async def cb_adm_ai_ask(cb: CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id):
         return await ans(cb, "Нет доступа", True)
-    if not GIGACHAT_AUTH:
+    if not giga_auth():
         return await ans(cb, "Сначала задай GIGACHAT_AUTH", True)
     await ask(cb, state, "ai_task", "Что сделать? Опиши задачу или промпт:")
 
@@ -3191,7 +3218,7 @@ async def cb_adm_ai_ask(cb: CallbackQuery, state: FSMContext):
 async def f_ai_task(m: Message, state: FSMContext, d, txt):
     if not is_admin(m.from_user.id):
         return
-    if not GIGACHAT_AUTH:
+    if not giga_auth():
         return await m.reply("Ключ не задан.")
     await m.reply("⏳ Думаю…")
     answer = await ai_answer(txt, system="Ты помощник разработчика Telegram-бота на aiogram. Отвечай кратко, код — блоками.")
@@ -3201,7 +3228,7 @@ async def f_ai_task(m: Message, state: FSMContext, d, txt):
 
 @dp.callback_query(F.data == "ai:status")
 async def cb_ai_status(cb: CallbackQuery):
-    await ans(cb, "Ключ задан" if GIGACHAT_AUTH else "Ключ не задан (GIGACHAT_AUTH)", True)
+    await ans(cb, "Ключ задан" if giga_auth() else "Ключ не задан", True)
 
 
 @dp.inline_query()
@@ -3247,7 +3274,7 @@ async def inline_checks(query: InlineQuery):
     elif low.startswith((".ai ", ".r ", "аи ")):
         prompt = raw.split(maxsplit=1)[1].strip() if len(raw.split(maxsplit=1)) > 1 else ""
         answer = await ai_answer(prompt) if prompt else None
-        text = answer or ("🔑 AI не настроен: добавь GIGACHAT_AUTH на хостинге." if not GIGACHAT_AUTH else "Не удалось ответить.")
+        text = answer or ("🔑 AI не настроен: отправь админу команду «ключ CLIENT_ID SECRET»." if not giga_auth() else "Не удалось ответить.")
         results.append(InlineQueryResultArticle(
             id="ai",
             title="AI: " + (prompt[:40] or "вопрос"),
@@ -4010,8 +4037,8 @@ def gift_open(uid: int, gid: int) -> Optional[int]:
     if x("UPDATE gifts SET used=1, used_by=? WHERE id=? AND used=0 AND owner_id IN (0,?)", (uid, gid, uid))[0] != 1:
         return None
     name, emoji = random.choice(NFT_POOL[g["rarity"]] if g["rarity"] in NFT_POOL else NFT_POOL["common"])
-    # Пока NFT не улучшен — фото нет, только белая заглушка.
-    return make_nft(uid, name, g["rarity"], "blank", "Открыто из коллекционного бокса")
+    # Сразу красивый AI-арт, без пустой заглушки.
+    return make_nft(uid, name, g["rarity"], "✨", "Открыто из коллекционного бокса")
 
 
 def rollix_stock() -> int:
@@ -6344,7 +6371,7 @@ WEBAPP_HTML = r"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no"><title>RUBIN · Игровой центр</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{color-scheme:dark;--bg:#080b10;--panel:#111720;--panel2:#151e29;--line:#263443;--text:#f4f7fb;--muted:#8d9baa;--blue:#2798ff;--green:#27c982;--red:#ff5268;--gold:#ffc45d;--radius:22px}
-*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(900px 500px at 100% -10%,#12304a 0%,transparent 60%),radial-gradient(700px 450px at -20% 40%,#172433 0%,transparent 60%),var(--bg);color:var(--text);min-height:100vh;padding:calc(14px + env(safe-area-inset-top)) 14px calc(100px + env(safe-area-inset-bottom));overflow-x:hidden}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.brand{font-size:19px;font-weight:950;letter-spacing:.08em}.brand span{color:var(--blue)}.wallet{background:#111b26;border:1px solid #263b50;padding:9px 13px;border-radius:999px;font-weight:850}.wallet small{color:var(--muted);font-size:10px;margin-right:6px}.hero{background:linear-gradient(135deg,#142638,#101720 65%);border:1px solid #2b4054;border-radius:28px;padding:20px;margin-bottom:14px;position:relative;overflow:hidden}.hero:after{content:"";position:absolute;width:190px;height:190px;right:-65px;top:-85px;border-radius:50%;background:#178cf2;filter:blur(75px);opacity:.28}.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#91a7bb;font-weight:800}.balance{font-size:clamp(27px,7vw,38px);font-weight:950;margin:7px 0 4px;letter-spacing:-1px}.balance small{font-size:15px;color:#8dbde7}.subline{color:var(--muted);font-size:12px}.copy{margin-top:12px;border:1px dashed #52677b;background:#0c141d;color:#c7d8e8;padding:9px 12px;border-radius:12px;width:100%;text-align:left;font:600 13px ui-monospace,monospace}.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin:12px 0}.stat{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:13px}.stat span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.stat b{font-size:16px}.panel{background:linear-gradient(155deg,#141d27,#0f151d);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin:12px 0;box-shadow:0 12px 32px #0003}.panel h2{font-size:16px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}.muted{color:var(--muted);font-size:12px;line-height:1.5}.nav{position:fixed;z-index:10;bottom:calc(10px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(720px,calc(100% - 24px));display:grid;grid-template-columns:repeat(6,1fr);gap:5px;padding:7px;background:#111923ed;border:1px solid #304153;border-radius:22px;backdrop-filter:blur(18px);box-shadow:0 12px 40px #0009}.nav button{border:0;background:transparent;color:#8191a1;padding:10px 3px;border-radius:15px;font-size:10px;font-weight:800}.nav button i{display:block;font-style:normal;font-size:18px;margin-bottom:4px}.nav button.active{background:#173a59;color:#eaf6ff;box-shadow:inset 0 0 0 1px #2d77b2}.page{display:none}.page.active{display:block;animation:fade .22s ease}@keyframes fade{from{opacity:.3;transform:translateY(5px)}to{opacity:1;transform:none}}.actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.action{border:1px solid #304255;background:#172431;color:#eaf4ff;padding:12px 6px;border-radius:15px;font-size:12px;font-weight:800}.action:active,.btn:active{transform:scale(.98)}.btn{width:100%;border:0;border-radius:15px;padding:14px 16px;font-weight:900;font-size:14px;color:white;background:linear-gradient(135deg,#1687ed,#2864d9);margin-top:9px}.btn.green{background:linear-gradient(135deg,#21c981,#149c72);color:#061b13}.btn.red{background:linear-gradient(135deg,#ff536b,#cf294a)}.btn.ghost{background:#1a2632;border:1px solid #35485b;color:#dce8f4}.row{display:flex;gap:9px;align-items:center}.row>*{min-width:0;flex:1}input{width:100%;padding:13px;border-radius:13px;border:1px solid #34495e;background:#0a1119;color:white;font-size:15px;font-weight:800;outline:none}input:focus{border-color:var(--blue)}.profile-head{display:flex;align-items:center;gap:13px;margin:4px 0 12px}.profile-photo{width:58px;height:58px;border-radius:50%;object-fit:cover;border:2px solid #4b91c9;background:#22384b}.profile-photo.fallback{display:grid;place-items:center;color:#fff;font-weight:900;font-size:22px}.color-picks{display:flex;gap:9px;flex-wrap:wrap;margin:10px 0}.color-pick{width:30px;height:30px;border-radius:50%;border:2px solid #ffffff33;cursor:pointer}.color-pick.selected{outline:2px solid white;outline-offset:3px}.snowman-score{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #253747}.players{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.player{display:flex;align-items:center;gap:9px;background:#0c141d;border:1px solid #263849;border-radius:14px;padding:10px}.avatar{width:35px;height:35px;border-radius:50%;display:grid;place-items:center;font-weight:900;color:#07111a;flex:none}.player b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.player small{display:block;color:var(--muted);font-size:10px;margin-top:2px}.arena{display:grid;place-items:center;min-height:250px;background:radial-gradient(circle at 50% 50%,#1b3448,#0b121b 70%);border:1px solid #2a4155;border-radius:22px;overflow:hidden}.arena canvas{width:min(100%,340px);height:auto}.status{text-align:center;font-size:18px;font-weight:900;margin:12px 0 4px}.progress{height:7px;background:#243241;border-radius:20px;overflow:hidden;margin-top:12px}.progress span{height:100%;display:block;width:0;background:linear-gradient(90deg,#259aff,#55d4ff);transition:width .25s}.chart{width:100%;height:190px;display:block;background:#0b131c;border-radius:16px}.price{font-size:28px;font-weight:950}.up{color:var(--green)}.down{color:var(--red)}.trade-buttons{display:grid;grid-template-columns:1fr 1fr;gap:9px}.trade-buttons .btn{margin-top:0}.gridcards{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}.tile{border:1px solid #2b3b4b;border-radius:17px;background:#101923;padding:14px;min-height:105px}.tile .ico{font-size:25px;margin-bottom:9px}.tile b{display:block;font-size:13px}.tile small{color:var(--muted);font-size:11px}.badge{display:inline-flex;align-items:center;padding:5px 9px;border:1px solid #31516a;background:#142b3e;border-radius:999px;color:#b9ddfa;font-size:10px;font-weight:900;margin:3px}.nft{border:1px solid #33475a;background:#0b131c;border-radius:16px;padding:10px}.nft img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;background:#182432}.nft b{display:block;font-size:12px;margin-top:8px}.toast{position:fixed;left:50%;bottom:95px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#1b2b3a;border:1px solid #42617b;padding:11px 16px;border-radius:13px;font-size:13px;font-weight:800;transition:.2s;z-index:20;max-width:90%;text-align:center}.toast.show{opacity:1;transform:translate(-50%,0)}.hide{display:none!important}@media(min-width:600px){.stats{grid-template-columns:repeat(4,1fr)}.gridcards{grid-template-columns:repeat(3,1fr)}}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(900px 500px at 100% -10%,#12304a 0%,transparent 60%),radial-gradient(700px 450px at -20% 40%,#172433 0%,transparent 60%),var(--bg);color:var(--text);min-height:100vh;padding:calc(14px + env(safe-area-inset-top)) 14px calc(100px + env(safe-area-inset-bottom));overflow-x:hidden}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.brand{font-size:19px;font-weight:950;letter-spacing:.08em}.brand span{color:var(--blue)}.wallet{background:#111b26;border:1px solid #263b50;padding:9px 13px;border-radius:999px;font-weight:850}.wallet small{color:var(--muted);font-size:10px;margin-right:6px}.hero{background:linear-gradient(135deg,#142638,#101720 65%);border:1px solid #2b4054;border-radius:28px;padding:20px;margin-bottom:14px;position:relative;overflow:hidden}.hero:after{content:"";position:absolute;width:190px;height:190px;right:-65px;top:-85px;border-radius:50%;background:#178cf2;filter:blur(75px);opacity:.28}.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#91a7bb;font-weight:800}.balance{font-size:clamp(27px,7vw,38px);font-weight:950;margin:7px 0 4px;letter-spacing:-1px}.balance small{font-size:15px;color:#8dbde7}.subline{color:var(--muted);font-size:12px}.copy{margin-top:12px;border:1px dashed #52677b;background:#0c141d;color:#c7d8e8;padding:9px 12px;border-radius:12px;width:100%;text-align:left;font:600 13px ui-monospace,monospace}.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin:12px 0}.stat{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:13px}.stat span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.stat b{font-size:16px}.panel{background:linear-gradient(155deg,#141d27,#0f151d);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin:12px 0;box-shadow:0 12px 32px #0003}.panel h2{font-size:16px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}.muted{color:var(--muted);font-size:12px;line-height:1.5}.nav{position:fixed;z-index:10;bottom:calc(10px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(720px,calc(100% - 24px));display:grid;grid-template-columns:repeat(6,1fr);gap:5px;padding:7px;background:#111923ed;border:1px solid #304153;border-radius:22px;backdrop-filter:blur(18px);box-shadow:0 12px 40px #0009}.nav button{border:0;background:transparent;color:#8191a1;padding:10px 3px;border-radius:15px;font-size:10px;font-weight:800}.nav button i{display:block;font-style:normal;font-size:18px;margin-bottom:4px}.nav button.active{background:#173a59;color:#eaf6ff;box-shadow:inset 0 0 0 1px #2d77b2}.page{display:none}.page.active{display:block;animation:fade .22s ease}@keyframes fade{from{opacity:.3;transform:translateY(5px)}to{opacity:1;transform:none}}.actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.action{border:1px solid #304255;background:#172431;color:#eaf4ff;padding:12px 6px;border-radius:15px;font-size:12px;font-weight:800}.action:active,.btn:active{transform:scale(.98)}.btn{width:100%;border:0;border-radius:15px;padding:14px 16px;font-weight:900;font-size:14px;color:white;background:linear-gradient(135deg,#1687ed,#2864d9);margin-top:9px}.btn.green{background:linear-gradient(135deg,#21c981,#149c72);color:#061b13}.btn.red{background:linear-gradient(135deg,#ff536b,#cf294a)}.btn.ghost{background:#1a2632;border:1px solid #35485b;color:#dce8f4}.row{display:flex;gap:9px;align-items:center}.row>*{min-width:0;flex:1}input{width:100%;padding:13px;border-radius:13px;border:1px solid #34495e;background:#0a1119;color:white;font-size:15px;font-weight:800;outline:none}input:focus{border-color:var(--blue)}.profile-head{display:flex;align-items:center;gap:13px;margin:4px 0 12px}.profile-photo{width:58px;height:58px;border-radius:50%;object-fit:cover;border:2px solid #4b91c9;background:#22384b}.profile-photo.fallback{display:grid;place-items:center;color:#fff;font-weight:900;font-size:22px}.color-picks{display:flex;gap:9px;flex-wrap:wrap;margin:10px 0}.color-pick{width:30px;height:30px;border-radius:50%;border:2px solid #ffffff33;cursor:pointer}.color-pick.selected{outline:2px solid white;outline-offset:3px}.snowman-score{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #253747}.players{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.player{display:flex;align-items:center;gap:9px;background:#0c141d;border:1px solid #263849;border-radius:14px;padding:10px}.avatar{width:35px;height:35px;border-radius:50%;display:grid;place-items:center;font-weight:900;color:#07111a;flex:none}.player b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.player small{display:block;color:var(--muted);font-size:10px;margin-top:2px}.arena{display:grid;place-items:center;min-height:250px;background:radial-gradient(circle at 50% 50%,#1b3448,#0b121b 70%);border:1px solid #2a4155;border-radius:22px;overflow:hidden}.arena canvas{width:min(100%,340px);height:auto}.status{text-align:center;font-size:18px;font-weight:900;margin:12px 0 4px}.progress{height:7px;background:#243241;border-radius:20px;overflow:hidden;margin-top:12px}.progress span{height:100%;display:block;width:0;background:linear-gradient(90deg,#259aff,#55d4ff);transition:width .25s}.chart{width:100%;height:190px;display:block;background:#0b131c;border-radius:16px}.price{font-size:28px;font-weight:950}.up{color:var(--green)}.down{color:var(--red)}.trade-buttons{display:grid;grid-template-columns:1fr 1fr;gap:9px}.trade-buttons .btn{margin-top:0}.gridcards{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}.tile{border:1px solid #2b3b4b;border-radius:17px;background:#101923;padding:14px;min-height:105px}.tile .ico{font-size:25px;margin-bottom:9px}.tile b{display:block;font-size:13px}.tile small{color:var(--muted);font-size:11px}.badge{display:inline-flex;align-items:center;padding:5px 9px;border:1px solid #31516a;background:#142b3e;border-radius:999px;color:#b9ddfa;font-size:10px;font-weight:900;margin:3px}.nft{border:1px solid #33475a;background:#0b131c;border-radius:16px;padding:10px}.nft img{width:100%;aspect-ratio:3 / 2;object-fit:cover;border-radius:12px;background:#182432}.nft b{display:block;font-size:12px;margin-top:8px}.toast{position:fixed;left:50%;bottom:95px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#1b2b3a;border:1px solid #42617b;padding:11px 16px;border-radius:13px;font-size:13px;font-weight:800;transition:.2s;z-index:20;max-width:90%;text-align:center}.toast.show{opacity:1;transform:translate(-50%,0)}.hide{display:none!important}@media(min-width:600px){.stats{grid-template-columns:repeat(4,1fr)}.gridcards{grid-template-columns:repeat(3,1fr)}}
 
 /* RUBIN custom icon system: hand-drawn inline SVG, no emoji-font dependence */
 .glyph{width:25px;height:25px;display:inline-grid;place-items:center;flex:0 0 auto;vertical-align:middle;color:var(--glyph,#8fc8ff)}
@@ -7891,29 +7918,31 @@ def _ai_art():
 
 
 def _nft_ai_card(seed: int, title: str, rarity: str, art: "Image.Image") -> bytes:
-    """Карточка Plush Pepe: арт с готовым узорным фоном + имя и Collectible #N."""
-    w = h = 1080
-    scale = max(w / art.width, h / art.height)
-    big = art.resize((int(art.width * scale) + 1, int(art.height * scale) + 1), Image.LANCZOS)
-    left = (big.width - w) // 2
-    top = (big.height - h) // 2
-    im = big.crop((left, top, left + w, top + h)).convert("RGBA")
+    """Лежачая карточка 3:2: арт по центру, размытый фон по бокам, номер сверху."""
+    w, h = 1200, 800
+    a = art.convert("RGB")
 
-    scrim = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(scrim, "RGBA")
-    for y in range(h - 250, h):
-        k = (y - (h - 250)) / 250
-        sd.line((0, y, w, y), fill=(10, 10, 12, int(190 * k ** 1.5)))
-    im = Image.alpha_composite(im, scrim)
+    bg = a.copy()
+    scale = max(w / bg.width, h / bg.height)
+    bg = bg.resize((int(bg.width * scale) + 1, int(bg.height * scale) + 1), Image.LANCZOS)
+    bg = bg.crop(((bg.width - w) // 2, (bg.height - h) // 2,
+                  (bg.width - w) // 2 + w, (bg.height - h) // 2 + h))
+    bg = bg.filter(ImageFilter.GaussianBlur(26))
+    bg = ImageEnhance.Brightness(bg).enhance(0.42)
 
-    d = ImageDraw.Draw(im, "RGBA")
-    name = (title or "Plush Pepe")[:26]
-    d.text((w // 2, h - 148), name, font=_nft_font(True, 54), fill=(255, 255, 255, 248), anchor="mm")
-    d.text((w // 2, h - 76), f"Collectible #{seed}", font=_nft_font(False, 33),
-           fill=(176, 174, 186, 238), anchor="mm")
+    fh = h
+    fw = int(a.width * (fh / a.height))
+    fg = a.resize((fw, fh), Image.LANCZOS)
+    canvas = bg.convert("RGBA")
+    canvas.alpha_composite(fg.convert("RGBA"), ((w - fw) // 2, 0))
+
+    d = ImageDraw.Draw(canvas, "RGBA")
+    d.rounded_rectangle((w - 210, 26, w - 26, 78), 18, fill=(0, 0, 0, 120))
+    d.text((w - 118, 52), f"#{seed}", font=_nft_font(True, 30),
+           fill=(255, 255, 255, 235), anchor="mm")
 
     out = io.BytesIO()
-    im.convert("RGB").save(out, format="PNG", optimize=True)
+    canvas.convert("RGB").save(out, format="PNG", optimize=True)
     return out.getvalue()
 
 
