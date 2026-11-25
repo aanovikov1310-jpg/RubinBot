@@ -598,7 +598,6 @@ USER_COLS = {
     "ev_day": "TEXT DEFAULT ''", "ev_stash_used": "INTEGER DEFAULT 0", "ev_boss_day": "TEXT DEFAULT ''",
     "ev_wheel_last": "INTEGER DEFAULT 0", "ev_points": "INTEGER DEFAULT 0",
     "db5_streak": "INTEGER DEFAULT 0", "db5_last_day": "TEXT DEFAULT ''",
-    "archive_coin": "INTEGER DEFAULT 0",
 }
 SCHEMA = [
     "CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY)",
@@ -3409,15 +3408,13 @@ async def cmd_buy_username(message: Message):
 
 
 # ============================ ДОНАТ (Telegram Stars) ============================
-@dp.message(P("донат"))
-async def cmd_donate(message: Message):
+async def cmd_donate_old(message: Message):
     u = get_user(message.from_user.id)
     await message.reply(f"{E('donate')} <b>Пополнение RBP</b>\n\n{E('diamond')} Твой баланс: {fmt(u['balance_point'])} RBP\n1 ⭐ Telegram Stars = 5 RBP",
                         reply_markup=kb([btn("Пополнить звёздами", "don:stars", "star")]))
 
 
-@dp.callback_query(F.data == "don:stars")
-async def cb_don(cb: CallbackQuery, state: FSMContext):
+async def cb_don_old(cb: CallbackQuery, state: FSMContext):
     await ask(cb, state, "stars", "Сколько звёзд ⭐ потратить? (1 ⭐ = 5 RBP)")
 
 
@@ -3441,8 +3438,7 @@ async def on_pre_checkout(q_: PreCheckoutQuery):
     await q_.answer(ok=True)
 
 
-@dp.message(F.successful_payment)
-async def on_paid(message: Message):
+async def on_paid_old(message: Message):
     sp = message.successful_payment
     if kv_get("pay:" + sp.telegram_payment_charge_id):
         return
@@ -5687,7 +5683,7 @@ def w_spend(u, bet: int, lo: int = 10) -> Optional[dict]:
 # ---------- арена: квадратная сцена со ставками ----------
 AR: Dict[str, Any] = {}
 AR_HIST: List[dict] = []
-AR_CD, AR_ROLL, AR_SHOW, AR_MAX = 15, 7, 9, 10
+AR_CD, AR_ROLL, AR_SHOW, AR_MAX = 15, 11, 14, 10
 AR_MIN_BET = 1
 ARENA_HEX = ["#ff8a3d", "#3d9bff", "#35d07f", "#b06bff", "#ffd23d", "#ff5c5c", "#2de2e6", "#c98bff", "#8dff6b", "#ff7ab8"]
 ARENA_BLACK = "#111111"
@@ -6162,6 +6158,37 @@ body.theme-green{--bg:#07140f;--panel:#0f211a;--panel2:#132a21;--line:#234a39;--
 body.wall-banner{background-image:linear-gradient(#000000a8,#000000d8),url('/banner');background-size:cover;background-position:center}
 body.wall-plain{background:var(--bg)}
 
+
+.nav{grid-template-columns:repeat(7,1fr)!important;gap:2px!important}
+.nav button{font-size:9px!important;padding:8px 1px!important}
+.mine-disc{width:170px;height:170px;border-radius:50%;display:grid;place-items:center;position:relative;margin:8px auto 12px;background:conic-gradient(from 0deg,#2a2a31,#8d8794,#f2eef4,#6d6877,#2a2a31);box-shadow:inset 0 0 26px #000a,0 0 46px #ff2a5544,0 14px 34px #0008;animation:rspin 6s linear infinite}
+.mine-disc:after{content:"";position:absolute;inset:13px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#1c1c22,#09090b 72%);box-shadow:inset 0 0 18px #000}
+.mine-disc .ruby{position:relative;z-index:2;width:64px;height:64px;border-radius:14px;background:linear-gradient(150deg,#ff9fb0,#ff2d55 45%,#8e0d2b);box-shadow:0 0 28px #ff2d55aa,inset 0 2px 6px #fff7,inset 0 -4px 10px #4a001188;transform:rotate(45deg)}
+@keyframes rspin{to{transform:rotate(360deg)}}
+.tc-amount{text-align:center;font-size:clamp(28px,8.4vw,42px);font-weight:950;margin-top:10px;line-height:1.1;letter-spacing:-1.2px}
+.tc-amount span{font-size:14px;color:#8a8a92;letter-spacing:0;font-weight:700}
+.tc-meta{text-align:center;color:#8a8a92;font-size:13px;margin:6px 0 12px}
+.srv{display:flex;align-items:center;gap:12px;background:#10161e;border:1px solid #263443;border-radius:18px;padding:12px;margin-bottom:9px}
+.srv b{display:block;font-size:13px}.srv small{color:#8d9baa;font-size:11px}
+.srv .srv-btns{margin-left:auto;display:flex;gap:6px}
+.srv button{border:0;border-radius:999px;background:#2f7cf6;color:#fff;font-weight:800;padding:9px 12px;font-size:12px;cursor:pointer}
+.srv button.star{background:#6b4bd8}
+.srv.owned{border-color:#2b6e4a}
+.upg-wheel{width:212px;height:212px;border-radius:50%;position:relative;display:grid;place-items:center;margin:20px auto 14px;background:conic-gradient(#35d07f 0 calc(var(--ch,0) * 1%),#232327 0 100%);box-shadow:inset 0 0 0 10px #0b0b0d,inset 0 0 0 12px #2e2e35,0 18px 44px #000a}
+.upg-wheel:after{content:"";position:absolute;inset:34px;border-radius:50%;background:radial-gradient(circle at 40% 30%,#17171b,#0a0a0c 75%);box-shadow:inset 0 0 18px #000}
+.upg-chance{position:relative;z-index:2;font-size:34px;font-weight:950;letter-spacing:-1px;color:#fff}
+.upg-needle{position:absolute;left:50%;top:-18px;width:6px;height:142px;margin-left:-3px;transform-origin:50% 124px;transform:rotate(0deg);z-index:4;border-radius:6px;background:linear-gradient(180deg,#ffe083,#ffab2e 30%,transparent 30%);filter:drop-shadow(0 0 8px #ffab2eaa)}
+.upg-needle:before{content:"";position:absolute;top:0;left:50%;margin-left:-10px;border-left:10px solid transparent;border-right:10px solid transparent;border-top:20px solid #ffe083}
+.upg-stake{text-align:center;color:#8a8a92;font-size:12px;min-height:18px;margin-bottom:10px}
+.upg-pick .nft{cursor:pointer;position:relative}
+.upg-pick .nft.on{border-color:#35d07f!important;box-shadow:0 0 0 1px #35d07f88}
+.upg-pick .nft.on:after{content:"✓";position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:50%;background:#35d07f;color:#08150f;font-weight:900;display:grid;place-items:center;font-size:13px}
+.arch-price{color:#8a8a92;font-size:10px;margin-top:3px}
+.confetti{position:fixed;inset:0;pointer-events:none;z-index:60;overflow:hidden}
+.confetti i{position:absolute;width:9px;height:15px;border-radius:2px;animation:cfall linear forwards}
+@keyframes cfall{to{transform:translateY(112vh) rotate(720deg);opacity:.9}}
+.arena-square{transition:transform 2.4s cubic-bezier(.16,.7,.12,1)}
+.arena-square.finish{transform:scale(1.55);z-index:5;box-shadow:0 0 0 2px #ffd23d55,0 24px 70px #000}
 </style></head><body><main class="wrap">
 <header class="top"><div class="brand">RCOIN<span>·</span>BOT</div><div class="wallet"><small>RCOIN</small><span id="topBal">—</span></div></header>
 <section class="hero"><img class="hero-art" id="heroArt" src="/banner" alt="" onerror="this.remove()"><div class="eyebrow">ТВОЙ ИГРОВОЙ СЧЁТ</div><div class="balance" id="heroBal">— <small>RCOIN</small></div><div class="subline">Нажми на моно-строку ниже, чтобы скопировать баланс</div><button class="copy" id="copyBal" onclick="copyBalance()">·····················</button><div class="actions"><button class="action" onclick="sendBotAction('bonus')">🎁 Бонус</button><button class="action" onclick="sendBotAction('daily')">📅 Ежедневный</button><button class="action" onclick="go('career')">💼 Заработать</button></div></section>
@@ -6172,7 +6199,9 @@ body.wall-plain{background:var(--bg)}
 <section id="trade" class="page"><div class="panel"><h2>📈 RCOIN MARKET <span class="badge">LIVE</span></h2><div class="row"><div><div class="muted">Текущий курс v-RCOIN</div><div class="price" id="price">—</div></div><div style="text-align:right"><div class="muted">Изменение</div><b id="change">—</b></div></div><canvas id="chart" class="chart" width="640" height="190"></canvas><p class="muted" style="margin-top:8px">Внутриигровой симулятор курса. Это не реальные деньги и не финансовый инструмент.</p></div><div class="panel"><h2>💼 Портфель</h2><div class="stats"><div class="stat"><span>v-RCOIN</span><b id="holding">0</b></div><div class="stat"><span>Стоимость</span><b id="value">0</b></div><div class="stat"><span>Вложено</span><b id="invested">0</b></div><div class="stat"><span>Результат</span><b id="profit">0</b></div></div></div><div class="panel"><h2>Обмен</h2><input id="amount" type="number" min="1000" step="1000" value="100000" placeholder="Сумма RCOIN"><div class="trade-buttons" style="margin-top:10px"><button class="btn green" onclick="buy()">🟢 Купить</button><button class="btn red" onclick="sell()">🔴 Продать всё</button></div></div></section>
 <section id="events" class="page"><div class="panel"><h2>⛄ СНЕЖНЫЙ МАРАФОН <span class="badge">DAILY TOP 3</span></h2><div class="stats"><div class="stat"><span>Снежки</span><b id="snowballs">0</b></div><div class="stat"><span>Снеговики сегодня</span><b id="snowmen">0</b></div></div><p class="muted">Собирай снежки каждые 20 секунд. Из 20 снежков можно слепить снеговика. Топ-3 дня получают случайную награду из казны от 1 до 10 млрд RCOIN, если средств достаточно.</p><div class="row"><button class="btn" onclick="snowCollect()">❄️ Собрать снежки</button><button class="btn green" onclick="snowBuild()">☃️ Слепить</button></div><div class="panel"><h2>🏆 Рейтинг дня</h2><div id="snowTop" class="muted">Загрузка рейтинга…</div></div></div><div class="panel"><h2>🎄 СЕЗОННЫЕ ИВЕНТЫ</h2><p class="muted">Собирай коллекционные предметы, выполняй задания и открывай награды. Новогодние эмодзи доступны в сообщениях бота при поддержке Telegram Premium Emoji.</p><div class="gridcards" style="margin-top:12px"><div class="tile"><div class="ico">❄️</div><b>Снежный марафон</b><small>Ежедневные задания</small></div><div class="tile"><div class="ico">🎅</div><b>Помощь Санте</b><small>Сезонная цепочка</small></div><div class="tile"><div class="ico">🐻‍❄️</div><b>Полярная коллекция</b><small>Собери предметы</small></div><div class="tile"><div class="ico">🎁</div><b>NFT-чеканка</b><small>Создай предмет в коллекцию</small></div></div><button class="btn" onclick="toast('Открой в боте команду «ивенты» для полного списка заданий')">Открыть задания в боте</button></div></section>
 <section id="nft" class="page"><div class="panel"><h2>🖼️ NFT-коллекция <span class="muted" id="nftCount">0 предметов</span></h2><p class="muted">Твои сгенерированные цифровые предметы и коллекционные изображения.</p><div class="gridcards" id="nftGrid" style="margin-top:12px"><p class="muted">Загружаем коллекцию…</p></div><button class="btn" onclick="mintNft()">✨ Создать NFT · 10 000 RCOIN</button></div></section>
-</main><nav class="nav"><button class="active" data-page="home" onclick="go('home')"><i>⌂</i>Главная</button><button data-page="arena" onclick="go('arena')"><i>◉</i>Арена</button><button data-page="career" onclick="go('career')"><i>⌘</i>Работа</button><button data-page="trade" onclick="go('trade')"><i>↗</i>Трейдинг</button><button data-page="events" onclick="go('events')"><i>✧</i>Ивенты</button></nav><div class="toast" id="toast"></div>
+<section id="mining" class="page"><div class="panel" style="text-align:center"><h2>⛏ Майнинг</h2><div class="mine-disc"><div class="ruby"></div></div><div class="tc-amount"><b id="minePending">0</b> <span>RCOIN</span></div><div class="tc-meta"><span id="mineRate">0</span> RCOIN в сутки · серверы работают 30 дней</div><button class="btn green" onclick="mineCollect()">Снять в баланс</button></div><div class="panel"><h2>Серверы</h2><div id="mineShop"><p class="muted">Загрузка…</p></div></div><div class="panel"><h2>Донат и Premium</h2><p class="muted">1 ⭐ = 10 000 000 RCOIN, от 10 ⭐. Premium: галочка, ранг «Лудоман», +50% к выигрышу.</p><div class="row"><button class="btn" onclick="payStars('don',10)">10 ⭐ → 100кк</button><button class="btn" onclick="payStars('don',100)">100 ⭐ → 1ккк</button></div><button class="btn ghost" onclick="payStars('prem')">💎 Premium · 100 ⭐</button></div></section>
+<section id="archive" class="page"><div class="panel"><h2>◍ Апгрейдер</h2><p class="muted">Добавь до 5 NFT — чем реже, тем выше шанс. Победа: подарок из архива. Провал: NFT уходят в архив.</p><div class="eyebrow" style="text-align:center;margin-top:12px">Улучшить на</div><div class="bet-row" id="upgTargetRow" style="justify-content:center;margin:6px 0 2px"><button class="chip on" data-t="" onclick="setUpgTarget('')">Любая</button><button class="chip" data-t="common" onclick="setUpgTarget('common')">Обычная</button><button class="chip" data-t="uncommon" onclick="setUpgTarget('uncommon')">Необычная</button><button class="chip" data-t="rare" onclick="setUpgTarget('rare')">Редкая</button><button class="chip" data-t="epic" onclick="setUpgTarget('epic')">Эпик</button><button class="chip" data-t="legendary" onclick="setUpgTarget('legendary')">Легенда</button></div><div class="upg-wheel" id="upgWheel"><div class="upg-needle" id="upgNeedle"></div><div class="upg-chance" id="upgChance">0%</div></div><div class="upg-stake" id="upgStake">Выбери до 5 NFT</div><button class="btn ghost" id="upgAddBtn" onclick="toggleUpgInv()">＋ Добавить подарок</button><div id="upgInv" class="hide" style="margin-top:12px"><div class="gridcards upg-pick" id="upgPick"><p class="muted">Загрузка…</p></div><button class="btn green" onclick="toggleUpgInv(false)">Добавить в круг</button></div><div class="status" id="upgStatus">Крути на удачу</div><button class="btn" id="upgBtn" onclick="upgSpin()" disabled>Крутить</button></div><div class="panel"><h2>🎁 NFT-архив <span class="muted" id="archCount">0 NFT</span></h2><p class="muted">Пополнить архив: передай NFT на @rubinarxiv командой «передать» или «в архив #id».</p><div class="gridcards" id="archGrid"><p class="muted">Загрузка…</p></div></div></section>
+</main><nav class="nav"><button class="active" data-page="home" onclick="go('home')"><i>⌂</i>Главная</button><button data-page="arena" onclick="go('arena')"><i>◉</i>Арена</button><button data-page="career" onclick="go('career')"><i>⌘</i>Работа</button><button data-page="trade" onclick="go('trade')"><i>↗</i>Трейдинг</button><button data-page="events" onclick="go('events')"><i>✧</i>Ивенты</button><button data-page="mining" onclick="go('mining')"><i>⛏</i>Майнинг</button><button data-page="archive" onclick="go('archive')"><i>◍</i>Апгрейд</button></nav><div class="toast" id="toast"></div>
 <script>
 
 // Original RUBIN line icons, drawn as compact SVG paths.
@@ -6205,7 +6234,7 @@ const tg=window.Telegram&&Telegram.WebApp;if(tg){try{tg.ready();tg.expand();tg.s
 const INIT=tg?tg.initData:"",TU=tg?.initDataUnsafe?.user||{},$=id=>document.getElementById(id),fmt=n=>Math.floor(Number(n)||0).toLocaleString('en-US').replace(/,/g,"'");let ME=null,AS=null,AT=0,TS=null,tradeTimer=null,arenaTimer=null,arenaColor='#ff8a3d',arenaAvatar='';
 async function api(p,b={}){try{const r=await fetch('/api/'+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init:INIT,photo_url:TU.photo_url||'',display_name:[TU.first_name,TU.last_name].filter(Boolean).join(' '),...b})});return await r.json()}catch(e){return{ok:false,err:'Нет соединения с сервером'}}}
 function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.remove('show'),2600)}function haptic(){try{tg.HapticFeedback.impactOccurred('light')}catch(e){}}
-function go(p){document.querySelectorAll('.page').forEach(e=>e.classList.toggle('active',e.id===p));document.querySelectorAll('.nav button').forEach(e=>e.classList.toggle('active',e.dataset.page===p));if(p==='arena'){startArena();loadArenaGifts()}if(p==='trade')startTrade();if(p==='career')loadCareer();if(p==='nft')loadNft();if(p==='events')loadSnowman()}
+function go(p){document.querySelectorAll('.page').forEach(e=>e.classList.toggle('active',e.id===p));document.querySelectorAll('.nav button').forEach(e=>e.classList.toggle('active',e.dataset.page===p));if(p==='arena'){startArena();loadArenaGifts()}if(p==='trade')startTrade();if(p==='career')loadCareer();if(p==='nft')loadNft();if(p==='events')loadSnowman();if(p==='mining')loadMining();if(p==='archive')loadArchive()}
 function setBalance(v){const x=fmt(v);$('topBal').textContent=x;$('heroBal').innerHTML=x+' <small>RCOIN</small>';$('copyBal').textContent=x}
 async function copyBalance(){const value=ME?Number(ME.balance||0).toLocaleString('en-US').replace(/,/g,"'"):'0';try{await navigator.clipboard.writeText(value);toast('Баланс '+value+' скопирован')}catch(e){toast('Баланс: '+value)}}
 function sendBotAction(action){if(!tg||typeof tg.sendData!=='function'){toast('Открой приложение через кнопку бота в Telegram');return}try{tg.sendData(action)}catch(e){toast('Не удалось передать действие боту')}}
@@ -6243,7 +6272,7 @@ if(ph==='rolling'){
   if(BY>100-R){BY=100-R;BVY=-Math.abs(BVY)*(.9+Math.random()*.15);BVX+=(Math.random()-.5)*.3;bounceRing(BX,BY)}
  }
  if(Math.random()<.035){BVX+=(Math.random()-.5)*.22;BVY+=(Math.random()-.5)*.22}
- const sp=Math.hypot(BVX,BVY);if(sp>1.35){BVX*=1.35/sp;BVY*=1.35/sp}
+ const prog=AS.roll_total?Math.min(1,(AS.roll_elapsed+(performance.now()-AT)/1000)/AS.roll_total):0;const sp=Math.hypot(BVX,BVY);const tgt=Math.max(.16,1.25*Math.pow(1-prog,1.7));if(sp>0){const kk=1+(tgt/sp-1)*.07;BVX*=kk;BVY*=kk}
  BANG+=sp*dt*.4;setBall(BX,BY);trailTick();
 }else if(ph==='done'&&AS.winner_idx>=0){
  if(BSTATE!=='done'){
@@ -6251,12 +6280,12 @@ if(ph==='rolling'){
   const tx=50+Math.cos(a*Math.PI/180)*rad,ty=50+Math.sin(a*Math.PI/180)*rad;
   const dx=tx-BX,dy=ty-BY,dist=Math.hypot(dx,dy);
   const mx=BX+dx*.5-dy*.16,my=BY+dy*.5+dx*.16;
-  BLAND={t0:performance.now(),dur:Math.max(950,Math.min(1600,dist*48)),from:{x:BX,y:BY},ctrl:{x:mx,y:my},to:{x:tx,y:ty}};
+  BLAND={t0:performance.now(),dur:Math.max(2800,Math.min(4400,dist*95)),from:{x:BX,y:BY},ctrl:{x:mx,y:my},to:{x:tx,y:ty}};
   b.classList.remove('win');b.classList.add('live');b.style.transition='none';
  }
- if(BLAND){const k=Math.min(1,(performance.now()-BLAND.t0)/BLAND.dur);const e=1-Math.pow(1-k,3);const u=1-e;BX=u*u*BLAND.from.x+2*u*e*BLAND.ctrl.x+e*e*BLAND.to.x;BY=u*u*BLAND.from.y+2*u*e*BLAND.ctrl.y+e*e*BLAND.to.y;setBall(BX,BY);trailTick();if(k>=1){const ex=BLAND.to.x,ey=BLAND.to.y;BLAND=null;BX=ex;BY=ey;setBall(BX,BY);b.classList.add('win');bounceRing(BX,BY)}}
+ if(BLAND){const k=Math.min(1,(performance.now()-BLAND.t0)/BLAND.dur);const e=1-Math.pow(1-k,2.6);const u=1-e;BX=u*u*BLAND.from.x+2*u*e*BLAND.ctrl.x+e*e*BLAND.to.x;BY=u*u*BLAND.from.y+2*u*e*BLAND.ctrl.y+e*e*BLAND.to.y;setBall(BX,BY);trailTick();if(k>=1){const ex=BLAND.to.x,ey=BLAND.to.y;BLAND=null;BX=ex;BY=ey;setBall(BX,BY);b.classList.add('win');bounceRing(BX,BY);arenaFinish(ex,ey)}}
 }else{
- if(BSTATE!==ph){BSTATE=ph;BLAND=null;BTRAIL=[];b.classList.remove('win');b.classList.remove('live');b.style.transition='left .45s ease,top .45s ease';hideTrails()}
+ if(BSTATE!==ph){BSTATE=ph;BLAND=null;BTRAIL=[];b.classList.remove('win');b.classList.remove('live');b.style.transition='left .45s ease,top .45s ease';hideTrails();arenaFinishReset()}
  const t=performance.now()/1000;const rad=ph==='countdown'?9:0;BX=50+Math.cos(t*1.5)*rad;BY=50+Math.sin(t*1.5)*rad;BANG+=dt*.02;setBall(BX,BY);
 }}
 function ballLoop(t){const dt=Math.min(50,t-_bt||16);_bt=t;renderBall(dt);requestAnimationFrame(ballLoop)}requestAnimationFrame(ballLoop);
@@ -6286,6 +6315,50 @@ async function snowCollect(){const j=await api('snowman_collect');if(!j.ok)retur
 async function snowBuild(){const j=await api('snowman_build');if(!j.ok)return toast(j.err||'Не удалось слепить снеговика');toast('Слеплено снеговиков: '+j.built+' ☃️');loadSnowman();haptic()}
 function setArenaColor(c){if(c==='#111111'&&!(ME&&ME.premium)){toast('Чёрный цвет доступен с Premium');return}arenaColor=c;document.querySelectorAll('#colorPicks .color-pick').forEach(x=>x.classList.toggle('selected',x.dataset.color===c));const el=$('arenaYourColor');if(el)el.textContent='выбран'}
 applyLook();try{arenaAvatar=localStorage.getItem('rcoin_arena_avatar')||''}catch(e){}applyCustomIcons();initBallTrails();premiumize(document.body);_ceObs.observe(document.body,{childList:true,subtree:true,characterData:true});loadMe();
+
+/* ---- майнинг ---- */
+let mineTimer=null,mineBase=0,mineRate=0,mineTs=0;
+function mineTick(){const add=mineRate*((Date.now()-mineTs)/1000)/86400;const el=$('minePending');if(el)el.textContent=fmt(Math.floor(mineBase+add))}
+async function loadMining(){const j=await api('mining_state');if(!j.ok)return toast(j.err||'Майнинг недоступен');
+ mineBase=Number(j.pending)||0;mineRate=Number(j.rate)||0;mineTs=Date.now();
+ if(mineTimer)clearInterval(mineTimer);mineTimer=setInterval(mineTick,1000);mineTick();
+ $('mineRate').textContent=fmt(j.rate);const box=$('mineShop');box.innerHTML='';
+ j.servers.forEach(s=>{const d=document.createElement('div');d.className='srv'+(s.owned?' owned':'');const t=document.createElement('div');const b=document.createElement('b');b.textContent=s.name;const sm=document.createElement('small');sm.textContent=(s.owned?'работает · осталось '+Math.ceil(s.left/86400)+' дн. · ':'')+fmt(s.per_day)+'/сутки';t.append(b,sm);d.append(t);
+  if(!s.owned){const w=document.createElement('div');w.className='srv-btns';const a=document.createElement('button');a.textContent=fmt(s.cost);a.onclick=()=>mineBuy(s.tier);const st=document.createElement('button');st.className='star';st.textContent='50 ⭐';st.onclick=()=>payStars('srv',50,s.tier);w.append(a,st);d.append(w)}
+  box.append(d)})}
+async function mineBuy(tier){const j=await api('mining_buy',{tier});if(!j.ok)return toast(j.err||'Не куплено');setBalance(j.balance);toast(j.msg);loadMining()}
+async function mineCollect(){const j=await api('mining_collect');if(!j.ok)return toast(j.err||'Пока пусто');setBalance(j.balance);toast(j.msg+(j.archived?' · '+fmt(j.archived)+' в Архив':''));loadMining()}
+async function payStars(kind,stars,tier){const j=await api('invoice',{kind,stars,tier});if(!j.ok)return toast(j.err||'Не удалось создать счёт');if(tg&&tg.openInvoice)tg.openInvoice(j.link,s=>{if(s==='paid'){toast('Оплачено ✅');setTimeout(()=>{loadMe();loadMining()},1200)}});else window.open(j.link,'_blank')}
+/* ---- апгрейдер ---- */
+let AR=null,upgSel=[],upgTarget='';
+function setUpgTarget(t){upgTarget=t;document.querySelectorAll('#upgTargetRow .chip').forEach(b=>b.classList.toggle('on',(b.dataset.t||'')===t))}
+function toggleUpgInv(force){const el=$('upgInv');const show=force===undefined?el.classList.contains('hide'):force;el.classList.toggle('hide',!show);$('upgAddBtn').textContent=show?'Скрыть инвентарь':'＋ Добавить подарок'}
+async function loadArchive(){const j=await api('archive_state');if(!j.ok)return toast(j.err||'Архив недоступен');AR=j;upgSel=upgSel.filter(id=>j.items.some(x=>x.id===id));
+ $('archCount').textContent=j.archive+' NFT';const g=$('archGrid');g.innerHTML='';if(!j.gifts.length)g.innerHTML='<p class="muted">Архив пуст — улучшение выплатит коины.</p>';
+ j.gifts.forEach(x=>{const d=document.createElement('div');d.className='nft';const b=document.createElement('b');b.textContent=x.name;const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity;d.append(b,sm);if(x.price){const pr=document.createElement('div');pr.className='arch-price';pr.textContent='≈ '+fmt(x.price)+' RCOIN';d.append(pr)}g.append(d)});
+ const box=$('upgPick');box.innerHTML='';if(!j.items.length)box.innerHTML='<p class="muted">Нет NFT — открой бокс в боте.</p>';
+ j.items.forEach(x=>{const d=document.createElement('div');d.className='nft';d.dataset.id=x.id;const im=document.createElement('img');im.src=x.url;im.alt=x.name;im.loading='lazy';const b=document.createElement('b');b.textContent=x.name+' #'+x.id;const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity+' · '+fmt(x.value);d.append(im,b,sm);d.onclick=()=>toggleSel(x.id);box.append(d)});
+ renderSel()}
+function toggleSel(id){const i=upgSel.indexOf(id);if(i>=0)upgSel.splice(i,1);else{if(upgSel.length>=5)return toast('Максимум 5 NFT');upgSel.push(id)}renderSel()}
+function renderSel(){document.querySelectorAll('#upgPick .nft').forEach(d=>d.classList.toggle('on',upgSel.includes(Number(d.dataset.id))));
+ const items=((AR&&AR.items)||[]).filter(x=>upgSel.includes(x.id));const table=(AR&&AR.chance)||{};let ch=0;
+ if(items.length){const best=items.reduce((a,b)=>((table[b.rt]||30)>(table[a.rt]||30)?b:a),items[0]);ch=Math.min(88,(table[best.rt]||30)+5*(items.length-1))}
+ const w=$('upgWheel');if(w)w.style.setProperty('--ch',ch);$('upgChance').textContent=ch+'%';$('upgBtn').disabled=!items.length;
+ $('upgStake').textContent=items.length?('В круге: '+items.map(x=>'#'+x.id).join(' · ')):'Выбери до 5 NFT'}
+async function upgSpin(){if(!upgSel.length)return;const nd=$('upgNeedle');$('upgBtn').disabled=true;
+ const j=await api('archive_spin',{ids:upgSel,target:upgTarget});
+ if(!j.ok){$('upgBtn').disabled=false;return toast(j.err||'Не удалось')}
+ /* стрелка останавливается по результату: зелёный сектор начинается сверху и идёт по часовой */
+ const ch=j.chance;let stop;if(j.win)stop=Math.random()*ch*3.6*.8+ch*3.6*.1;else stop=ch*3.6+Math.random()*(360-ch*3.6)*.8+(360-ch*3.6)*.1;
+ nd.style.transition='none';nd.style.transform='rotate(0deg)';void nd.offsetWidth;
+ nd.style.transition='transform 4.2s cubic-bezier(.12,.72,.1,1)';nd.style.transform='rotate('+(1800+stop)+'deg)';
+ await new Promise(r=>setTimeout(r,4300));$('upgBtn').disabled=false;
+ if(j.win){$('upgStatus').textContent='Победа! '+j.name;$('upgStatus').style.color='#35d07f';confetti(90)}else{$('upgStatus').textContent='Провал — NFT ушли в архив';$('upgStatus').style.color='#ff5268'}
+ setBalance(j.balance);upgSel=[];loadArchive()}
+/* ---- конфетти и финал арены ---- */
+function confetti(n=80){const box=document.createElement('div');box.className='confetti';const cols=['#ffd23d','#35d07f','#3d9bff','#ff7ab8','#ffffff'];for(let i=0;i<n;i++){const s=document.createElement('i');s.style.left=(Math.random()*100)+'%';s.style.top='-20px';s.style.background=cols[i%cols.length];s.style.animationDuration=(1.6+Math.random()*1.6)+'s';s.style.animationDelay=(Math.random()*.4)+'s';box.append(s)}document.body.append(box);setTimeout(()=>box.remove(),3800)}
+function arenaFinish(x,y){const sq=$('arenaSquare');if(!sq)return;sq.style.transformOrigin=x+'% '+y+'%';sq.classList.add('finish');confetti(130)}
+function arenaFinishReset(){const sq=$('arenaSquare');if(!sq)return;sq.classList.remove('finish');sq.style.transformOrigin='50% 50%'}
 </script></body></html>"""
 
 
@@ -6331,89 +6404,18 @@ async def start_web():
               "snowman_state": a_snowman_state, "snowman_collect": a_snowman_collect, "snowman_build": a_snowman_build}
     routes.update({"trade_state": api_trade_state, "trade_buy": api_trade_buy,
                    "trade_sell": api_trade_sell, "it_state": api_it_state,
-                   "it_task": api_it_task, "nft_state": api_nft_state, "nft_mint": api_nft_mint, "nft_set": api_nft_set})
+                   "it_task": api_it_task, "nft_state": api_nft_state, "nft_mint": api_nft_mint, "nft_set": api_nft_set,
+                   "mining_state": api_mining_state, "mining_buy": api_mining_buy, "mining_collect": api_mining_collect,
+                   "archive_state": api_archive_state, "archive_spin": api_archive_spin, "nft_to_archive": api_nft_to_archive})
     for name, fn in routes.items():
         app.router.add_post("/api/" + name, api(fn))
     app.router.add_get("/api/prices", _prices)
+    app.router.add_post("/api/invoice", invoice_handler)
     asyncio.create_task(_keepalive())
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     log.info("Веб-сервер на порту %s, WEBAPP_URL=%s", PORT, WEBAPP_URL or "(не задан)")
-
-
-# =====================================================================
-#        ПРЕДНОВОГОДНЕЕ ОБНОВЛЕНИЕ · часть 1: лимиты и АРХИВ
-# =====================================================================
-BALANCE_CAP = 5_000_000_000      # максимум баланса, всё сверх уходит в архив
-MAX_BET = 1_000_000_000          # максимальная ставка
-MAX_TRANSFER = 1_000_000_000     # максимальный перевод
-
-
-def add_coin(uid: int, n: int):
-    """Начисление с лимитом: что не влезло в 5ккк — уходит в архив."""
-    n = int(n)
-    if n <= 0:
-        x("UPDATE users SET balance_coin=balance_coin+? WHERE user_id=?", (n, uid))
-        return
-    r = q("SELECT balance_coin FROM users WHERE user_id=?", (uid,), one=True)
-    bal = int(r["balance_coin"]) if r else 0
-    put = min(n, max(0, BALANCE_CAP - bal))
-    x("UPDATE users SET balance_coin=balance_coin+?, archive_coin=COALESCE(archive_coin,0)+? WHERE user_id=?",
-      (put, n - put, uid))
-
-
-def cap_sweep():
-    """Страховка для мест, где баланс меняется прямым SQL (бонус, банк, авто-чеки, зарплата)."""
-    x("UPDATE users SET archive_coin=COALESCE(archive_coin,0)+(balance_coin-?), balance_coin=? WHERE balance_coin>?",
-      (BALANCE_CAP, BALANCE_CAP, BALANCE_CAP))
-
-
-async def cap_sweeper():
-    while True:
-        try:
-            cap_sweep()
-        except Exception:
-            log.exception("cap_sweep")
-        await asyncio.sleep(5)
-
-
-_take_bet_orig = take_bet
-
-
-async def take_bet(m: Message, u: Dict[str, Any], raw: str, count: int = 1) -> int:
-    """Ставка не больше MAX_BET; «все» = min(баланс, MAX_BET)."""
-    u2 = dict(u)
-    u2["balance_coin"] = min(int(u["balance_coin"]), MAX_BET)
-    bet = parse_amount(raw, u2["balance_coin"])
-    if bet > MAX_BET:
-        await m.reply(f"{E('lock')} Максимальная ставка — <b>{fmt(MAX_BET)}</b> RCOIN.")
-        return 0
-    return await _take_bet_orig(m, u2, raw, count)
-
-
-@dp.message(P("архив", "archive"))
-async def cmd_archive(message: Message):
-    u = get_user(message.from_user.id)
-    arch = int(u.get("archive_coin") or 0)
-    p = message.text.split()
-    if len(p) >= 2 and p[1].lower() in ("снять", "вывести", "withdraw"):
-        want = parse_amount(p[2] if len(p) >= 3 else "все", arch)
-        n = min(want, arch, max(0, BALANCE_CAP - int(u["balance_coin"])))
-        if n <= 0:
-            return await message.reply(f"{E('lock')} Нечего снимать: архив пуст или баланс уже {fmt(BALANCE_CAP)}.")
-        cnt = x("UPDATE users SET archive_coin=archive_coin-?, balance_coin=balance_coin+? "
-                "WHERE user_id=? AND archive_coin>=? AND balance_coin+?<=?",
-                (n, n, u["user_id"], n, n, BALANCE_CAP))[0]
-        if cnt != 1:
-            return await message.reply(f"{E('lock')} Не удалось снять, попробуй ещё раз.")
-        return await message.reply(box(f"{E('bank')} <b>Архив</b>", f"✅ Снято на баланс: <b>{fmt(n)}</b> RCOIN",
-                                       f"🗄 В архиве осталось: {fmt(arch - n)}"))
-    await message.reply(box(f"{E('bank')} <b>АРХИВ</b>",
-                            f"🗄 В архиве: <b>{fmt(arch)}</b> RCOIN",
-                            f"💰 Баланс: {fmt(u['balance_coin'])} / {fmt(BALANCE_CAP)}",
-                            "Всё, что выше лимита баланса, попадает сюда и не пропадает.",
-                            "Снять: <code>архив снять 1кк</code> или <code>архив снять все</code>"))
 
 
 # ============================ ОШИБКИ / НЕИЗВЕСТНЫЕ КОМАНДЫ / ЗАПУСК ============================
@@ -6477,6 +6479,10 @@ async def main():
                                    BotCommand(command="badges", description="Галочки профиля"),
                                    BotCommand(command="zp", description="Зарплата за активность в чате"),
                                    BotCommand(command="snowman", description="Снежный марафон и топ дня"),
+                                   BotCommand(command="mining", description="Майнинг: серверы и добыча"),
+                                   BotCommand(command="archive", description="Архив: сверх лимита баланса"),
+                                   BotCommand(command="room", description="Приватная комната с кодом"),
+                                   BotCommand(command="donate", description="Донат звёздами"),
                                    BotCommand(command="help", description="Помощь")])
         if WEBAPP_URL:
             from aiogram.types import MenuButtonWebApp
@@ -6487,7 +6493,6 @@ async def main():
     asyncio.create_task(warm_nft_emojis())
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(arena_loop())
-    asyncio.create_task(cap_sweeper())
     while True:
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
@@ -8469,6 +8474,1089 @@ async def watchdog():
         except Exception as e:
             log.debug("watchdog menu: %s", e)
         await asyncio.sleep(3600)
+
+
+# =====================================================================
+#        ПРЕДНОВОГОДНЕЕ ОБНОВЛЕНИЕ RUBIN BOT
+#  лимиты 5ккк + АРХИВ · майнинг · NFT-архив и апгрейдер · комнаты ·
+#  донат Stars · Premium · исправления порядка обработчиков и NFT
+# =====================================================================
+MAX_BALANCE = int(os.getenv("MAX_BALANCE", "5000000000"))   # потолок баланса, остальное — в Архив
+MAX_BET = int(os.getenv("MAX_BET", "1000000000"))           # максимальная ставка
+MAX_TRANSFER = int(os.getenv("MAX_TRANSFER", "1000000000")) # максимальный перевод
+DONATE_RATE = 10_000_000       # 1 ⭐ = 10 000 000 RCOIN  (10⭐ = 100кк, 100⭐ = 1ккк)
+DONATE_MIN_STARS = 10
+PREMIUM_STARS = 100
+ARCHIVE_TG = "@rubinarxiv"
+
+USER_COLS.update({"archive_coin": "INTEGER DEFAULT 0", "mine_pending": "INTEGER DEFAULT 0",
+                  "mine_last": "INTEGER DEFAULT 0", "rank_manual": "INTEGER DEFAULT 0"})
+
+
+# ---------------------------- таблицы и первичное наполнение ----------------------------
+_init_db_orig = init_db
+
+
+def init_db():
+    _init_db_orig()
+    for sql in (
+        "CREATE TABLE IF NOT EXISTS mining_servers(user_id INTEGER, tier INTEGER, bought_at INTEGER DEFAULT 0, expires_at INTEGER DEFAULT 0, PRIMARY KEY(user_id,tier))",
+        "CREATE TABLE IF NOT EXISTS nft_archive(id INTEGER PRIMARY KEY AUTOINCREMENT, rarity TEXT, name TEXT, photo TEXT, model TEXT, background TEXT, price INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS upg_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, nft_id INTEGER, rarity TEXT, result TEXT, chance INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY, owner_id INTEGER, bet INTEGER DEFAULT 0, players TEXT DEFAULT '[]', status TEXT DEFAULT 'wait', created_at INTEGER DEFAULT 0)",
+    ):
+        x(sql)
+    ensure_cols("nft_archive", {"price": "INTEGER DEFAULT 0"})
+    try:
+        archive_seed()
+    except Exception:
+        log.exception("archive_seed")
+
+
+# ---------------------------- лимит баланса ----------------------------
+def add_coin(uid: int, n: int) -> int:
+    """Начисление с потолком MAX_BALANCE; излишек уходит в Архив. Возвращает сумму излишка."""
+    n = int(n)
+    if n <= 0:
+        if n < 0:
+            x("UPDATE users SET balance_coin=balance_coin+? WHERE user_id=?", (n, uid))
+        return 0
+    r = q("SELECT balance_coin FROM users WHERE user_id=?", (uid,), one=True)
+    cur = int(r["balance_coin"] or 0) if r else 0
+    add = min(n, max(0, MAX_BALANCE - cur))
+    over = n - add
+    if add:
+        x("UPDATE users SET balance_coin=balance_coin+? WHERE user_id=?", (add, uid))
+    if over:
+        x("UPDATE users SET archive_coin=COALESCE(archive_coin,0)+? WHERE user_id=?", (over, uid))
+    return over
+
+
+def cap_sweep():
+    """Страховка для мест, где баланс меняется прямым SQL (бонус, банк, зарплата, авто-чеки)."""
+    x("UPDATE users SET archive_coin=COALESCE(archive_coin,0)+(balance_coin-?), balance_coin=? WHERE balance_coin>?",
+      (MAX_BALANCE, MAX_BALANCE, MAX_BALANCE))
+
+
+async def cap_sweeper():
+    while True:
+        try:
+            cap_sweep()
+        except Exception:
+            log.exception("cap_sweep")
+        await asyncio.sleep(5)
+
+
+_take_bet_orig = take_bet
+
+
+async def take_bet(m: Message, u: Dict[str, Any], raw: str, count: int = 1) -> int:
+    """Ставка не выше MAX_BET; «все» = min(баланс, MAX_BET)."""
+    u2 = dict(u)
+    u2["balance_coin"] = min(int(u["balance_coin"]), MAX_BET)
+    bet = parse_amount(raw, u2["balance_coin"])
+    if bet * max(1, count) > MAX_BET:
+        await m.reply(f"{E('lock')} Максимальная ставка — <b>{fmt(MAX_BET)}</b> RCOIN.")
+        return 0
+    return await _take_bet_orig(m, u2, raw, count)
+
+
+# ---------------------------- АРХИВ БАЛАНСА ----------------------------
+def archive_view(uid: int) -> str:
+    u = get_user(uid)
+    arch = int(u.get("archive_coin") or 0)
+    bal = int(u.get("balance_coin") or 0)
+    room = max(0, MAX_BALANCE - bal)
+    return box(f"{E('treasury')} <b>АРХИВ</b>",
+               f"💰 Баланс: <b>{fmt(bal)}</b> / лимит {fmt(MAX_BALANCE)}",
+               f"🏛 В Архиве: <b>{fmt(arch)}</b>",
+               f"📥 Доступно к снятию: {fmt(min(arch, room))}",
+               "Всё, что приходит сверх лимита, автоматически падает в Архив и не пропадает.",
+               "Снять: кнопками ниже или <code>архив снять 1кк</code>")
+
+
+def archive_kb(uid: int) -> InlineKeyboardMarkup:
+    return kb([btn("Снять 100кк", "arch:w:100000000", "treasury")],
+              [btn("Снять всё", "arch:w:0", "balance")],
+              [btn("Назад", "menu:main", "door")])
+
+
+def archive_withdraw(uid: int, amount: int = 0) -> tuple:
+    u = get_user(uid)
+    arch = int(u.get("archive_coin") or 0)
+    room = max(0, MAX_BALANCE - int(u.get("balance_coin") or 0))
+    if arch <= 0 or room <= 0:
+        return 0, arch
+    take = min(arch, room if amount <= 0 else min(amount, room))
+    if take <= 0:
+        return 0, arch
+    if x("UPDATE users SET archive_coin=archive_coin-?, balance_coin=balance_coin+? "
+         "WHERE user_id=? AND archive_coin>=?", (take, take, uid, take))[0] != 1:
+        return 0, arch
+    return take, arch - take
+
+
+@dp.message(P("архив", "archive"))
+async def cmd_archive(message: Message):
+    uid = message.from_user.id
+    u = get_user(uid)
+    p = message.text.split()
+    if len(p) >= 2 and p[1].lower() in ("снять", "вывести", "withdraw"):
+        arch = int(u.get("archive_coin") or 0)
+        want = parse_amount(p[2], arch) if len(p) >= 3 else 0
+        got, left = archive_withdraw(uid, want)
+        if got <= 0:
+            return await message.reply(f"{E('lock')} Нечего снимать: архив пуст или баланс уже {fmt(MAX_BALANCE)}.")
+        return await message.reply(box(f"{E('treasury')} <b>Архив</b>", f"✅ Снято на баланс: <b>{fmt(got)}</b> RCOIN",
+                                       f"🏛 Осталось в архиве: {fmt(left)}"))
+    await message.reply(archive_view(uid), reply_markup=archive_kb(uid))
+
+
+@dp.callback_query(F.data.startswith("arch:w:"))
+async def cb_archive_withdraw(cb: CallbackQuery):
+    uid = cb.from_user.id
+    got, left = archive_withdraw(uid, int(cb.data.split(":")[2]))
+    if got <= 0:
+        return await ans(cb, "Снимать нечего или баланс уже на лимите", True)
+    await safe_edit(cb, archive_view(uid), archive_kb(uid))
+    await ans(cb, f"+{fmt(got)} RCOIN из Архива", True)
+
+
+# ---------------------------- МАЙНИНГ ----------------------------
+MINING_TERM = 30 * 86400
+MINING_SERVERS = [
+    (0, "Старт", 150_000_000, 3_000_000),
+    (1, "Про", 500_000_000, 12_000_000),
+    (2, "Бизнес", 1_000_000_000, 30_000_000),
+    (3, "Дата-центр", 2_500_000_000, 90_000_000),
+    (4, "Квант", 5_000_000_000, 200_000_000),
+]
+SERVER_BY_TIER = {v[0]: v for v in MINING_SERVERS}
+SERVER_STARS = 50
+
+
+def grant_server(uid: int, tier: int) -> bool:
+    if int(tier) not in SERVER_BY_TIER:
+        return False
+    mining_sync(uid)
+    x("INSERT INTO mining_servers(user_id,tier,bought_at,expires_at) VALUES(?,?,?,?) "
+      "ON CONFLICT(user_id,tier) DO UPDATE SET expires_at=excluded.expires_at, bought_at=excluded.bought_at",
+      (uid, int(tier), now(), now() + MINING_TERM))
+    return True
+
+
+def mining_servers(uid: int) -> List[dict]:
+    return q("SELECT * FROM mining_servers WHERE user_id=? AND expires_at>?", (uid, now()))
+
+
+def mining_rate(uid: int) -> int:
+    active = {r["tier"] for r in mining_servers(uid)}
+    return sum(v[3] for v in MINING_SERVERS if v[0] in active)
+
+
+def mining_sync(uid: int) -> int:
+    u = get_user(uid)
+    last = int(u.get("mine_last") or 0)
+    if not last:
+        update_user(uid, mine_last=now())
+        return int(u.get("mine_pending") or 0)
+    rate = mining_rate(uid)
+    dt = max(0, now() - last)
+    pending = int(u.get("mine_pending") or 0)
+    if rate and dt:
+        pending = min(MAX_BALANCE * 2, pending + rate * dt // 86400)
+    update_user(uid, mine_pending=pending, mine_last=now())
+    return pending
+
+
+def mining_view(uid: int):
+    pending = mining_sync(uid)
+    rate = mining_rate(uid)
+    owned = {r["tier"]: r for r in mining_servers(uid)}
+    lines = [f"{E('miner')} <b>МАЙНИНГ</b>", ""]
+    for tier, name, cost, per_day in MINING_SERVERS:
+        if tier in owned:
+            lines.append(f"🟢 <b>{name}</b> — {fmt(per_day)}/сутки, осталось {dur(owned[tier]['expires_at'] - now())}")
+        else:
+            lines.append(f"⚪ <b>{name}</b> — {fmt(cost)} RCOIN · {fmt(per_day)}/сутки · 30 дней")
+    rows = []
+    for tier, name, cost, _ in MINING_SERVERS:
+        if tier not in owned:
+            rows.append([btn(f"{name} · {fmt(cost)}", f"mng:b:{tier}", "miner"),
+                         btn(f"{SERVER_STARS} ⭐", f"mng:s:{tier}", "star")])
+    rows.append([btn(f"Снять {fmt(pending)}", "mng:c", "balance")])
+    rows.append([btn("Назад", "menu:main", "door")])
+    lines += ["", f"⛏ Добыча: <b>{fmt(rate)}</b>/сутки", f"📦 Накоплено: <b>{fmt(pending)}</b> RCOIN"]
+    return "\n".join(lines), kb(*rows)
+
+
+@dp.message(P("майнинг", "mining"))
+async def cmd_mining(message: Message):
+    get_user(message.from_user.id)
+    text, markup = mining_view(message.from_user.id)
+    await message.reply(text, reply_markup=markup)
+
+
+@dp.callback_query(F.data.startswith("mng:"))
+async def cb_mining(cb: CallbackQuery):
+    uid = cb.from_user.id
+    parts = cb.data.split(":")
+    if parts[1] in ("b", "s"):
+        tier = int(parts[2])
+        sv = SERVER_BY_TIER.get(tier)
+        if not sv:
+            return await ans(cb, "Нет такого сервера", True)
+        if q("SELECT 1 FROM mining_servers WHERE user_id=? AND tier=? AND expires_at>?", (uid, tier, now()), one=True):
+            return await ans(cb, "Уже куплен", True)
+        if parts[1] == "s":
+            await stars_invoice(uid, SERVER_STARS, f"Сервер «{sv[1]}»", f"Сервер на 30 дней за {SERVER_STARS} ⭐", f"server:{tier}")
+            return await ans(cb, f"Счёт на {SERVER_STARS} ⭐ выставлен")
+        if not spend(uid, sv[2]):
+            return await ans(cb, f"Нужно {fmt(sv[2])} RCOIN", True)
+        grant_server(uid, tier)
+        text, markup = mining_view(uid)
+        await safe_edit(cb, text, markup)
+        return await ans(cb, f"Сервер «{sv[1]}» куплен!", True)
+    if parts[1] == "c":
+        pending = mining_sync(uid)
+        if pending <= 0:
+            return await ans(cb, "Пока нечего снимать", True)
+        if x("UPDATE users SET mine_pending=0 WHERE user_id=? AND mine_pending=?", (uid, pending))[0] != 1:
+            return await ans(cb, "Попробуй ещё раз", True)
+        over = add_coin(uid, pending)
+        text, markup = mining_view(uid)
+        await safe_edit(cb, text, markup)
+        note = f" (+{fmt(over)} в Архив)" if over else ""
+        return await ans(cb, f"+{fmt(pending - over)} RCOIN{note}", True)
+
+
+# ---------------------------- NFT-АРХИВ И АПГРЕЙДЕР ----------------------------
+UPG_CHANCE = {"common": 30, "uncommon": 40, "rare": 50, "epic": 60, "legendary": 70}
+RARITY_IDX = {r: i for i, r in enumerate(RARITIES)}
+PREMIUM_LOTS = [
+    ("Дух Нового года", "🎆", "legendary", 1_000_000_000),
+    ("Ёлка-мультивселенная", "🌌", "legendary", 850_000_000),
+    ("Золотой Дед Мороз", "👑", "legendary", 700_000_000),
+    ("Северное сияние Prime", "🌠", "epic", 500_000_000),
+    ("Кибер-снеговик 2077", "🤖", "epic", 500_000_000),
+    ("Хрустальная ёлка", "🎄", "rare", 250_000_000),
+]
+
+
+def archive_count() -> int:
+    return int(q("SELECT COUNT(*) c FROM nft_archive", one=True)["c"])
+
+
+def archive_add(nft: dict, price: int = 0) -> None:
+    x("INSERT INTO nft_archive(rarity,name,photo,model,background,price,created_at) VALUES(?,?,?,?,?,?,?)",
+      (nft["rarity"], nft["name"], nft.get("photo") or "🎁", nft.get("model") or "Стандартный",
+       nft.get("background") or "Обычный", int(price), now()))
+
+
+def archive_seed(n: int = 40) -> int:
+    """Наполняет NFT-архив, чтобы апгрейдер работал с первого дня."""
+    made = 0
+    if archive_count() < n:
+        per = max(2, n // len(RARITIES))
+        for rar in RARITIES:
+            for _ in range(per):
+                name, photo = random.choice(NFT_POOL[rar])
+                archive_add({"rarity": rar, "name": name, "photo": photo,
+                             "model": random.choice([m[0] for m in MODELS]),
+                             "background": random.choice([b[0] for b in BGS])})
+                made += 1
+    if not q("SELECT 1 FROM nft_archive WHERE price>=500000000", one=True):
+        for name, photo, rar, price in PREMIUM_LOTS:
+            archive_add({"rarity": rar, "name": name, "photo": photo,
+                         "model": "Космический", "background": "Галактика"}, price)
+            made += 1
+    return made
+
+
+def archive_take_nft(nid: int, uid: int) -> bool:
+    """NFT игрока → в архив (для @rubinarxiv и проигрыша в апгрейдере)."""
+    n = q("SELECT * FROM nft_items WHERE id=? AND owner_id=?", (nid, uid), one=True)
+    if not n or nft_is_infinite(n) or n["for_sale"]:
+        return False
+    if x("DELETE FROM nft_items WHERE id=? AND owner_id=? AND for_sale=0", (nid, uid))[0] != 1:
+        return False
+    archive_add(n)
+    return True
+
+
+def upg_chance(n: dict, bet: int = 0) -> int:
+    return min(88, UPG_CHANCE.get(n["rarity"], 30) + min(10, max(0, int(bet)) // 100_000_000))
+
+
+def upg_stuck() -> int:
+    return int(q("SELECT COUNT(*) c FROM upg_log WHERE result='lose'", one=True)["c"])
+
+
+def upg_spin(uid: int, ids, bet: int = 0, target: str = "") -> dict:
+    """Апгрейдер: до 5 NFT игрока. Победа — подарок из архива (или коины), провал — NFT уходят в архив."""
+    if isinstance(ids, int):
+        ids = [ids]
+    ids = [int(i) for i in (ids or [])][:5]
+    if not ids:
+        return {"ok": False, "err": "Выбери NFT"}
+    rows = [r for r in (q("SELECT * FROM nft_items WHERE id=? AND owner_id=?", (i, uid), one=True) for i in ids) if r]
+    if len(rows) != len(ids):
+        return {"ok": False, "err": "NFT не найден"}
+    if any(nft_is_infinite(r) or r["for_sale"] for r in rows):
+        return {"ok": False, "err": "Эти NFT нельзя ставить"}
+    best = max(rows, key=lambda r: RARITY_IDX.get(r["rarity"], 0))
+    bet = max(0, min(int(bet or 0), MAX_BET))
+    chance = min(88, upg_chance(best, bet) + 5 * (len(rows) - 1))
+    if bet and not spend(uid, bet):
+        return {"ok": False, "err": "Недостаточно RCOIN для бонуса"}
+    stake = sum(nft_value(r) for r in rows)
+    for r in rows:
+        x("DELETE FROM nft_items WHERE id=? AND owner_id=? AND for_sale=0", (r["id"], uid))
+    if random.randint(1, 100) <= chance:
+        all_rows = q("SELECT * FROM nft_archive")
+        if target in RARITY_IDX:
+            pool = [r for r in all_rows if r["rarity"] == target] or \
+                   [r for r in all_rows if RARITY_IDX.get(r["rarity"], 0) >= RARITY_IDX[target]]
+        else:
+            pool = [r for r in all_rows if RARITY_IDX.get(r["rarity"], 0) >= RARITY_IDX.get(best["rarity"], 0)]
+        if not pool:
+            pool = sorted(all_rows, key=lambda r: -int(r.get("price") or 0))[:12]
+        if pool:
+            pick = random.choice(pool)
+            x("DELETE FROM nft_archive WHERE id=?", (pick["id"],))
+            new_id = make_nft(uid, pick["name"], pick["rarity"], pick["photo"], "Выиграно в апгрейдере",
+                              model=pick["model"], background=pick["background"])
+            x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
+              (uid, ids[0], best["rarity"], "win", chance, now()))
+            return {"ok": True, "win": True, "chance": chance, "nft_id": new_id, "name": pick["name"],
+                    "rarity": RARITY_NAME.get(pick["rarity"], pick["rarity"]), "url": f"/nft/{new_id}"}
+        coins = max(int(stake * 1.5), RARITY_BASE.get(best["rarity"], 50_000))
+        over = add_coin(uid, coins)
+        x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
+          (uid, ids[0], best["rarity"], "coins", chance, now()))
+        return {"ok": True, "win": True, "coins": coins - over, "archived": over, "chance": chance,
+                "name": f"{fmt(coins - over)} RCOIN", "rarity": "coins"}
+    for r in rows:
+        archive_add(r)
+    x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
+      (uid, ids[0], best["rarity"], "lose", chance, now()))
+    return {"ok": True, "win": False, "chance": chance, "msg": "NFT ушли в архив"}
+
+
+def api_archive_state(u, body):
+    uid = u["user_id"]
+    rows = q("SELECT * FROM nft_items WHERE owner_id=? AND for_sale=0 AND price>=0 ORDER BY id DESC LIMIT 40", (uid,))
+    return {"ok": True, "archive": archive_count(), "stuck": upg_stuck(), "chance": UPG_CHANCE,
+            "items": [{"id": r["id"], "name": r["name"], "rarity": RARITY_NAME.get(r["rarity"], r["rarity"]),
+                       "rt": r["rarity"], "value": nft_value(r), "url": f"/nft/{r['id']}"} for r in rows],
+            "gifts": [{"id": r["id"], "name": r["name"], "rarity": RARITY_NAME.get(r["rarity"], r["rarity"]),
+                       "price": int(r.get("price") or 0)}
+                      for r in q("SELECT * FROM nft_archive ORDER BY price DESC, id DESC LIMIT 12")]}
+
+
+def api_archive_spin(u, body):
+    try:
+        raw = body.get("ids")
+        ids = raw if isinstance(raw, list) else [body.get("id", 0)]
+        ids = [int(i) for i in ids if str(i).isdigit()]
+        bet = int(body.get("bet", 0) or 0)
+        target = str(body.get("target", "") or "")
+    except (TypeError, ValueError):
+        return w_err("Неверные данные")
+    return upg_spin(u["user_id"], ids, bet, target)
+
+
+def api_nft_to_archive(u, body):
+    try:
+        nid = int(body.get("id", 0))
+    except (TypeError, ValueError):
+        return w_err("Неверный NFT")
+    if not archive_take_nft(nid, u["user_id"]):
+        return w_err("NFT не найден или стоит на продаже")
+    return {"ok": True, "msg": "NFT пополнил архив"}
+
+
+def api_mining_state(u, body):
+    uid = u["user_id"]
+    pending = mining_sync(uid)
+    owned = {r["tier"]: r for r in mining_servers(uid)}
+    return {"ok": True, "pending": pending, "rate": mining_rate(uid),
+            "servers": [{"tier": t, "name": n, "cost": c, "per_day": p, "owned": t in owned,
+                         "left": max(0, owned[t]["expires_at"] - now()) if t in owned else 0}
+                        for t, n, c, p in MINING_SERVERS]}
+
+
+def api_mining_buy(u, body):
+    uid = u["user_id"]
+    try:
+        tier = int(body.get("tier", -1))
+    except (TypeError, ValueError):
+        return w_err("Неверный сервер")
+    sv = SERVER_BY_TIER.get(tier)
+    if not sv:
+        return w_err("Нет такого сервера")
+    if q("SELECT 1 FROM mining_servers WHERE user_id=? AND tier=? AND expires_at>?", (uid, tier, now()), one=True):
+        return w_err("Уже куплен")
+    if not spend(uid, sv[2]):
+        return w_err(f"Нужно {fmt(sv[2])} RCOIN")
+    grant_server(uid, tier)
+    return {"ok": True, "msg": f"Сервер «{sv[1]}» куплен"}
+
+
+def api_mining_collect(u, body):
+    uid = u["user_id"]
+    pending = mining_sync(uid)
+    if pending <= 0:
+        return w_err("Пока нечего снимать")
+    if x("UPDATE users SET mine_pending=0 WHERE user_id=? AND mine_pending=?", (uid, pending))[0] != 1:
+        return w_err("Попробуй ещё раз")
+    over = add_coin(uid, pending)
+    return {"ok": True, "got": pending - over, "archived": over, "msg": f"+{fmt(pending - over)} RCOIN"}
+
+
+async def invoice_handler(request: web.Request):
+    """Ссылка на оплату Stars для веб-приложения (донат, Premium, сервер)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    tu = check_init(str(body.get("init", "")))
+    if not tu:
+        return web.json_response({"ok": False, "err": "Открой приложение через бота в Telegram"})
+    kind = body.get("kind")
+    try:
+        if kind == "prem":
+            title, desc, payload, stars = "RUBIN Premium", "Галочка, ранг «Лудоман», +50% к выигрышу", f"premium:{tu['id']}", PREMIUM_STARS
+        elif kind == "srv":
+            tier = int(body.get("tier", 0))
+            sv = SERVER_BY_TIER.get(tier)
+            if not sv:
+                return web.json_response({"ok": False, "err": "Нет такого сервера"})
+            title, desc, payload, stars = f"Сервер «{sv[1]}»", "30 дней работы", f"server:{tier}", SERVER_STARS
+        else:
+            stars = max(DONATE_MIN_STARS, int(body.get("stars", DONATE_MIN_STARS)))
+            title, desc, payload = f"{fmt(stars * DONATE_RATE)} RCOIN", "Пополнение баланса", f"donate:{stars * DONATE_RATE}"
+        link = await bot.create_invoice_link(title=title, description=desc, payload=payload, provider_token="",
+                                             currency="XTR", prices=[LabeledPrice(label=title[:32], amount=int(stars))])
+        return web.json_response({"ok": True, "link": link})
+    except Exception:
+        log.exception("invoice_handler")
+        return web.json_response({"ok": False, "err": "Не удалось создать счёт"})
+
+
+# ---------------------------- ПЕРЕДАЧА NFT НА @rubinarxiv ----------------------------
+_nft_transfer_orig = nft_transfer
+
+
+async def nft_transfer(uid: int, nid: int, target_token: str) -> str:
+    if (target_token or "").strip().lstrip("@").lower() in ("rubinarxiv", "rubin_archive"):
+        if not archive_take_nft(nid, uid):
+            return "NFT не найден, не твой или стоит на продаже."
+        return "✅ NFT отправлен в архив — его можно выиграть в апгрейдере."
+    return await _nft_transfer_orig(uid, nid, target_token)
+
+
+@dp.message(P("в архив", "вархив"))
+async def cmd_nft_to_archive(message: Message):
+    uid = message.from_user.id
+    p = message.text.split()
+    nid = 0
+    for token in p:
+        if token.startswith("#") and token[1:].isdigit():
+            nid = int(token[1:])
+    if not nid and len(p) >= 3 and p[2].lstrip("#").isdigit():
+        nid = int(p[2].lstrip("#"))
+    if not nid:
+        rows = q("SELECT id,name FROM nft_items WHERE owner_id=? ORDER BY id DESC LIMIT 8", (uid,))
+        if not rows:
+            return await message.reply("У тебя нет NFT.")
+        listing = "\n".join(f"• #{r['id']} — {esc(r['name'])}" for r in rows)
+        return await message.reply(box("🏛 <b>В NFT-АРХИВ</b>", listing, "Напиши: <code>в архив #12</code>"),
+                                   reply_markup=kb(*[[btn(f"#{r['id']} → архив", f"arx2:{r['id']}")] for r in rows[:6]]))
+    if archive_take_nft(nid, uid):
+        return await message.reply(box("🏛 <b>NFT В АРХИВЕ</b>", f"#{nid} теперь можно выиграть в апгрейдере."))
+    await message.reply("NFT не найден, не твой или стоит на продаже.")
+
+
+@dp.callback_query(F.data.startswith("arx2:"))
+async def cb_nft_to_archive(cb: CallbackQuery):
+    nid = int(cb.data.split(":")[1])
+    if archive_take_nft(nid, cb.from_user.id):
+        await safe_edit(cb, box("🏛 <b>NFT В АРХИВЕ</b>", f"#{nid} добавлен в апгрейдер."))
+        return await ans(cb, "В архиве", True)
+    await ans(cb, "Не получилось", True)
+
+
+@dp.message(P("нфтархив", "nftarchive"))
+async def cmd_nft_archive_info(message: Message):
+    get_user(message.from_user.id)
+    rows = [box("🏛 <b>NFT-АРХИВ</b>", f"В апгрейдере: <b>{archive_count()}</b> NFT",
+                f"Застряло (проигрыши): <b>{upg_stuck()}</b>",
+                f"Пополнить: передай NFT на {ARCHIVE_TG} или <code>в архив #id</code>")]
+    markup = None
+    if is_admin(message.from_user.id):
+        markup = kb([btn("Пополнить на 20", "arx:fill", "treasury")])
+    await message.reply(rows[0], reply_markup=markup)
+
+
+@dp.callback_query(F.data == "arx:fill")
+async def cb_admin_archive(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        return await ans(cb, "Нет доступа", True)
+    made = archive_seed(archive_count() + 20)
+    await ans(cb, f"Архив +{made} NFT", True)
+
+
+# ---------------------------- NFT: белая заглушка до улучшения, NFT из фото ----------------------------
+def _nft_blank_card(seed: int, title: str, rarity: str, level: int) -> bytes:
+    """Белая карточка неулучшенного NFT: фото появится после улучшения."""
+    w, h = 1280, 720
+    accent = NFT_RARITY_COLOR.get(rarity, (200, 190, 255))
+    im = Image.new("RGBA", (w, h), (249, 250, 253, 255))
+    d = ImageDraw.Draw(im, "RGBA")
+    for y in range(h):
+        k = y / h
+        d.line((0, y, w, y), fill=(int(250 - 8 * k), int(251 - 8 * k), int(254 - 6 * k), 255))
+    d.rounded_rectangle((w // 2 - 210, 170, w // 2 + 210, 520), 44, outline=(206, 210, 222, 255), width=4)
+    d.ellipse((w // 2 - 58, 250, w // 2 + 58, 366), outline=(178, 186, 204, 255), width=7)
+    d.arc((w // 2 - 26, 292, w // 2 + 26, 344), 200, 340, fill=(178, 186, 204, 255), width=7)
+    d.text((w // 2, 420), "НЕ УЛУЧШЕН", font=_nft_font(True, 44), fill=(118, 128, 148, 255), anchor="mm")
+    d.text((w // 2, 470), "Улучши NFT, чтобы открыть арт", font=_nft_font(False, 24), fill=(152, 160, 178, 255), anchor="mm")
+    _nft_top_pills(im, seed)
+    _nft_bottom_labels(im, title, rarity, "Ожидает улучшения", accent)
+    _nft_frame(im, rarity)
+    out = io.BytesIO()
+    im.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def _nft_photo_card(raw: bytes, title: str, rarity: str, seed: int = 0) -> bytes:
+    """Карточка NFT из загруженного фото: размытый фон + фото + рамка."""
+    w, h = 1280, 720
+    accent = NFT_RARITY_COLOR.get(rarity, (200, 190, 255))
+    src = Image.open(io.BytesIO(raw)).convert("RGB")
+    cover = src.copy()
+    scale = max(w / cover.width, h / cover.height)
+    cover = cover.resize((int(cover.width * scale) + 1, int(cover.height * scale) + 1), Image.LANCZOS)
+    cover = cover.crop(((cover.width - w) // 2, (cover.height - h) // 2, (cover.width - w) // 2 + w, (cover.height - h) // 2 + h))
+    im = ImageEnhance.Brightness(cover.filter(ImageFilter.GaussianBlur(26))).enhance(0.45).convert("RGBA")
+    inner = min(h - 220, w - 260)
+    photo = src.copy()
+    scale = inner / max(photo.width, photo.height)
+    photo = photo.resize((max(1, int(photo.width * scale)), max(1, int(photo.height * scale))), Image.LANCZOS)
+    px, py = (w - photo.width) // 2, (h - photo.height) // 2 - 20
+    d = ImageDraw.Draw(im, "RGBA")
+    d.rounded_rectangle((px - 10, py - 10, px + photo.width + 10, py + photo.height + 10), 26,
+                        fill=(0, 0, 0, 120), outline=accent + (200,), width=3)
+    im.paste(photo, (px, py))
+    _nft_top_pills(im, int(seed) or int.from_bytes(hashlib.md5(raw[:4096]).digest()[:4], "big"))
+    _nft_bottom_labels(im, title, rarity, "Фото владельца", accent)
+    _nft_frame(im, rarity)
+    out = io.BytesIO()
+    im.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+_png_nft_orig = png_nft
+
+
+def png_nft(seed: int, title: str, photo: str = "", model: str = "", background: str = "",
+            rarity: str = "common", level: int = 1) -> bytes:
+    if photo == "blank":
+        return _nft_blank_card(seed, title, rarity, level)
+    try:
+        if photo == "photo":
+            fp = NFT_DIR / f"photo_{seed}.png"
+            if fp.is_file():
+                return _nft_photo_card(fp.read_bytes(), title, rarity, seed)
+        elif photo and str(photo).lower().endswith((".png", ".jpg", ".jpeg")) and (NFT_DIR / str(photo)).is_file():
+            return _nft_photo_card((NFT_DIR / str(photo)).read_bytes(), title, rarity, seed)
+    except Exception:
+        log.exception("photo nft card")
+    return _png_nft_orig(seed, title, photo, model, background, rarity, level)
+
+
+def gift_open(uid: int, gid: int) -> Optional[int]:
+    """Открытие бокса: NFT без фото (белый фон) — арт появится после улучшения."""
+    g = q("SELECT * FROM gifts WHERE id=?", (gid,), one=True)
+    if not g or g["used"] or g["owner_id"] not in (0, uid):
+        return None
+    if x("UPDATE gifts SET used=1, used_by=? WHERE id=? AND used=0 AND owner_id IN (0,?)", (uid, gid, uid))[0] != 1:
+        return None
+    name, _emoji = random.choice(NFT_POOL[g["rarity"]] if g["rarity"] in NFT_POOL else NFT_POOL["common"])
+    return make_nft(uid, name, g["rarity"], "blank", "Открыто из коллекционного бокса")
+
+
+async def _create_photo_nft(target_uid: int, photo, caption: str) -> Optional[int]:
+    parts = [p.strip() for p in (caption or "").split(maxsplit=2)]
+    title = parts[1][:30] if len(parts) > 1 and parts[1].lower() not in RARITY_BASE else "Фото NFT"
+    rarity = next((p.lower() for p in parts[1:] if p.lower() in RARITY_BASE), "rare")
+    try:
+        f = await bot.get_file(photo.file_id)
+        buf = await bot.download_file(f.file_path)
+        raw = buf.read() if hasattr(buf, "read") else bytes(buf)
+    except Exception:
+        log.exception("nft photo download")
+        return None
+    nid = make_nft(target_uid, title, rarity, "photo", "NFT из личного фото", RARITY_BASE[rarity],
+                   model="Призрачный", background="Галактика")
+    try:
+        NFT_DIR.mkdir(parents=True, exist_ok=True)
+        (NFT_DIR / f"photo_{nid}.png").write_bytes(raw)
+        card = _nft_photo_card(raw, title, rarity, nid)
+        kv_set(f"nftpng:{nid}", base64.b64encode(card).decode("ascii"))
+    except Exception:
+        log.exception("nft photo save")
+    return nid
+
+
+def _is_nft_photo(message: Message) -> bool:
+    cap = (message.caption or "").strip().lower()
+    has_photo = bool(message.photo) or bool(message.reply_to_message and message.reply_to_message.photo)
+    return has_photo and cap.startswith(("нфт", "nft", "фото"))
+
+
+@dp.message(_is_nft_photo)
+async def cmd_nft_from_photo(message: Message):
+    """Владелец: фото с подписью «нфт Название редкость @юзер» — NFT по своему фото себе или игроку."""
+    if not is_admin(message.from_user.id):
+        return await message.reply(f"{E('lock')} Только для администрации.")
+    photo = message.photo[-1] if message.photo else message.reply_to_message.photo[-1]
+    target = message.from_user.id
+    for token in (message.caption or "").split():
+        if token.startswith("@") or token.isdigit():
+            t = find_user(token)
+            if t:
+                target = t["user_id"]
+    nid = await _create_photo_nft(target, photo, re.sub(r"@\w+", "", message.caption or ""))
+    if not nid:
+        return await message.reply("Не удалось скачать фото.")
+    n = q("SELECT * FROM nft_items WHERE id=?", (nid,), one=True)
+    caption = box("🎨 <b>NFT ИЗ ФОТО ГОТОВ</b>", nft_card(n), f"Номер: <code>#{nid}</code> · владелец: <code>{target}</code>")
+    try:
+        raw = png_nft(nid, n["name"], n["photo"], n["model"], n["background"], n["rarity"], n["level"])
+        await message.reply_photo(BufferedInputFile(raw, filename=f"nft_{nid}.png"), caption=caption)
+    except Exception:
+        await message.reply(caption)
+
+
+# ---------------------------- ДОНАТ (Stars) И ОПЛАТА ----------------------------
+async def stars_invoice(uid: int, stars: int, title: str, description: str, payload: str) -> bool:
+    try:
+        await bot.send_invoice(chat_id=uid, title=title, description=description[:255], payload=payload,
+                               provider_token="", currency="XTR", prices=[LabeledPrice(label=title[:32], amount=int(stars))])
+        return True
+    except Exception as e:
+        log.warning("invoice %s: %s", payload, e)
+        try:
+            await bot.send_message(uid, "Не удалось создать счёт. Открой диалог с ботом и попробуй снова.")
+        except Exception:
+            pass
+        return False
+
+
+async def _donate_invoice(uid: int, stars: int) -> bool:
+    stars = int(stars)
+    if stars < DONATE_MIN_STARS:
+        await _dm(uid, f"Минимальная покупка — {DONATE_MIN_STARS} ⭐.")
+        return False
+    coins = stars * DONATE_RATE
+    return await stars_invoice(uid, stars, "Пополнение RCOIN", f"{fmt(coins)} RCOIN за {stars} ⭐", f"donate:{coins}")
+
+
+def donate_text(uid: int) -> str:
+    u = get_user(uid)
+    return (f"{E('donate')} <b>ПОПОЛНЕНИЕ RCOIN</b>\n\n{E('balance')} Баланс: <b>{fmt(u['balance_coin'])}</b> RCOIN\n"
+            f"{E('treasury')} Архив: {fmt(u.get('archive_coin') or 0)}\n\n"
+            f"⭐ <b>10 звёзд</b> → {fmt(10 * DONATE_RATE)} RCOIN\n⭐ <b>100 звёзд</b> → {fmt(100 * DONATE_RATE)} RCOIN\n"
+            f"Минимум {DONATE_MIN_STARS} ⭐. Любая сумма: <code>донат 25</code>")
+
+
+def donate_kb() -> InlineKeyboardMarkup:
+    return kb([btn("10 ⭐ → 100кк", "don:buy:10", "star")], [btn("100 ⭐ → 1ккк", "don:buy:100", "star")],
+              [btn("Своя сумма", "don:stars", "donate")],
+              [btn(f"RUBIN Premium · {PREMIUM_STARS} ⭐", "don:premium", "diamond")],
+              [btn("Назад", "menu:main", "door")])
+
+
+@dp.message(P("донат", "donate"))
+async def cmd_donate_new(message: Message):
+    get_user(message.from_user.id)
+    p = message.text.split()
+    if len(p) >= 2 and p[1].isdigit():
+        await _donate_invoice(message.from_user.id, int(p[1]))
+        return
+    await message.reply(donate_text(message.from_user.id), reply_markup=donate_kb())
+
+
+@dp.message(P("премиум", "premium"))
+async def cmd_premium(message: Message):
+    get_user(message.from_user.id)
+    await stars_invoice(message.from_user.id, PREMIUM_STARS, "RUBIN Premium",
+                        "Галочка «Лудоман», +50% к выигрышу, премиум-эмодзи", f"premium:{message.from_user.id}")
+
+
+@dp.callback_query(F.data.startswith("don:buy:"))
+async def cb_don_preset(cb: CallbackQuery):
+    await _donate_invoice(cb.from_user.id, int(cb.data.split(":")[2]))
+    await ans(cb)
+
+
+@dp.callback_query(F.data == "don:premium")
+async def cb_don_premium(cb: CallbackQuery):
+    if is_premium(cb.from_user.id):
+        return await ans(cb, "Premium уже активен", True)
+    await stars_invoice(cb.from_user.id, PREMIUM_STARS, "RUBIN Premium",
+                        "Галочка «Лудоман», +50% к выигрышу, премиум-эмодзи", f"premium:{cb.from_user.id}")
+    await ans(cb, "Счёт выставлен")
+
+
+@dp.callback_query(F.data == "don:stars")
+async def cb_don_custom(cb: CallbackQuery, state: FSMContext):
+    await ask(cb, state, "stars", f"Сколько звёзд ⭐ потратить? Минимум {DONATE_MIN_STARS}. 1 ⭐ = {fmt(DONATE_RATE)} RCOIN.")
+
+
+@flow("stars")
+async def f_stars_new(m: Message, state: FSMContext, d, txt):
+    if not txt.isdigit() or not DONATE_MIN_STARS <= int(txt) <= 100000:
+        return await m.reply(f"Введи целое число звёзд, не меньше {DONATE_MIN_STARS}.")
+    if await _donate_invoice(m.from_user.id, int(txt)):
+        await state.clear()
+
+
+@dp.message(F.successful_payment)
+async def on_paid_new(message: Message):
+    sp = message.successful_payment
+    if kv_get("pay:" + sp.telegram_payment_charge_id):
+        return
+    kv_set("pay:" + sp.telegram_payment_charge_id, "1")
+    uid = message.from_user.id
+    get_user(uid)
+    payload = sp.invoice_payload or ""
+    if payload.startswith("premium:"):
+        set_premium(uid, 30 * 86400)
+        give_badge(uid, "blue")
+        return await message.reply(box("💎 <b>RUBIN PREMIUM АКТИВЕН</b>", "30 дней премиума и голубая галочка",
+                                       "Ранг: <b>Лудоман</b> (ранг от админа не меняется)", "+50% к выигрышу · бонус ×2"))
+    if payload.startswith("server:"):
+        try:
+            tier = int(payload.split(":")[1])
+        except (ValueError, IndexError):
+            tier = -1
+        sv = SERVER_BY_TIER.get(tier)
+        if sv and grant_server(uid, tier):
+            return await message.reply(box("🖥 <b>СЕРВЕР КУПЛЕН</b>", f"«{sv[1]}» на 30 дней",
+                                           f"Доход: {fmt(sv[3])} RCOIN/сутки", "Забирай добычу в разделе «Майнинг»"))
+        return
+    if payload.startswith("donate:"):
+        coins = sp.total_amount * DONATE_RATE
+        over = add_coin(uid, coins)
+        note = f"\n🏛 Сверх лимита в Архив: {fmt(over)}" if over else ""
+        return await message.reply(box(f"{E('star')} <b>ПОПОЛНЕНИЕ УСПЕШНО!</b>", f"💰 +{fmt(coins - over)} RCOIN{note}", "Спасибо! 🎉"))
+    rbp = sp.total_amount * 5     # старые счета на RBP
+    x("UPDATE users SET balance_point=balance_point+? WHERE user_id=?", (rbp, uid))
+    await message.reply(box(f"{E('star')} <b>ПОПОЛНЕНИЕ УСПЕШНО!</b>", f"💎 +{fmt(rbp)} RBP", "Спасибо! 🎉"))
+
+
+# ---------------------------- ПРИВАТНЫЕ КОМНАТЫ С КОДОМ ----------------------------
+ROOM_MAX = 6
+
+
+def room_get(code: str) -> Optional[Dict[str, Any]]:
+    r = q("SELECT * FROM rooms WHERE code=?", (code.upper().strip(),), one=True)
+    if r:
+        try:
+            r["players"] = json.loads(r["players"] or "[]")
+        except Exception:
+            r["players"] = []
+    return r
+
+
+def room_save(code: str, players: list, status: str):
+    x("UPDATE rooms SET players=?, status=? WHERE code=?", (json.dumps(players), status, code))
+
+
+def room_create(uid: int, bet: int) -> str:
+    bet = int(bet)
+    if bet <= 0 or bet > MAX_BET or not spend(uid, bet):
+        return ""
+    code = gen_code(6, string.digits)
+    x("INSERT INTO rooms(code,owner_id,bet,players,status,created_at) VALUES(?,?,?,?,?,?)",
+      (code, uid, bet, json.dumps([{"id": uid, "bet": bet}]), "wait", now()))
+    return code
+
+
+def room_join(uid: int, code: str) -> tuple:
+    r = room_get(code)
+    if not r:
+        return False, "Комната не найдена."
+    if r["status"] != "wait":
+        return False, "Игра в этой комнате уже началась."
+    players = r["players"]
+    if any(p["id"] == uid for p in players):
+        return False, "Ты уже в комнате."
+    if len(players) >= ROOM_MAX:
+        return False, "Комната заполнена."
+    if not spend(uid, int(r["bet"])):
+        return False, f"Нужно {fmt(r['bet'])} RCOIN — ставка комнаты."
+    players.append({"id": uid, "bet": int(r["bet"])})
+    room_save(code, players, "wait")
+    r["players"] = players
+    return True, r
+
+
+async def room_play(code: str):
+    r = room_get(code)
+    if not r or r["status"] != "wait" or len(r["players"]) < 2:
+        return
+    players = r["players"]
+    room_save(code, players, "play")
+    ids = [p["id"] for p in players]
+    bets = {p["id"]: int(p["bet"]) for p in players}
+    pot = sum(bets.values())
+    rake = pot // 10
+    prize = pot - rake
+    winner = random.choices(ids, weights=[bets[i] for i in ids])[0]
+    await asyncio.sleep(1.2)
+    treasury_add(rake)
+    for uid in ids:
+        settle(uid, "room", bets[uid], prize if uid == winner else 0, "room " + code)
+    txt = box("🎉 <b>ПРИВАТНАЯ КОМНАТА</b>", f"🔑 Код: <code>{code}</code>", f"🏆 Победитель: {uname(get_user(winner), False)}",
+              f"💰 Банк: {fmt(pot)} · выигрыш: <b>{fmt(prize)}</b> RCOIN")
+    for uid in ids:
+        await _dm(uid, txt)
+        await asyncio.sleep(0.05)
+
+
+def room_view(uid: int) -> str:
+    mine = q("SELECT * FROM rooms WHERE owner_id=? AND status='wait' ORDER BY created_at DESC LIMIT 1", (uid,), one=True)
+    return box("🔐 <b>ПРИВАТНАЯ КОМНАТА</b>", "Создай комнату, скинь другу код — и играйте на равных.",
+               "До 6 игроков · одинаковая ставка · 10% в казну.",
+               f"Твоя открытая комната: <code>{mine['code']}</code> · {fmt(mine['bet'])}" if mine else "Открытых комнат нет.")
+
+
+def room_kb() -> InlineKeyboardMarkup:
+    return kb([btn("Создать комнату", "room:new", "games")], [btn("Войти по коду", "room:join", "door")],
+              [btn("Назад", "menu:main", "door")])
+
+
+@dp.message(P("комната", "приват", "room"))
+async def cmd_room(message: Message):
+    uid = message.from_user.id
+    get_user(uid)
+    p = message.text.split()
+    if len(p) >= 2 and p[1].lower() in ("создать", "create"):
+        bet = parse_amount(p[2], get_user(uid)["balance_coin"]) if len(p) >= 3 else 0
+        if bet <= 0 or bet > MAX_BET:
+            return await message.reply(f"Ставка от 1 до {fmt(MAX_BET)}. Пример: <code>комната создать 100к</code>")
+        code = room_create(uid, bet)
+        if not code:
+            return await message.reply(f"{E('lock')} Недостаточно RCOIN.")
+        return await message.reply(box("🔐 <b>КОМНАТА СОЗДАНА</b>", f"Код: <code>{code}</code>", f"Ставка: {fmt(bet)} RCOIN",
+                                       f"Друг входит: <code>комната войти {code}</code>"),
+                                   reply_markup=kb([btn("Позвать друга", url=deeplink("room_" + code))]))
+    if len(p) >= 3 and p[1].lower() in ("войти", "join"):
+        code = re.sub(r"\D", "", p[2])[:6]
+        okj, res = room_join(uid, code)
+        if not okj:
+            return await message.reply(f"{E('lock')} {res}")
+        await message.reply(box("✅ <b>ТЫ В КОМНАТЕ</b>", f"Код: <code>{code}</code>", f"Игроков: {len(res['players'])}/{ROOM_MAX}",
+                                f"Ставка: {fmt(res['bet'])}"))
+        if len(res["players"]) >= 2:
+            asyncio.create_task(room_play(code))
+        return
+    await message.reply(room_view(uid), reply_markup=room_kb())
+
+
+@dp.callback_query(F.data == "room:new")
+async def cb_room_new(cb: CallbackQuery, state: FSMContext):
+    await ask(cb, state, "room_bet", "Ставка комнаты? Например <code>100к</code>.")
+
+
+@dp.callback_query(F.data == "room:join")
+async def cb_room_join(cb: CallbackQuery, state: FSMContext):
+    await ask(cb, state, "room_code", "Введи код комнаты (6 цифр).")
+
+
+@flow("room_bet")
+async def f_room_bet(m: Message, state: FSMContext, d, txt):
+    bet = parse_amount(txt, get_user(m.from_user.id)["balance_coin"])
+    if bet <= 0 or bet > MAX_BET:
+        return await m.reply(f"Ставка от 1 до {fmt(MAX_BET)}.")
+    code = room_create(m.from_user.id, bet)
+    if not code:
+        return await m.reply(f"{E('lock')} Недостаточно RCOIN.")
+    await state.clear()
+    await m.reply(box("🔐 <b>КОМНАТА СОЗДАНА</b>", f"Код: <code>{code}</code>", f"Ставка: {fmt(bet)}",
+                      f"Друг входит: <code>комната войти {code}</code>"))
+
+
+@flow("room_code")
+async def f_room_code(m: Message, state: FSMContext, d, txt):
+    code = re.sub(r"\D", "", txt)[:6]
+    if len(code) != 6:
+        return await m.reply("Код — 6 цифр.")
+    okj, res = room_join(m.from_user.id, code)
+    if not okj:
+        return await m.reply(res)
+    await state.clear()
+    await m.reply(box("✅ <b>ТЫ В КОМНАТЕ</b>", f"Код: <code>{code}</code>", f"Игроков: {len(res['players'])}/{ROOM_MAX}"))
+    if len(res["players"]) >= 2:
+        asyncio.create_task(room_play(code))
+
+
+# ---------------------------- ГЛАВНОЕ МЕНЮ И РАЗДЕЛЫ ----------------------------
+def main_kb(uid: int, private: bool) -> InlineKeyboardMarkup:
+    u = get_user(uid)
+    avail, _ = bonus_state(u)
+    rows = []
+    if avail:
+        rows.append([btn(f"Получить бонус {fmt(BONUS_AMOUNT)}", "bonus:get", "donate")])
+    rows += [
+        [btn("Игры", "menu:games", "games"), btn("Профиль", "menu:profile", "profile")],
+        [btn("Ивенты", "menu:events", "star"), btn("Склад", "menu:stash", "diamond")],
+        [btn("Маркет", "menu:market", "market"), btn("Банк", "menu:bank", "bank")],
+        [btn("Майнинг", "menu:mining", "miner"), btn("Архив", "menu:archive", "treasury")],
+        [btn("Комнаты", "menu:rooms", "games"), btn("Санта-босс", "ev:boss", "crash")],
+        [btn("Донат", "menu:donate", "donate"), btn("Заработать", "menu:earn", "balance")],
+    ]
+    if daily5_available(uid):
+        rows.append([btn("Ежедневный 5×5", "menu:db5", "question")])
+    if private and WEBAPP_URL:
+        rows.append([btn("🌐 Веб-апп: арена, апгрейдер, майнинг", web=WEBAPP_URL)])
+    rows.append([btn("Топ", "menu:top", "star"), btn("Помощь", "menu:help", "question")])
+    return kb(*rows)
+
+
+async def v_mining_menu(uid: int, private: bool):
+    return mining_view(uid)
+
+
+async def v_archive_menu(uid: int, private: bool):
+    return archive_view(uid), archive_kb(uid)
+
+
+async def v_rooms_menu(uid: int, private: bool):
+    return room_view(uid), room_kb()
+
+
+async def v_donate_menu(uid: int, private: bool):
+    return donate_text(uid), donate_kb()
+
+
+VIEWS["mining"] = v_mining_menu
+VIEWS["archive"] = v_archive_menu
+VIEWS["rooms"] = v_rooms_menu
+VIEWS["donate"] = v_donate_menu
+
+
+# ---------------------------- РАНГ ОТ АДМИНА НЕ ЗАТИРАЕТСЯ ГАЛОЧКОЙ ----------------------------
+_admin_exec_orig = admin_exec
+
+
+def admin_exec(action: str, tid, a, by: int) -> str:
+    res = _admin_exec_orig(action, tid, a, by)
+    if action.startswith("rank_") and tid and not str(res).startswith(("❌", "⛔")):
+        x("UPDATE users SET rank_manual=? WHERE user_id=?", (0 if action == "rank_clear" else 1, tid))
+    return res
+
+
+_sync_badge_rank_orig = sync_badge_rank
+
+
+def sync_badge_rank(uid: int):
+    if int(get_user(uid).get("rank_manual") or 0):
+        return None
+    return _sync_badge_rank_orig(uid)
+
+
+# ---------------------------- NFT-КАРТИНКА ОБНОВЛЯЕТСЯ ПОСЛЕ УЛУЧШЕНИЯ ----------------------------
+def _nft_sig(row: dict) -> str:
+    raw = "|".join(str(row.get(k, "")) for k in ("photo", "model", "background", "rarity", "level", "name"))
+    return hashlib.md5(raw.encode()).hexdigest()[:10]
+
+
+async def nft_asset(request: web.Request):
+    try:
+        nid = int(request.match_info["nid"])
+    except (ValueError, TypeError):
+        raise web.HTTPNotFound()
+    row = q("SELECT id,photo,name,model,background,rarity,level FROM nft_items WHERE id=?", (nid,), one=True)
+    if not row:
+        raise web.HTTPNotFound()
+    head = {"Cache-Control": "public, max-age=60"}
+    cached = kv_get(f"nftpng:{nid}")
+    if cached and (nid == OWNER_NFT_ID or kv_get(f"nftsig:{nid}") == _nft_sig(row)):
+        try:
+            return web.Response(body=base64.b64decode(cached, validate=True), content_type="image/png", headers=head)
+        except Exception:
+            log.warning("NFT PNG повреждён: %s", nid)
+    try:
+        raw = png_nft(nid, row["name"], row.get("photo", ""), row.get("model", ""), row.get("background", ""),
+                      row.get("rarity", "common"), int(row.get("level", 1)))
+        kv_set(f"nftpng:{nid}", base64.b64encode(raw).decode("ascii"))
+        kv_set(f"nftsig:{nid}", _nft_sig(row))
+        return web.Response(body=raw, content_type="image/png", headers=head)
+    except Exception:
+        log.exception("nft_asset %s", nid)
+    return web.Response(text=svg_nft(nid, row["name"]), content_type="image/svg+xml", headers=head)
+
+
+def nft_public_url(url: str) -> str:
+    if not url:
+        return ""
+    if url.startswith("http"):
+        return url
+    if url.startswith("db:") and WEBAPP_URL:
+        try:
+            nid = int(url.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return ""
+        row = q("SELECT photo,name,model,background,rarity,level FROM nft_items WHERE id=?", (nid,), one=True) or {}
+        return f"{WEBAPP_URL}/nft/{nid}?v={_nft_sig(row)}"
+    return ""
+
+
+# ---------------------------- БЭКАП БАЗЫ ВЛАДЕЛЬЦУ ----------------------------
+async def backup_to_owner():
+    while True:
+        await asyncio.sleep(3 * 3600)
+        try:
+            path = backup_db()
+            if path and bot and OWNER_ID:
+                await bot.send_document(OWNER_ID, FSInputFile(path), caption="🗄 Бэкап базы RCOIN")
+        except Exception:
+            log.exception("backup_to_owner")
+
+
+_main_orig = main
+
+
+async def main():
+    asyncio.create_task(cap_sweeper())
+    asyncio.create_task(backup_to_owner())
+    await _main_orig()
+
+
+# ---------------------------- ПОРЯДОК ОБРАБОТЧИКОВ ----------------------------
+def _fix_handler_order():
+    # «Команда не найдена» ловила ЛЮБОЙ текст на «/» раньше поздних обработчиков (/mining, /archive, /zp, /badges...).
+    mh = dp.message.handlers
+    unk = [h for h in mh if getattr(h.callback, "__name__", "") == "unknown_command"]
+    for h in unk:
+        mh.remove(h)
+    mh.extend(unk)
+    # «Чеканить NFT» (ev:mint) перехватывался общим обработчиком ev: и не делал ничего.
+    ch = dp.callback_query.handlers
+    mint = [h for h in ch if getattr(h.callback, "__name__", "") == "cb_ev_mint"]
+    idx = next((i for i, h in enumerate(ch) if getattr(h.callback, "__name__", "") == "cb_events"), None)
+    if mint and idx is not None:
+        for h in mint:
+            ch.remove(h)
+        ch[idx:idx] = mint
+
+
+_fix_handler_order()
 
 
 if __name__ == "__main__":
