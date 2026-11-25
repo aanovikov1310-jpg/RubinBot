@@ -7,6 +7,7 @@ Render:  Start Command `python rubinbot.py`, переменные окружен
 Токен НЕ хранится в коде — только в переменной окружения BOT_TOKEN.
 """
 import asyncio
+import atexit
 import base64
 import hashlib
 import hmac
@@ -78,6 +79,10 @@ _pub = (os.getenv("WEBAPP_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip
 WEBAPP_URL = _pub if _pub.startswith("https://") else ""
 TREASURY_START = int(os.getenv("TREASURY_START", "2000000000"))
 TRANSFER_COMMISSION = int(os.getenv("TRANSFER_COMMISSION", "15"))
+# Лимиты экономики: баланс упирается в потолок, излишек уходит в «Архив».
+MAX_BALANCE = int(os.getenv("MAX_BALANCE", "5000000000"))
+MAX_BET = int(os.getenv("MAX_BET", "1000000000"))
+MAX_TRANSFER = int(os.getenv("MAX_TRANSFER", "1000000000"))
 REF_PERCENT = 2
 BONUS_AMOUNT = 2500
 MINT_COST = 10_000
@@ -598,6 +603,7 @@ USER_COLS = {
     "ev_day": "TEXT DEFAULT ''", "ev_stash_used": "INTEGER DEFAULT 0", "ev_boss_day": "TEXT DEFAULT ''",
     "ev_wheel_last": "INTEGER DEFAULT 0", "ev_points": "INTEGER DEFAULT 0",
     "db5_streak": "INTEGER DEFAULT 0", "db5_last_day": "TEXT DEFAULT ''",
+    "archive_coin": "INTEGER DEFAULT 0", "mine_pending": "INTEGER DEFAULT 0", "mine_last": "INTEGER DEFAULT 0",
 }
 SCHEMA = [
     "CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY)",
@@ -625,6 +631,7 @@ SCHEMA = [
     "CREATE TABLE IF NOT EXISTS snowman_rewards(day TEXT, user_id INTEGER, place INTEGER, amount INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0, PRIMARY KEY(day,place))",
 ]
 EXTRA_COLS = {
+    "nft_archive": {"price": "INTEGER DEFAULT 0"},
     "nft_items": {"photo": "TEXT DEFAULT '🎨'", "model": "TEXT DEFAULT 'Стандартный'",
                   "background": "TEXT DEFAULT 'Обычный'", "base_name": "TEXT DEFAULT ''"},
     "gifts": {"expires_at": "INTEGER DEFAULT 0"},
@@ -635,6 +642,8 @@ EXTRA_COLS = {
 
 def ensure_cols(table: str, cols: Dict[str, str]):
     have = {r["name"] for r in q(f"PRAGMA table_info({table})")}
+    if not have:
+        return
     for name, decl in cols.items():
         if name not in have:
             try:
@@ -667,6 +676,7 @@ def init_db():
     x("INSERT OR IGNORE INTO event_progress(id,boss_hp,boss_max,day,season) VALUES(1,0,0,'',1)")
     log.info("База данных готова: %s", "PostgreSQL" if DATABASE_URL else DB_FILE)
     init_tables()
+    seed_nft_archive()
 
 
 def kv_get(key: str) -> Optional[str]:
@@ -745,8 +755,25 @@ def is_admin(uid: int) -> bool:
     return bool(r and r["is_admin_rank"])
 
 
-def add_coin(uid: int, n: int):
-    x("UPDATE users SET balance_coin=balance_coin+? WHERE user_id=?", (int(n), uid))
+def add_coin(uid: int, n: int) -> int:
+    """Начисляет RCOIN с потолком MAX_BALANCE; излишек уходит в Архив. Возвращает сумму излишка.
+
+    shortcut: чтение и запись не в одной транзакции — при одновременных начислениях одного игрока
+    возможна гонка в пределах одного процесса; для бота это допустимо."""
+    n = int(n)
+    if n <= 0:
+        if n < 0:
+            x("UPDATE users SET balance_coin=balance_coin+? WHERE user_id=?", (n, uid))
+        return 0
+    r = q("SELECT balance_coin FROM users WHERE user_id=?", (uid,), one=True)
+    cur = int(r["balance_coin"] or 0) if r else 0
+    add = min(n, max(0, MAX_BALANCE - cur))
+    over = n - add
+    if add:
+        x("UPDATE users SET balance_coin=balance_coin+? WHERE user_id=?", (add, uid))
+    if over:
+        x("UPDATE users SET archive_coin=archive_coin+? WHERE user_id=?", (over, uid))
+    return over
 
 
 def spend(uid: int, n: int, col: str = "balance_coin") -> bool:
@@ -1071,6 +1098,9 @@ async def take_bet(m: Message, u: Dict[str, Any], raw: str, count: int = 1) -> i
     bet = parse_amount(raw, u["balance_coin"])
     if bet <= 0:
         await m.reply(f"{E('lock')} Неверная ставка. Примеры: <code>100</code>, <code>5к</code>, <code>2кк</code>, <code>все</code>")
+        return 0
+    if bet * count > MAX_BET:
+        await m.reply(f"{E('lock')} Максимальная ставка — <b>{fmt(MAX_BET)}</b> RCOIN.")
         return 0
     if not spend(u["user_id"], bet * count):
         bal = get_user(u["user_id"])["balance_coin"]
@@ -2480,6 +2510,12 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
         return await do_promo(message, args[6:])
     if args.startswith("check_"):
         return await do_check(message, args[6:], state)
+    if args.startswith("room_"):
+        code = re.sub(r"\D", "", args)[:6]
+        if len(code) == 6:
+            return await message.reply(box("🔐 <b>ТЕБЯ ПОЗВАЛИ В КОМНАТУ</b>",
+                                           f"Код: <code>{code}</code>",
+                                           f"Войти: <code>комната войти {code}</code>"))
     if args:
         try_referral(uid, args.replace("ref_", ""))
     t, k = await v_main(uid, message.chat.type == "private")
@@ -2874,6 +2910,8 @@ async def cmd_give_rbp(message: Message):
     target = resolve_target(message, p[2] if len(p) >= 3 else None)
     if not target or target["user_id"] == u["user_id"]:
         return await message.reply(f"{E('lock')} Получатель не найден.")
+    if n > MAX_TRANSFER:
+        return await message.reply(f"{E('lock')} Максимальный перевод — <b>{fmt(MAX_TRANSFER)}</b>.")
     if n < 1 or not spend(u["user_id"], n, "balance_point"):
         return await message.reply(f"{E('lock')} Недостаточно RBP.")
     x("UPDATE users SET balance_point=balance_point+? WHERE user_id=?", (n, target["user_id"]))
@@ -3070,18 +3108,23 @@ async def inline_checks(query: InlineQuery):
     u = get_user(uid)
     results = []
     if low.startswith(("чек", "check")):
-        parts = raw.split(maxsplit=1)
+        parts = raw.split(maxsplit=2)
         amount = parse_amount(parts[1], u["balance_coin"]) if len(parts) > 1 else 0
+        note = (parts[2].strip() if len(parts) > 2 else "")[:180]
+        tok = gen_code(6) if note else ""
+        if tok:
+            kv_set("inl:" + tok, note)
         if amount > 0:
             results.append(InlineQueryResultArticle(
                 id=f"check:{amount}",
-                title=f"Чек на {fmt(amount)} RCOIN",
-                description=f"Создать чек на {fmt(amount)} RCOIN · баланс {fmt(u['balance_coin'])}",
+                title=f"Чек на {fmt(amount)} RCOIN" + (" с текстом" if note else ""),
+                description=(note or f"Создать чек на {fmt(amount)} RCOIN") + f" · баланс {fmt(u['balance_coin'])}",
                 input_message_content=InputTextMessageContent(
                     message_text=f"{E('check')} <b>Чек на {fmt(amount)} RCOIN</b>\n"
-                                 "Нажми кнопку, чтобы создать чек.",
+                                 + (f"{esc(note)}\n" if note else "")
+                                 + "Нажми кнопку, чтобы создать чек.",
                     parse_mode=ParseMode.HTML),
-                reply_markup=kb([btn(f"Создать чек · {fmt(amount)}", f"ck:inl:{amount}",
+                reply_markup=kb([btn(f"Создать чек · {fmt(amount)}", f"ck:inl:{amount}:{tok}",
                                      icon="check", style="success")]),
             ))
         else:
@@ -3124,6 +3167,7 @@ async def cb_checks(cb: CallbackQuery, state: FSMContext):
     if act == "inl":
         try:
             amount = int(parts[2])
+            note = kv_get("inl:" + parts[3]) if len(parts) > 3 and parts[3] else ""
         except (IndexError, ValueError):
             return await ans(cb, "Неверная сумма", True)
         if amount <= 0:
@@ -3132,9 +3176,9 @@ async def cb_checks(cb: CallbackQuery, state: FSMContext):
             return await ans(cb, "Недостаточно RCOIN", True)
         cid = gen_code()
         x("INSERT INTO checks(check_id,owner_id,amount,max_activations,description,created_at) VALUES(?,?,?,?,?,?)",
-          (cid, uid, amount, 1, "Инлайн-чек", now()))
+          (cid, uid, amount, 1, (note or "Инлайн-чек")[:200], now()))
         text = box(f"{E('check')} <b>Чек создан!</b>", f"💰 {fmt(amount)} RCOIN",
-                   "Отправь ссылку тому, кому хочешь передать чек.")
+                   ("Сообщение: " + esc(note)) if note else "Отправь ссылку тому, кому хочешь передать чек.")
         markup = kb([btn(f"Забрать {fmt(amount)}", url=deeplink("check_" + cid), icon="check")])
         if getattr(cb, "inline_message_id", None):
             try:
@@ -3408,29 +3452,93 @@ async def cmd_buy_username(message: Message):
 
 
 # ============================ ДОНАТ (Telegram Stars) ============================
-async def cmd_donate_old(message: Message):
+DONATE_RATE = 10_000_000       # 1 ⭐ = 10 000 000 RCOIN
+DONATE_MIN_STARS = 10          # минимум 10 ⭐ = 100 000 000 RCOIN
+
+
+@dp.message(P("донат"))
+async def cmd_donate(message: Message):
     u = get_user(message.from_user.id)
-    await message.reply(f"{E('donate')} <b>Пополнение RBP</b>\n\n{E('diamond')} Твой баланс: {fmt(u['balance_point'])} RBP\n1 ⭐ Telegram Stars = 5 RBP",
-                        reply_markup=kb([btn("Пополнить звёздами", "don:stars", "star")]))
+    await message.reply(
+        f"{E('donate')} <b>ПОПОЛНЕНИЕ RCOIN</b>\n\n"
+        f"{E('balance')} Баланс: <b>{fmt(u['balance_coin'])}</b> RCOIN\n"
+        f"{E('treasury')} Архив: {fmt(u.get('archive_coin') or 0)}\n\n"
+        f"⭐ <b>10 звёзд</b> → 100 000 000 RCOIN\n"
+        f"⭐ <b>100 звёзд</b> → 1 000 000 000 RCOIN\n"
+        f"Минимальная покупка — {DONATE_MIN_STARS} ⭐. Курс: 1 ⭐ = {fmt(DONATE_RATE)} RCOIN.",
+        reply_markup=kb([btn("10 ⭐ → 100кк", "don:buy:10", "star")],
+                        [btn("100 ⭐ → 1ккк", "don:buy:100", "star")],
+                        [btn("Своя сумма", "don:stars", "donate")],
+                        [btn("RUBIN Premium · 100 ⭐", "don:premium", "diamond")]))
 
 
-async def cb_don_old(cb: CallbackQuery, state: FSMContext):
-    await ask(cb, state, "stars", "Сколько звёзд ⭐ потратить? (1 ⭐ = 5 RBP)")
+@dp.callback_query(F.data.startswith("don:buy:"))
+async def cb_don_preset(cb: CallbackQuery):
+    await _donate_invoice(cb.from_user.id, int(cb.data.split(":")[2]))
+    await ans(cb)
+
+
+@dp.callback_query(F.data == "don:premium")
+async def cb_don_premium(cb: CallbackQuery):
+    uid = cb.from_user.id
+    if is_premium(uid):
+        return await ans(cb, "Premium уже активен", True)
+    await stars_invoice(uid, 100, "RUBIN Premium на 30 дней",
+                        "Галочка «Лудоман», +50% к выигрышу и TGP-эмодзи", f"premium:{uid}")
+    await ans(cb, "Счёт выставлен")
+
+
+@dp.callback_query(F.data == "don:stars")
+async def cb_don(cb: CallbackQuery, state: FSMContext):
+    await ask(cb, state, "stars", f"Сколько звёзд ⭐ потратить? Минимум {DONATE_MIN_STARS}.")
+
+
+async def stars_invoice(uid: int, stars: int, title: str, description: str, payload: str) -> bool:
+    """Счёт Telegram Stars с произвольным payload (донат, премиум, сервер)."""
+    try:
+        await bot.send_invoice(chat_id=uid, title=title, description=description[:255],
+                               payload=payload, provider_token="", currency="XTR",
+                               prices=[LabeledPrice(label=title[:32], amount=int(stars))])
+        return True
+    except Exception as e:
+        log.warning("invoice %s: %s", payload, e)
+        try:
+            await bot.send_message(uid, "Не удалось создать счёт. Открой диалог с ботом и попробуй снова.")
+        except Exception:
+            pass
+        return False
+
+
+async def _donate_invoice(uid: int, stars: int) -> bool:
+    stars = int(stars)
+    coins = stars * DONATE_RATE
+    if stars < DONATE_MIN_STARS:
+        try:
+            await bot.send_message(uid, f"Минимальная покупка — {DONATE_MIN_STARS} ⭐.")
+        except Exception:
+            pass
+        return False
+    try:
+        await bot.send_invoice(chat_id=uid, title="Пополнение RCOIN",
+                               description=f"{fmt(coins)} RCOIN за {stars} ⭐",
+                               payload=f"donate:{coins}", provider_token="", currency="XTR",
+                               prices=[LabeledPrice(label=f"{fmt(coins)} RCOIN", amount=stars)])
+        return True
+    except Exception as e:
+        log.warning("invoice: %s", e)
+        try:
+            await bot.send_message(uid, "Не удалось создать счёт. Открой диалог с ботом и попробуй снова.")
+        except Exception:
+            pass
+        return False
 
 
 @flow("stars")
 async def f_stars(m: Message, state: FSMContext, d, txt):
-    if not txt.isdigit() or not 1 <= int(txt) <= 100000:
-        return await m.reply("Введи целое число звёзд.")
-    n = int(txt)
-    try:
-        await bot.send_invoice(chat_id=m.from_user.id, title="Пополнение RBP", description=f"{n * 5} RBP за {n} ⭐",
-                               payload=f"stars:{m.from_user.id}", provider_token="", currency="XTR",
-                               prices=[LabeledPrice(label=f"{n * 5} RBP", amount=n)])
+    if not txt.isdigit() or not DONATE_MIN_STARS <= int(txt) <= 100000:
+        return await m.reply(f"Введи целое число звёзд, не меньше {DONATE_MIN_STARS}.")
+    if await _donate_invoice(m.from_user.id, int(txt)):
         await state.clear()
-    except Exception as e:
-        log.warning("invoice: %s", e)
-        await m.reply("Не удалось создать счёт. Открой диалог с ботом и попробуй снова.")
 
 
 @dp.pre_checkout_query()
@@ -3438,14 +3546,41 @@ async def on_pre_checkout(q_: PreCheckoutQuery):
     await q_.answer(ok=True)
 
 
-async def on_paid_old(message: Message):
+@dp.message(F.successful_payment)
+async def on_paid(message: Message):
     sp = message.successful_payment
     if kv_get("pay:" + sp.telegram_payment_charge_id):
         return
     kv_set("pay:" + sp.telegram_payment_charge_id, "1")
-    rbp = sp.total_amount * 5
-    x("UPDATE users SET balance_point=balance_point+? WHERE user_id=?", (rbp, message.from_user.id))
-    await message.reply(box(f"{E('star')} <b>ПОПОЛНЕНИЕ УСПЕШНО!</b>", f"💎 +{fmt(rbp)} RBP", "Спасибо! 🎉"))
+    uid = message.from_user.id
+    payload = sp.invoice_payload or ""
+    if payload.startswith("premium:"):
+        set_premium(uid, 30 * 86400)
+        give_badge(uid, "blue")
+        u = get_user(uid)
+        if not u.get("profile_emoji"):
+            update_user(uid, profile_emoji="5801043446257833221", profile_emoji_fb="💎")
+        await message.reply(box("💎 <b>RUBIN PREMIUM АКТИВЕН</b>",
+                                "30 дней премиума и голубая галочка",
+                                "Ранг: <b>Лудоман</b> · +50% к выигрышу",
+                                "TGP-эмодзи добавлено в профиль"))
+        return
+    if payload.startswith("server:"):
+        try:
+            tier = int(payload.split(":")[1])
+        except (ValueError, IndexError):
+            tier = -1
+        sv = SERVER_BY_TIER.get(tier)
+        if sv:
+            grant_server(uid, tier)
+            await message.reply(box("🖥 <b>СЕРВЕР КУПЛЕН</b>", f"«{sv[1]}» на 30 дней",
+                                    f"Доход: {fmt(sv[3])} RCOIN/сутки", "Забери добычу в разделе «Майнинг»"))
+        return
+    coins = sp.total_amount * DONATE_RATE
+    over = add_coin(uid, coins)
+    note = f"\n🏛 Сверх лимита в Архив: {fmt(over)}" if over else ""
+    await message.reply(box(f"{E('star')} <b>ПОПОЛНЕНИЕ УСПЕШНО!</b>",
+                            f"💰 +{fmt(coins - over)} RCOIN{note}", "Спасибо! 🎉"))
 
 
 # ============================ ЗАРАБОТОК / РЕКЛАМА ============================
@@ -3752,7 +3887,8 @@ def gift_open(uid: int, gid: int) -> Optional[int]:
     if x("UPDATE gifts SET used=1, used_by=? WHERE id=? AND used=0 AND owner_id IN (0,?)", (uid, gid, uid))[0] != 1:
         return None
     name, emoji = random.choice(NFT_POOL[g["rarity"]] if g["rarity"] in NFT_POOL else NFT_POOL["common"])
-    return make_nft(uid, name, g["rarity"], emoji, "Открыто из коллекционного бокса")
+    # Пока NFT не улучшен — фото нет, только белая заглушка.
+    return make_nft(uid, name, g["rarity"], "blank", "Открыто из коллекционного бокса")
 
 
 def rollix_stock() -> int:
@@ -4014,6 +4150,10 @@ async def f_nft_ph(m: Message, state: FSMContext, d, txt):
 
 
 async def nft_transfer(uid: int, nid: int, target_token: str) -> str:
+    if (target_token or "").strip().lstrip("@").lower() in ("rubinarxiv", "rubin_archive"):
+        if not archive_take_nft(nid, uid):
+            return "NFT не найден, не твой или стоит на продаже."
+        return "✅ NFT отправлен в архив — его можно выиграть в апгрейдере."
     t = find_user(target_token)
     if not t:
         return "Игрок не найден (он должен запустить бота)."
@@ -4281,7 +4421,7 @@ async def cmd_antiludo(message: Message):
 
 # ============================ ЗИМНИЕ ИВЕНТЫ ============================
 STASH_CELLS, STASH_MIN, STASH_MAX = 3, 15_000, 1_000_000
-BOSS_HP, BOSS_HP_FINAL = 10_000_000, 100_000_000
+BOSS_HP, BOSS_HP_FINAL = 1_000_000, 10_000_000
 BOSS_REWARD, BOSS_REWARD_FINAL = 20_000_000, 100_000_000
 WHEEL = [(5000, 20), (15000, 15), (50000, 12), (150000, 10), (500000, 7), (1500000, 4), (5000000, 1.5), (25000000, 0.4), (100000000, 0.1)]
 QUESTS = [("games", "Сыграй 20 игр", 20, 250_000), ("wins", "Выиграй 10 раз", 10, 500_000),
@@ -5411,9 +5551,15 @@ MAILING_ACTIVE = False
 
 
 async def mailing(m: Message, text: str):
+    """Рассылка. Формат: «текст» или «текст | Подпись кнопки | https://ссылка»."""
     global MAILING_ACTIVE
     if MAILING_ACTIVE:
         return await m.reply("⏳ Рассылка уже идёт.")
+    markup = None
+    parts = [p.strip() for p in text.split("|")]
+    if len(parts) >= 3 and parts[2].startswith("http"):
+        text = parts[0]
+        markup = kb([btn(parts[1][:60] or "Открыть", url=parts[2])])
     MAILING_ACTIVE = True
     ids = [r["user_id"] for r in q("SELECT user_id FROM users")]
     ok = fail = 0
@@ -5421,9 +5567,9 @@ async def mailing(m: Message, text: str):
         for uid in ids:
             try:
                 try:
-                    await bot.send_message(uid, text[:4096], parse_mode=ParseMode.HTML)
+                    await bot.send_message(uid, text[:4096], parse_mode=ParseMode.HTML, reply_markup=markup)
                 except TelegramBadRequest:
-                    await bot.send_message(uid, text[:4096])
+                    await bot.send_message(uid, text[:4096], reply_markup=markup)
                 ok += 1
             except Exception:
                 fail += 1
@@ -5562,6 +5708,21 @@ async def distribute_check(kind: str) -> bool:
     return True
 
 
+async def db_backup_loop():
+    """Раз в 30 минут копия SQLite-базы; старые копии чистятся."""
+    while True:
+        await asyncio.sleep(1800)
+        try:
+            path = backup_db()
+            if path:
+                folder = Path(path).parent
+                files = sorted(folder.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+                for old in files[12:]:
+                    old.unlink(missing_ok=True)
+        except Exception:
+            log.exception("db_backup_loop")
+
+
 async def scheduler_loop():
     while True:
         try:
@@ -5665,7 +5826,7 @@ def w_bet(u, body, lo: int = 10) -> int:
         bet = int(float(body.get("bet", 0)))
     except (TypeError, ValueError):
         return 0
-    return bet if bet >= lo else 0
+    return bet if lo <= bet <= MAX_BET else 0
 
 
 def w_err(msg: str) -> dict:
@@ -5683,7 +5844,7 @@ def w_spend(u, bet: int, lo: int = 10) -> Optional[dict]:
 # ---------- арена: квадратная сцена со ставками ----------
 AR: Dict[str, Any] = {}
 AR_HIST: List[dict] = []
-AR_CD, AR_ROLL, AR_SHOW, AR_MAX = 15, 11, 14, 10
+AR_CD, AR_ROLL, AR_SHOW, AR_MAX = 15, 7, 9, 10
 AR_MIN_BET = 1
 ARENA_HEX = ["#ff8a3d", "#3d9bff", "#35d07f", "#b06bff", "#ffd23d", "#ff5c5c", "#2de2e6", "#c98bff", "#8dff6b", "#ff7ab8"]
 ARENA_BLACK = "#111111"
@@ -5845,8 +6006,6 @@ def a_arena_join(u, body):
         bet = 0
     if bet < AR_MIN_BET:
         return w_err(f"Минимальная ставка {fmt(AR_MIN_BET)} RCOIN")
-    if bet > MAX_BET:
-        return w_err(f"Максимальная ставка {fmt(MAX_BET)} RCOIN")
     if not spend(uid, bet):
         return w_err("Недостаточно RCOIN")
     name = re.sub(r"<[^>]+>", "", uname(u, False))
@@ -5888,8 +6047,6 @@ def a_arena_add(u, body):
         extra = 0
     if extra < AR_MIN_BET:
         return w_err(f"Минимальная добавка {fmt(AR_MIN_BET)} RCOIN")
-    if int(AR["players"][uid].get("bet", 0) or 0) + extra > MAX_BET:
-        return w_err(f"Максимальная ставка {fmt(MAX_BET)} RCOIN")
     if not spend(uid, extra):
         return w_err("Недостаточно RCOIN")
     AR["players"][uid]["bet"] = int(AR["players"][uid].get("bet", 0) or 0) + extra
@@ -5935,6 +6092,7 @@ def a_me(u, body):
             "wins": u["total_wins"] or stats["w"] or 0, "lost": int(stats["lost"] or 0),
             "rank": u["rank_title"] or "Новичок",
             "premium": is_premium(uid),
+            "is_admin": is_admin(uid),
             "badges": [{"key": b, "role": BADGES[b]["role"], "title": BADGES[b]["title"],
                         "emoji_id": BADGES[b].get("id") or ""} for b in profile_badges(uid) if b in BADGES],
             "nft_balance_url": f"/nft/{bid}" if bid else "",
@@ -6059,10 +6217,10 @@ def a_mines_cash(u, body):
 
 
 WEBAPP_HTML = r"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no"><title>RCOIN · Игровой центр</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no"><title>RUBIN · Игровой центр</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{color-scheme:dark;--bg:#080b10;--panel:#111720;--panel2:#151e29;--line:#263443;--text:#f4f7fb;--muted:#8d9baa;--blue:#2798ff;--green:#27c982;--red:#ff5268;--gold:#ffc45d;--radius:22px}
-*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(900px 500px at 100% -10%,#12304a 0%,transparent 60%),radial-gradient(700px 450px at -20% 40%,#172433 0%,transparent 60%),var(--bg);color:var(--text);min-height:100vh;padding:calc(14px + env(safe-area-inset-top)) 14px calc(100px + env(safe-area-inset-bottom));overflow-x:hidden}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.brand{font-size:19px;font-weight:950;letter-spacing:.08em}.brand span{color:var(--blue)}.wallet{background:#111b26;border:1px solid #263b50;padding:9px 13px;border-radius:999px;font-weight:850}.wallet small{color:var(--muted);font-size:10px;margin-right:6px}.hero{background:linear-gradient(135deg,#142638,#101720 65%);border:1px solid #2b4054;border-radius:28px;padding:20px;margin-bottom:14px;position:relative;overflow:hidden}.hero:after{content:"";position:absolute;width:190px;height:190px;right:-65px;top:-85px;border-radius:50%;background:#178cf2;filter:blur(75px);opacity:.28}.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#91a7bb;font-weight:800}.balance{font-size:clamp(27px,7vw,38px);font-weight:950;margin:7px 0 4px;letter-spacing:-1px}.balance small{font-size:15px;color:#8dbde7}.subline{color:var(--muted);font-size:12px}.copy{margin-top:12px;border:1px dashed #52677b;background:#0c141d;color:#c7d8e8;padding:9px 12px;border-radius:12px;width:100%;text-align:left;font:600 13px ui-monospace,monospace}.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin:12px 0}.stat{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:13px}.stat span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.stat b{font-size:16px}.panel{background:linear-gradient(155deg,#141d27,#0f151d);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin:12px 0;box-shadow:0 12px 32px #0003}.panel h2{font-size:16px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}.muted{color:var(--muted);font-size:12px;line-height:1.5}.nav{position:fixed;z-index:10;bottom:calc(10px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(720px,calc(100% - 24px));display:grid;grid-template-columns:repeat(5,1fr);gap:5px;padding:7px;background:#111923ed;border:1px solid #304153;border-radius:22px;backdrop-filter:blur(18px);box-shadow:0 12px 40px #0009}.nav button{border:0;background:transparent;color:#8191a1;padding:10px 3px;border-radius:15px;font-size:10px;font-weight:800}.nav button i{display:block;font-style:normal;font-size:18px;margin-bottom:4px}.nav button.active{background:#173a59;color:#eaf6ff;box-shadow:inset 0 0 0 1px #2d77b2}.page{display:none}.page.active{display:block;animation:fade .22s ease}@keyframes fade{from{opacity:.3;transform:translateY(5px)}to{opacity:1;transform:none}}.actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.action{border:1px solid #304255;background:#172431;color:#eaf4ff;padding:12px 6px;border-radius:15px;font-size:12px;font-weight:800}.action:active,.btn:active{transform:scale(.98)}.btn{width:100%;border:0;border-radius:15px;padding:14px 16px;font-weight:900;font-size:14px;color:white;background:linear-gradient(135deg,#1687ed,#2864d9);margin-top:9px}.btn.green{background:linear-gradient(135deg,#21c981,#149c72);color:#061b13}.btn.red{background:linear-gradient(135deg,#ff536b,#cf294a)}.btn.ghost{background:#1a2632;border:1px solid #35485b;color:#dce8f4}.row{display:flex;gap:9px;align-items:center}.row>*{min-width:0;flex:1}input{width:100%;padding:13px;border-radius:13px;border:1px solid #34495e;background:#0a1119;color:white;font-size:15px;font-weight:800;outline:none}input:focus{border-color:var(--blue)}.profile-head{display:flex;align-items:center;gap:13px;margin:4px 0 12px}.profile-photo{width:58px;height:58px;border-radius:50%;object-fit:cover;border:2px solid #4b91c9;background:#22384b}.profile-photo.fallback{display:grid;place-items:center;color:#fff;font-weight:900;font-size:22px}.color-picks{display:flex;gap:9px;flex-wrap:wrap;margin:10px 0}.color-pick{width:30px;height:30px;border-radius:50%;border:2px solid #ffffff33;cursor:pointer}.color-pick.selected{outline:2px solid white;outline-offset:3px}.snowman-score{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #253747}.players{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.player{display:flex;align-items:center;gap:9px;background:#0c141d;border:1px solid #263849;border-radius:14px;padding:10px}.avatar{width:35px;height:35px;border-radius:50%;display:grid;place-items:center;font-weight:900;color:#07111a;flex:none}.player b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.player small{display:block;color:var(--muted);font-size:10px;margin-top:2px}.arena{display:grid;place-items:center;min-height:250px;background:radial-gradient(circle at 50% 50%,#1b3448,#0b121b 70%);border:1px solid #2a4155;border-radius:22px;overflow:hidden}.arena canvas{width:min(100%,340px);height:auto}.status{text-align:center;font-size:18px;font-weight:900;margin:12px 0 4px}.progress{height:7px;background:#243241;border-radius:20px;overflow:hidden;margin-top:12px}.progress span{height:100%;display:block;width:0;background:linear-gradient(90deg,#259aff,#55d4ff);transition:width .25s}.chart{width:100%;height:190px;display:block;background:#0b131c;border-radius:16px}.price{font-size:28px;font-weight:950}.up{color:var(--green)}.down{color:var(--red)}.trade-buttons{display:grid;grid-template-columns:1fr 1fr;gap:9px}.trade-buttons .btn{margin-top:0}.gridcards{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}.tile{border:1px solid #2b3b4b;border-radius:17px;background:#101923;padding:14px;min-height:105px}.tile .ico{font-size:25px;margin-bottom:9px}.tile b{display:block;font-size:13px}.tile small{color:var(--muted);font-size:11px}.badge{display:inline-flex;align-items:center;padding:5px 9px;border:1px solid #31516a;background:#142b3e;border-radius:999px;color:#b9ddfa;font-size:10px;font-weight:900;margin:3px}.nft{border:1px solid #33475a;background:#0b131c;border-radius:16px;padding:10px}.nft img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;background:#182432}.nft b{display:block;font-size:12px;margin-top:8px}.toast{position:fixed;left:50%;bottom:95px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#1b2b3a;border:1px solid #42617b;padding:11px 16px;border-radius:13px;font-size:13px;font-weight:800;transition:.2s;z-index:20;max-width:90%;text-align:center}.toast.show{opacity:1;transform:translate(-50%,0)}.hide{display:none!important}@media(min-width:600px){.stats{grid-template-columns:repeat(4,1fr)}.gridcards{grid-template-columns:repeat(3,1fr)}}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(900px 500px at 100% -10%,#12304a 0%,transparent 60%),radial-gradient(700px 450px at -20% 40%,#172433 0%,transparent 60%),var(--bg);color:var(--text);min-height:100vh;padding:calc(14px + env(safe-area-inset-top)) 14px calc(100px + env(safe-area-inset-bottom));overflow-x:hidden}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.brand{font-size:19px;font-weight:950;letter-spacing:.08em}.brand span{color:var(--blue)}.wallet{background:#111b26;border:1px solid #263b50;padding:9px 13px;border-radius:999px;font-weight:850}.wallet small{color:var(--muted);font-size:10px;margin-right:6px}.hero{background:linear-gradient(135deg,#142638,#101720 65%);border:1px solid #2b4054;border-radius:28px;padding:20px;margin-bottom:14px;position:relative;overflow:hidden}.hero:after{content:"";position:absolute;width:190px;height:190px;right:-65px;top:-85px;border-radius:50%;background:#178cf2;filter:blur(75px);opacity:.28}.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#91a7bb;font-weight:800}.balance{font-size:clamp(27px,7vw,38px);font-weight:950;margin:7px 0 4px;letter-spacing:-1px}.balance small{font-size:15px;color:#8dbde7}.subline{color:var(--muted);font-size:12px}.copy{margin-top:12px;border:1px dashed #52677b;background:#0c141d;color:#c7d8e8;padding:9px 12px;border-radius:12px;width:100%;text-align:left;font:600 13px ui-monospace,monospace}.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin:12px 0}.stat{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:13px}.stat span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.stat b{font-size:16px}.panel{background:linear-gradient(155deg,#141d27,#0f151d);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin:12px 0;box-shadow:0 12px 32px #0003}.panel h2{font-size:16px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}.muted{color:var(--muted);font-size:12px;line-height:1.5}.nav{position:fixed;z-index:10;bottom:calc(10px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(720px,calc(100% - 24px));display:grid;grid-template-columns:repeat(6,1fr);gap:5px;padding:7px;background:#111923ed;border:1px solid #304153;border-radius:22px;backdrop-filter:blur(18px);box-shadow:0 12px 40px #0009}.nav button{border:0;background:transparent;color:#8191a1;padding:10px 3px;border-radius:15px;font-size:10px;font-weight:800}.nav button i{display:block;font-style:normal;font-size:18px;margin-bottom:4px}.nav button.active{background:#173a59;color:#eaf6ff;box-shadow:inset 0 0 0 1px #2d77b2}.page{display:none}.page.active{display:block;animation:fade .22s ease}@keyframes fade{from{opacity:.3;transform:translateY(5px)}to{opacity:1;transform:none}}.actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.action{border:1px solid #304255;background:#172431;color:#eaf4ff;padding:12px 6px;border-radius:15px;font-size:12px;font-weight:800}.action:active,.btn:active{transform:scale(.98)}.btn{width:100%;border:0;border-radius:15px;padding:14px 16px;font-weight:900;font-size:14px;color:white;background:linear-gradient(135deg,#1687ed,#2864d9);margin-top:9px}.btn.green{background:linear-gradient(135deg,#21c981,#149c72);color:#061b13}.btn.red{background:linear-gradient(135deg,#ff536b,#cf294a)}.btn.ghost{background:#1a2632;border:1px solid #35485b;color:#dce8f4}.row{display:flex;gap:9px;align-items:center}.row>*{min-width:0;flex:1}input{width:100%;padding:13px;border-radius:13px;border:1px solid #34495e;background:#0a1119;color:white;font-size:15px;font-weight:800;outline:none}input:focus{border-color:var(--blue)}.profile-head{display:flex;align-items:center;gap:13px;margin:4px 0 12px}.profile-photo{width:58px;height:58px;border-radius:50%;object-fit:cover;border:2px solid #4b91c9;background:#22384b}.profile-photo.fallback{display:grid;place-items:center;color:#fff;font-weight:900;font-size:22px}.color-picks{display:flex;gap:9px;flex-wrap:wrap;margin:10px 0}.color-pick{width:30px;height:30px;border-radius:50%;border:2px solid #ffffff33;cursor:pointer}.color-pick.selected{outline:2px solid white;outline-offset:3px}.snowman-score{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #253747}.players{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.player{display:flex;align-items:center;gap:9px;background:#0c141d;border:1px solid #263849;border-radius:14px;padding:10px}.avatar{width:35px;height:35px;border-radius:50%;display:grid;place-items:center;font-weight:900;color:#07111a;flex:none}.player b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.player small{display:block;color:var(--muted);font-size:10px;margin-top:2px}.arena{display:grid;place-items:center;min-height:250px;background:radial-gradient(circle at 50% 50%,#1b3448,#0b121b 70%);border:1px solid #2a4155;border-radius:22px;overflow:hidden}.arena canvas{width:min(100%,340px);height:auto}.status{text-align:center;font-size:18px;font-weight:900;margin:12px 0 4px}.progress{height:7px;background:#243241;border-radius:20px;overflow:hidden;margin-top:12px}.progress span{height:100%;display:block;width:0;background:linear-gradient(90deg,#259aff,#55d4ff);transition:width .25s}.chart{width:100%;height:190px;display:block;background:#0b131c;border-radius:16px}.price{font-size:28px;font-weight:950}.up{color:var(--green)}.down{color:var(--red)}.trade-buttons{display:grid;grid-template-columns:1fr 1fr;gap:9px}.trade-buttons .btn{margin-top:0}.gridcards{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}.tile{border:1px solid #2b3b4b;border-radius:17px;background:#101923;padding:14px;min-height:105px}.tile .ico{font-size:25px;margin-bottom:9px}.tile b{display:block;font-size:13px}.tile small{color:var(--muted);font-size:11px}.badge{display:inline-flex;align-items:center;padding:5px 9px;border:1px solid #31516a;background:#142b3e;border-radius:999px;color:#b9ddfa;font-size:10px;font-weight:900;margin:3px}.nft{border:1px solid #33475a;background:#0b131c;border-radius:16px;padding:10px}.nft img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;background:#182432}.nft b{display:block;font-size:12px;margin-top:8px}.toast{position:fixed;left:50%;bottom:95px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#1b2b3a;border:1px solid #42617b;padding:11px 16px;border-radius:13px;font-size:13px;font-weight:800;transition:.2s;z-index:20;max-width:90%;text-align:center}.toast.show{opacity:1;transform:translate(-50%,0)}.hide{display:none!important}@media(min-width:600px){.stats{grid-template-columns:repeat(4,1fr)}.gridcards{grid-template-columns:repeat(3,1fr)}}
 
 /* RUBIN custom icon system: hand-drawn inline SVG, no emoji-font dependence */
 .glyph{width:25px;height:25px;display:inline-grid;place-items:center;flex:0 0 auto;vertical-align:middle;color:var(--glyph,#8fc8ff)}
@@ -6159,49 +6317,161 @@ body.wall-banner{background-image:linear-gradient(#000000a8,#000000d8),url('/ban
 body.wall-plain{background:var(--bg)}
 
 
-.nav{grid-template-columns:repeat(7,1fr)!important;gap:2px!important}
-.nav button{font-size:9px!important;padding:8px 1px!important}
-.mine-disc{width:170px;height:170px;border-radius:50%;display:grid;place-items:center;position:relative;margin:8px auto 12px;background:conic-gradient(from 0deg,#2a2a31,#8d8794,#f2eef4,#6d6877,#2a2a31);box-shadow:inset 0 0 26px #000a,0 0 46px #ff2a5544,0 14px 34px #0008;animation:rspin 6s linear infinite}
-.mine-disc:after{content:"";position:absolute;inset:13px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#1c1c22,#09090b 72%);box-shadow:inset 0 0 18px #000}
-.mine-disc .ruby{position:relative;z-index:2;width:64px;height:64px;border-radius:14px;background:linear-gradient(150deg,#ff9fb0,#ff2d55 45%,#8e0d2b);box-shadow:0 0 28px #ff2d55aa,inset 0 2px 6px #fff7,inset 0 -4px 10px #4a001188;transform:rotate(45deg)}
-@keyframes rspin{to{transform:rotate(360deg)}}
-.tc-amount{text-align:center;font-size:clamp(28px,8.4vw,42px);font-weight:950;margin-top:10px;line-height:1.1;letter-spacing:-1.2px}
+/* ---- RUBIN 2026: стекло, майнинг, апгрейдер ---- */
+.btn,.action,.tile{backdrop-filter:blur(18px) saturate(1.25);-webkit-backdrop-filter:blur(18px) saturate(1.25)}
+.btn{background:linear-gradient(160deg,#2f9cf0e6,#155bb8e6);border:1px solid #ffffff33;box-shadow:inset 0 1px 0 #ffffff4d,inset 0 -1px 0 #00000033,0 10px 26px #0006}
+.btn.green{background:linear-gradient(160deg,#2ed695e6,#0f8a63e6)}
+.btn.red{background:linear-gradient(160deg,#ff6b80e6,#b82440e6)}
+.btn.ghost{background:linear-gradient(160deg,#ffffff16,#ffffff08);border-color:#ffffff26}
+.mine-disc{width:168px;height:168px;border-radius:50%;display:grid;place-items:center;position:relative;margin:6px auto 10px;background:conic-gradient(from 0deg,#123,#2a4d6e,#123,#2a4d6e,#123);box-shadow:inset 0 0 26px #000a,0 14px 34px #0008;animation:spin 6s linear infinite}
+.mine-disc:after{content:"";position:absolute;inset:12px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#1c2c3d,#0a1119 70%);box-shadow:inset 0 0 18px #000}
+.mine-disc .ruby{position:relative;z-index:2;width:62px;height:62px;border-radius:14px;background:linear-gradient(150deg,#ff8fa3,#ff2d55 45%,#8e0d2b);box-shadow:0 0 26px #ff2d5599,inset 0 2px 6px #fff6,inset 0 -4px 10px #4a001188;transform:rotate(45deg)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.upg-wheel{width:210px;height:210px;border-radius:50%;position:relative;display:grid;place-items:center;margin:14px auto 6px;background:conic-gradient(#35d07f 0 calc(var(--ch,30) * 1%),#26313c 0 100%);box-shadow:inset 0 0 0 10px #0c1219,inset 0 0 0 12px #31465a,0 16px 40px #0008;transition:transform 3.2s cubic-bezier(.12,.72,.1,1)}
+.upg-wheel.spin{transform:none}
+.upg-wheel:after{content:"";position:absolute;inset:34px;border-radius:50%;background:radial-gradient(circle at 40% 30%,#16212c,#0a1017 75%);box-shadow:inset 0 0 18px #000}
+.upg-chance{position:relative;z-index:2;font-size:34px;font-weight:950;letter-spacing:-1px;color:#eaf6ff}
+.upg-pointer{position:absolute;top:-12px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:13px solid transparent;border-right:13px solid transparent;border-top:22px solid #ffd23d;z-index:3;filter:drop-shadow(0 4px 8px #000a)}
+.upg-pick .nft{cursor:pointer}
+.upg-pick .nft.on{border-color:#35d07f;box-shadow:0 0 0 1px #35d07f66,0 10px 24px #0006}
+.confetti{position:fixed;inset:0;pointer-events:none;z-index:60;overflow:hidden}
+.confetti i{position:absolute;width:9px;height:15px;border-radius:2px;animation:fall linear forwards}
+@keyframes fall{to{transform:translateY(112vh) rotate(720deg);opacity:.9}}
+.arena-square.finish{transform:scale(1.28);transition:transform 1.2s cubic-bezier(.18,.72,.15,1);box-shadow:0 0 0 2px #ffd23d55,0 24px 70px #000}
+.arena-win{position:absolute;left:50%;top:7%;transform:translate(-50%,-8px);z-index:9;padding:9px 18px;border-radius:999px;background:#0b0b0dcc;border:1px solid #ffd23d77;color:#ffe9a8;font-weight:900;font-size:13px;opacity:0;transition:.35s;white-space:nowrap;backdrop-filter:blur(12px)}
+.arena-win.show{opacity:1;transform:translate(-50%,0)}
+
+/* ================= RUBIN SKIN: тёмный интерфейс как в TonCry ================= */
+body:has(#mining.active) .hero,body:has(#mining.active) .stats,
+body:has(#archive.active) .hero,body:has(#archive.active) .stats{display:none}
+body{background:#000!important;color:#f5f5f7;padding-bottom:calc(104px + env(safe-area-inset-bottom))}
+body:before{content:"";position:fixed;inset:0;z-index:-1;background:radial-gradient(600px 320px at 50% -80px,#1a1030 0%,#000 70%)}
+.hero,.panel,.stat,.tile,.nft{background:#141416!important;border:1px solid #212126!important;box-shadow:none!important;border-radius:26px!important}
+.hero:after{display:none}
+.hero-art{opacity:.18}
+.eyebrow{color:#8a8a92;letter-spacing:.02em;text-transform:none;font-size:13px;font-weight:600}
+.balance,.arena-bank,.price,.tc-amount{letter-spacing:-1.4px}
+.subline,.muted{color:#8a8a92}
+.stats{gap:10px}
+.stat span{color:#8a8a92}
+body{--acc1:#4a94ff;--acc2:#1d54c9;--acc3:#2f7cf6}
+body.acc-ruby{--acc1:#ff6b8a;--acc2:#b3133b;--acc3:#e0284f}
+body.acc-ice{--acc1:#7fdcff;--acc2:#1f6fa8;--acc3:#3fa9e0}
+body.acc-emerald{--acc1:#4ce39a;--acc2:#12855c;--acc3:#1fb477}
+body.acc-gold{--acc1:#ffd76a;--acc2:#b97d10;--acc3:#e0a52c}
+.btn{border-radius:20px!important;background:linear-gradient(165deg,var(--acc1) 0%,var(--acc3) 45%,var(--acc2) 100%)!important;border:1px solid #ffffff40!important;box-shadow:inset 0 1px 0 #ffffff66,inset 0 -1px 0 #001b4d66,0 10px 26px #1a4fc040!important;backdrop-filter:blur(20px) saturate(1.45);-webkit-backdrop-filter:blur(20px) saturate(1.45);color:#fff;font-weight:800;letter-spacing:.01em}
+.btn.green{background:linear-gradient(165deg,var(--acc1) 0%,var(--acc3) 45%,var(--acc2) 100%)!important;color:#fff!important}
+.btn.red{background:linear-gradient(165deg,#ff7d8c 0%,#e5484d 55%,#a41f2b 100%)!important}
+.btn.ghost{background:linear-gradient(165deg,#26262c 0%,#191a1f 100%)!important;color:#e6e6ec!important;border:1px solid #ffffff1a!important;box-shadow:inset 0 1px 0 #ffffff1f,0 8px 20px #00000040!important}
+.btn:active,.action:active,.tc-btn:active{transform:scale(.975)}
+.action{background:linear-gradient(165deg,#26262c,#191a1f)!important;border:1px solid #ffffff17!important;border-radius:18px!important;color:#e8e8ee;box-shadow:inset 0 1px 0 #ffffff1a;min-width:0;overflow:hidden;white-space:nowrap;font-size:11.5px;padding:12px 4px;gap:6px}
+.hero .actions{gap:7px}
+.action .glyph{width:17px;height:17px}
+input{background:#0f0f12!important;border:1px solid #2b2b31!important;border-radius:16px!important}
+.chip{background:#1c1c20;border:1px solid #2b2b31;border-radius:14px}
+.chip.on{background:#2f7cf6;border-color:#2f7cf6;color:#fff}
+.nav{background:#0b0b0dee!important;border:1px solid #2a2a30!important;border-radius:32px!important;padding:10px 8px!important;box-shadow:0 18px 50px #000000b0,inset 0 1px 0 #ffffff12!important;backdrop-filter:blur(26px) saturate(1.4)!important;-webkit-backdrop-filter:blur(26px) saturate(1.4)!important}
+.nav button{color:#71717a;font-size:9.5px;font-weight:700;border-radius:22px;padding:8px 2px}
+.nav button i{width:23px;height:23px;margin-bottom:4px}
+.nav button.active{background:linear-gradient(165deg,color-mix(in srgb,var(--acc3) 26%,#0d0d0f),#141a26)!important;color:var(--acc1)!important;box-shadow:inset 0 0 0 1px #3f6fbf55,0 6px 16px #00000055!important}
+.nav button.active .glyph{filter:drop-shadow(0 0 8px #6aa8ff88)}
+.toast{background:#1b1b1f;border:1px solid #2b2b31;border-radius:16px}
+.gridcards .tile{background:#141416!important}
+.tile .ico{background:#1c1c20;border:0;color:#6aa8ff}
+.gift-card img,.nft img{border-radius:18px}
+/* ---- майнинг ---- */
+.tc-card{background:#141416;border:1px solid #212126;border-radius:28px;padding:18px;margin-bottom:12px}
+.tc-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.tc-head-r{display:flex;align-items:center;gap:8px}
+.tc-label{color:#9a9aa3;font-size:13px;font-weight:600}
+.tc-bal{font-size:30px;font-weight:900;letter-spacing:-1.2px;display:flex;gap:7px;align-items:baseline;margin-top:2px}
+.tc-bal span{font-size:14px;color:#9a9aa3;font-weight:700}
+.tc-chip{background:#232327;color:#d4d4da;border-radius:999px;padding:9px 15px;font-size:12px;font-weight:700;white-space:nowrap}
+.tc-help{width:36px;height:36px;border-radius:50%;background:#232327;color:#9a9aa3;display:grid;place-items:center;font-weight:800}
+.tc-actions{display:grid;grid-template-columns:1.1fr 1fr 1fr;gap:10px;margin-top:16px}
+.tc-btn{border:0;border-radius:999px;padding:13px 8px;background:#232327;color:#4a9bff;font-weight:800;font-size:13.5px;cursor:pointer;white-space:nowrap}
+.tc-btn.primary{background:linear-gradient(165deg,var(--acc1),var(--acc2));color:#fff}
+.tc-btn.dark{background:#16233b;color:#6aa8ff}
+.tc-turbine-wrap{position:relative;display:grid;place-items:center;margin:18px 0 2px}
+.turbine{width:min(86vw,332px);height:auto;filter:drop-shadow(0 34px 90px #6b3de877)}
+.tc-btn.glass{background:linear-gradient(165deg,#ffffff1a,#ffffff08)!important;border:1px solid #ffffff1f!important;color:#5aa2ff!important;box-shadow:inset 0 1px 0 #ffffff26,0 8px 20px #00000040!important;backdrop-filter:blur(18px) saturate(1.4);-webkit-backdrop-filter:blur(18px) saturate(1.4)}
+.fan{animation:fanspin 9s linear infinite;transform-origin:110px 110px}
+@keyframes fanspin{to{transform:rotate(360deg)}}
+.tc-dot{position:absolute;top:2px;left:50%;transform:translateX(-50%);width:11px;height:11px;border-radius:50%;background:#e46bff;box-shadow:0 0 18px #e46bff;z-index:3}
+.tc-amount{text-align:center;font-size:clamp(28px,8.4vw,42px);font-weight:950;margin-top:12px;line-height:1.1}
 .tc-amount span{font-size:14px;color:#8a8a92;letter-spacing:0;font-weight:700}
-.tc-meta{text-align:center;color:#8a8a92;font-size:13px;margin:6px 0 12px}
-.srv{display:flex;align-items:center;gap:12px;background:#10161e;border:1px solid #263443;border-radius:18px;padding:12px;margin-bottom:9px}
-.srv b{display:block;font-size:13px}.srv small{color:#8d9baa;font-size:11px}
-.srv .srv-btns{margin-left:auto;display:flex;gap:6px}
-.srv button{border:0;border-radius:999px;background:#2f7cf6;color:#fff;font-weight:800;padding:9px 12px;font-size:12px;cursor:pointer}
-.srv button.star{background:#6b4bd8}
-.srv.owned{border-color:#2b6e4a}
-.upg-wheel{width:212px;height:212px;border-radius:50%;position:relative;display:grid;place-items:center;margin:20px auto 14px;background:conic-gradient(#35d07f 0 calc(var(--ch,0) * 1%),#232327 0 100%);box-shadow:inset 0 0 0 10px #0b0b0d,inset 0 0 0 12px #2e2e35,0 18px 44px #000a}
+.tc-meta{text-align:center;color:#8a8a92;font-size:13px;margin-top:7px}
+.tc-meta2{text-align:center;color:#6f6f78;font-size:12px;margin-top:4px}
+.tc-two{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:18px 0 2px}
+.tc-two .tc-btn{padding:16px 8px;font-size:15px;display:flex;align-items:center;justify-content:center;gap:7px}
+.srv{display:flex;align-items:center;gap:12px;background:#141416;border:1px solid #212126;border-radius:20px;padding:13px;margin-bottom:9px}
+.srv .srv-ic{width:42px;height:42px;border-radius:14px;background:#1d1d23;display:grid;place-items:center;color:#8b5cf6;flex:none}
+.srv b{display:block;font-size:13px}
+.srv small{color:#8a8a92;font-size:11px}
+.srv .srv-buy{margin-left:auto;border:0;border-radius:999px;background:#2f7cf6;color:#fff;font-weight:800;padding:10px 14px;font-size:12px;cursor:pointer}
+.srv.owned{border-color:#2b4a6e}
+/* ---- апгрейдер ---- */
+.upg-wheel{width:212px;height:212px;border-radius:50%;position:relative;display:grid;place-items:center;margin:16px auto 12px;background:conic-gradient(#35d07f 0 calc(var(--ch,0) * 1%),#232327 0 100%);box-shadow:inset 0 0 0 10px #0b0b0d,inset 0 0 0 12px #2e2e35,0 18px 44px #000a;transition:transform 3.2s cubic-bezier(.12,.72,.1,1)}
+.upg-wheel.spin{transform:none}
 .upg-wheel:after{content:"";position:absolute;inset:34px;border-radius:50%;background:radial-gradient(circle at 40% 30%,#17171b,#0a0a0c 75%);box-shadow:inset 0 0 18px #000}
 .upg-chance{position:relative;z-index:2;font-size:34px;font-weight:950;letter-spacing:-1px;color:#fff}
-.upg-needle{position:absolute;left:50%;top:-18px;width:6px;height:142px;margin-left:-3px;transform-origin:50% 124px;transform:rotate(0deg);z-index:4;border-radius:6px;background:linear-gradient(180deg,#ffe083,#ffab2e 30%,transparent 30%);filter:drop-shadow(0 0 8px #ffab2eaa)}
-.upg-needle:before{content:"";position:absolute;top:0;left:50%;margin-left:-10px;border-left:10px solid transparent;border-right:10px solid transparent;border-top:20px solid #ffe083}
+.upg-pointer{position:absolute;top:-12px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:13px solid transparent;border-right:13px solid transparent;border-top:22px solid #ffd23d;z-index:3;filter:drop-shadow(0 4px 8px #000a)}
 .upg-stake{text-align:center;color:#8a8a92;font-size:12px;min-height:18px;margin-bottom:10px}
-.upg-pick .nft{cursor:pointer;position:relative}
-.upg-pick .nft.on{border-color:#35d07f!important;box-shadow:0 0 0 1px #35d07f88}
+.upg-pick .nft{cursor:pointer;position:relative;background:#0f0f12!important}
+.upg-pick .nft.on{border-color:#35d07f!important;box-shadow:0 0 0 1px #35d07f88!important}
 .upg-pick .nft.on:after{content:"✓";position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:50%;background:#35d07f;color:#08150f;font-weight:900;display:grid;place-items:center;font-size:13px}
 .arch-price{color:#8a8a92;font-size:10px;margin-top:3px}
-.confetti{position:fixed;inset:0;pointer-events:none;z-index:60;overflow:hidden}
-.confetti i{position:absolute;width:9px;height:15px;border-radius:2px;animation:cfall linear forwards}
-@keyframes cfall{to{transform:translateY(112vh) rotate(720deg);opacity:.9}}
-.arena-square{transition:transform 2.4s cubic-bezier(.16,.7,.12,1)}
-.arena-square.finish{transform:scale(1.55);z-index:5;box-shadow:0 0 0 2px #ffd23d55,0 24px 70px #000}
+#coinMultRow .chip{min-width:0;flex:1;padding:10px 4px}
+.upg-tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;background:#0f0f12;border:1px solid #232327;border-radius:999px;padding:5px;margin:12px 0}
+.upg-tab{border:0;border-radius:999px;padding:11px;background:transparent;color:#8a8a92;font-weight:800;font-size:14px}
+.upg-tab.on{background:linear-gradient(165deg,var(--acc1),var(--acc3) 45%,var(--acc2));color:#fff;box-shadow:inset 0 1px 0 #ffffff40}
+.upg-needle{position:absolute;left:50%;top:4%;width:6px;height:46%;margin-left:-3px;transform-origin:50% 100%;transform:rotate(0deg);z-index:4;border-radius:6px;background:linear-gradient(180deg,#ffe083,#ffab2e);box-shadow:0 0 14px #ffab2eaa}
+.upg-needle:after{content:"";position:absolute;top:-15px;left:50%;margin-left:-9px;border-left:9px solid transparent;border-right:9px solid transparent;border-bottom:17px solid #ffe083;filter:drop-shadow(0 0 6px #ffab2e)}
 </style></head><body><main class="wrap">
-<header class="top"><div class="brand">RCOIN<span>·</span>BOT</div><div class="wallet"><small>RCOIN</small><span id="topBal">—</span></div></header>
-<section class="hero"><img class="hero-art" id="heroArt" src="/banner" alt="" onerror="this.remove()"><div class="eyebrow">ТВОЙ ИГРОВОЙ СЧЁТ</div><div class="balance" id="heroBal">— <small>RCOIN</small></div><div class="subline">Нажми на моно-строку ниже, чтобы скопировать баланс</div><button class="copy" id="copyBal" onclick="copyBalance()">·····················</button><div class="actions"><button class="action" onclick="sendBotAction('bonus')">🎁 Бонус</button><button class="action" onclick="sendBotAction('daily')">📅 Ежедневный</button><button class="action" onclick="go('career')">💼 Заработать</button></div></section>
+<header class="top"><div class="brand">RUBIN<span>·</span>BOT</div><div class="wallet"><small>RCOIN</small><span id="topBal">—</span></div></header>
+<section class="hero"><img class="hero-art" id="heroArt" src="/banner" alt="" onerror="this.remove()"><div class="eyebrow">ТВОЙ ИГРОВОЙ СЧЁТ</div><div class="balance" id="heroBal">— <small>RCOIN</small></div><div class="subline">Нажми на моно-строку ниже, чтобы скопировать баланс</div><button class="copy" id="copyBal" onclick="copyBalance()">·····················</button><div class="actions"><button class="action" onclick="sendBotAction('bonus')">🎁 Бонус</button><button class="action" onclick="sendBotAction('daily')">📅 Дейлик</button><button class="action" onclick="go('career')">💼 Работа</button></div></section>
 <div class="stats"><div class="stat"><span>🎮 Сыграно игр</span><b id="games">—</b></div><div class="stat"><span>🏅 Ранг</span><b id="rank">—</b></div><div class="stat"><span>⚔️ Победы в дуэлях</span><b id="wins">—</b></div><div class="stat"><span>📉 Проиграно RCOIN</span><b id="lost">—</b></div></div>
-<section id="home" class="page active"><div class="panel"><div class="profile-head"><img id="profilePhoto" class="profile-photo" src="" alt="Аватар"><div><h2 id="playerName">Игрок</h2><div class="muted" id="profileRank">Профиль RCOIN</div></div></div><div id="badges"></div><p class="muted" style="margin-top:10px">Твои достижения и статус отображаются здесь. Управление галочками — команда «Галочки» в боте.</p></div><div class="panel"><h2>Тема и обои</h2><div class="theme-row" id="themeRow"><button class="theme-chip" data-theme="dark" onclick="setTheme('dark')">Тёмная</button><button class="theme-chip" data-theme="blue" onclick="setTheme('blue')">Синяя</button><button class="theme-chip" data-theme="purple" onclick="setTheme('purple')">Фиолет</button><button class="theme-chip" data-theme="green" onclick="setTheme('green')">Зелёная</button></div><div class="bet-row" id="wallRow"><button class="chip" data-wall="gradient" onclick="setWall('gradient')">Градиент</button><button class="chip" data-wall="banner" onclick="setWall('banner')">Баннер</button><button class="chip" data-wall="plain" onclick="setWall('plain')">Минимум</button></div></div><div class="gridcards"><div class="tile" onclick="go('arena')"><div class="ico">🎯</div><b>Арена</b><small>Соревнование до 10 игроков</small></div><div class="tile" onclick="go('career')"><div class="ico">💻</div><b>IT-карьера</b><small>Задания и опыт</small></div><div class="tile" onclick="go('trade')"><div class="ico">📈</div><b>Трейдинг</b><small>Курс и портфель</small></div><div class="tile" onclick="go('events')"><div class="ico">🎄</div><b>Ивенты</b><small>Сезонные активности</small></div><div class="tile" onclick="go('nft')"><div class="ico">🖼️</div><b>NFT-коллекция</b><small>Твои цифровые предметы</small></div><div class="tile" onclick="toast('Команды: /зп · /работа · /трейдинг · Галочки')"><div class="ico">📚</div><b>Команды</b><small>Все возможности бота</small></div></div></section>
-<section id="arena" class="page"><div class="panel arena-panel"><div class="arena-top"><div><div class="eyebrow">БАНК</div><div class="arena-bank" id="arenaBank">0 <small>RCOIN</small></div></div><div class="arena-count"><b id="arenaCount">0/10</b>игроков</div></div><div class="arena-square" id="arenaSquare"><div class="arena-sectors" id="arenaSectors"></div><div class="arena-players" id="arenaPlayersBox"></div><div class="arena-center" id="arenaCenter">ARENA</div><div class="arena-ball" id="arenaBall"></div></div><div class="status" id="arenaStatus">Подключаем арену…</div><p class="muted" id="arenaHint" style="text-align:center">Любая ставка от 1 RCOIN. Победитель забирает банк минус 10%.</p><div class="betbar"><span class="muted">Твоя ставка</span><span class="muted" id="arenaYourBet">—</span></div><input id="arenaBetInput" class="bet-input" type="number" min="1" step="1" value="10000" inputmode="numeric" oninput="setArenaBet(Number(this.value))"><div class="bet-row" id="betRow"><button class="chip on" data-bet="10000" onclick="setArenaBet(10000,1)">10к</button><button class="chip" data-bet="100000" onclick="setArenaBet(100000,1)">100к</button><button class="chip" data-bet="1000000" onclick="setArenaBet(1000000,1)">1кк</button></div><div class="betbar"><span class="muted">Твой цвет</span><span class="muted" id="arenaYourColor">—</span></div><div class="color-picks" id="colorPicks"><button class="color-pick selected" data-color="#ff8a3d" style="--c:#ff8a3d" onclick="setArenaColor('#ff8a3d')"></button><button class="color-pick" data-color="#3d9bff" style="--c:#3d9bff" onclick="setArenaColor('#3d9bff')"></button><button class="color-pick" data-color="#35d07f" style="--c:#35d07f" onclick="setArenaColor('#35d07f')"></button><button class="color-pick" data-color="#b06bff" style="--c:#b06bff" onclick="setArenaColor('#b06bff')"></button><button class="color-pick" data-color="#ffd23d" style="--c:#ffd23d" onclick="setArenaColor('#ffd23d')"></button><button class="color-pick" data-color="#ff5c5c" style="--c:#ff5c5c" onclick="setArenaColor('#ff5c5c')"></button><button class="color-pick" data-color="#2de2e6" style="--c:#2de2e6" onclick="setArenaColor('#2de2e6')"></button><button class="color-pick" data-color="#c98bff" style="--c:#c98bff" onclick="setArenaColor('#c98bff')"></button><button class="color-pick" data-color="#8dff6b" style="--c:#8dff6b" onclick="setArenaColor('#8dff6b')"></button><button class="color-pick" data-color="#ff7ab8" style="--c:#ff7ab8" onclick="setArenaColor('#ff7ab8')"></button><button class="color-pick" data-color="#111111" style="--c:#111111" title="Premium" onclick="setArenaColor('#111111')"></button></div><button class="btn" id="joinBtn" onclick="arenaJoin()">Войти в лобби</button><button class="btn ghost hide" id="leaveBtn" onclick="arenaLeave()">Покинуть лобби</button><button class="btn green hide" id="addBetBtn" onclick="arenaAdd()">Добавить к ставке</button></div><div class="panel"><h2>Участники</h2><div class="players" id="players"><p class="muted">Пока никого нет.</p></div></div><div class="panel"><h2>Последние победители</h2><div id="arenaHistory" class="muted">Пока нет завершённых раундов.</div></div><div class="panel"><h2>Подарки в арене</h2><p class="muted">Выбери NFT-фото для аватара в арене.</p><div class="gift-grid" id="arenaGifts"><p class="muted">Загрузка…</p></div><button class="btn ghost" onclick="setArenaGift('')">Сбросить аватар</button></div><div class="panel"><h2>Как это работает</h2><p class="muted">Собери до 10 игроков. Когда в лобби два и более участника, начинается отсчёт 15 секунд. Шарик катится по полю и останавливается на победителе: шанс пропорционален ставке. Победитель забирает банк, 10% уходит в казну. Любая ставка от 1 RCOIN.</p></div></section>
+<section id="home" class="page active"><div class="panel"><div class="profile-head"><img id="profilePhoto" class="profile-photo" src="" alt="Аватар"><div><h2 id="playerName">Игрок</h2><div class="muted" id="profileRank">Профиль RCOIN</div></div></div><div id="badges"></div><p class="muted" style="margin-top:10px">Твои достижения и статус отображаются здесь. Управление галочками — команда «Галочки» в боте.</p></div><div class="panel"><h2>Тема и обои</h2><div class="theme-row" id="themeRow"><button class="theme-chip" data-theme="dark" onclick="setTheme('dark')">Тёмная</button><button class="theme-chip" data-theme="blue" onclick="setTheme('blue')">Синяя</button><button class="theme-chip" data-theme="purple" onclick="setTheme('purple')">Фиолет</button><button class="theme-chip" data-theme="green" onclick="setTheme('green')">Зелёная</button></div><div class="bet-row" id="wallRow"><button class="chip" data-wall="gradient" onclick="setWall('gradient')">Градиент</button><button class="chip" data-wall="banner" onclick="setWall('banner')">Баннер</button><button class="chip" data-wall="plain" onclick="setWall('plain')">Минимум</button></div><div class="eyebrow" style="margin-top:14px">Акцент</div><div class="bet-row" id="accRow"><button class="chip" data-acc="" onclick="setAccent('')">Сапфир</button><button class="chip" data-acc="ruby" onclick="setAccent('ruby')">Рубин</button><button class="chip" data-acc="ice" onclick="setAccent('ice')">Лёд</button><button class="chip" data-acc="emerald" onclick="setAccent('emerald')">Изумруд</button><button class="chip" data-acc="gold" onclick="setAccent('gold')">Золото</button></div></div><div class="gridcards"><div class="tile" onclick="go('arena')"><div class="ico">🎯</div><b>Арена</b><small>Соревнование до 10 игроков</small></div><div class="tile" onclick="go('career')"><div class="ico">💻</div><b>IT-карьера</b><small>Задания и опыт</small></div><div class="tile" onclick="go('trade')"><div class="ico">📈</div><b>Трейдинг</b><small>Курс и портфель</small></div><div class="tile" onclick="go('events')"><div class="ico">🎄</div><b>Ивенты</b><small>Сезонные активности</small></div><div class="tile" onclick="go('nft')"><div class="ico">🖼️</div><b>NFT-коллекция</b><small>Твои цифровые предметы</small></div><div class="tile" onclick="go('archive')"><div class="ico">◍</div><b>Апгрейдер</b><small>Круг шанса и NFT-архив</small></div><div class="tile" onclick="go('mining')"><div class="ico">⛏</div><b>Майнинг</b><small>Серверы и пассивный доход</small></div><div class="tile" onclick="toast('Команды: /зп · /работа · /трейдинг · Галочки')"><div class="ico">📚</div><b>Команды</b><small>Все возможности бота</small></div></div></section>
+<section id="arena" class="page"><div class="panel arena-panel"><div class="arena-top"><div><div class="eyebrow">БАНК</div><div class="arena-bank" id="arenaBank">0 <small>RCOIN</small></div></div><div class="arena-count"><b id="arenaCount">0/10</b>игроков</div></div><div class="arena-square" id="arenaSquare"><div class="arena-sectors" id="arenaSectors"></div><div class="arena-players" id="arenaPlayersBox"></div><div class="arena-center" id="arenaCenter">ARENA</div><div class="arena-win" id="arenaWin"></div><div class="arena-ball" id="arenaBall"></div></div><div class="status" id="arenaStatus">Подключаем арену…</div><p class="muted" id="arenaHint" style="text-align:center">Любая ставка от 1 RCOIN. Победитель забирает банк минус 10%.</p><div class="betbar"><span class="muted">Твоя ставка</span><span class="muted" id="arenaYourBet">—</span></div><input id="arenaBetInput" class="bet-input" type="number" min="1" step="1" value="10000" inputmode="numeric" oninput="setArenaBet(Number(this.value))"><div class="bet-row" id="betRow"><button class="chip on" data-bet="10000" onclick="setArenaBet(10000,1)">10к</button><button class="chip" data-bet="100000" onclick="setArenaBet(100000,1)">100к</button><button class="chip" data-bet="1000000" onclick="setArenaBet(1000000,1)">1кк</button></div><div class="betbar"><span class="muted">Твой цвет</span><span class="muted" id="arenaYourColor">—</span></div><div class="color-picks" id="colorPicks"><button class="color-pick selected" data-color="#ff8a3d" style="--c:#ff8a3d" onclick="setArenaColor('#ff8a3d')"></button><button class="color-pick" data-color="#3d9bff" style="--c:#3d9bff" onclick="setArenaColor('#3d9bff')"></button><button class="color-pick" data-color="#35d07f" style="--c:#35d07f" onclick="setArenaColor('#35d07f')"></button><button class="color-pick" data-color="#b06bff" style="--c:#b06bff" onclick="setArenaColor('#b06bff')"></button><button class="color-pick" data-color="#ffd23d" style="--c:#ffd23d" onclick="setArenaColor('#ffd23d')"></button><button class="color-pick" data-color="#ff5c5c" style="--c:#ff5c5c" onclick="setArenaColor('#ff5c5c')"></button><button class="color-pick" data-color="#2de2e6" style="--c:#2de2e6" onclick="setArenaColor('#2de2e6')"></button><button class="color-pick" data-color="#c98bff" style="--c:#c98bff" onclick="setArenaColor('#c98bff')"></button><button class="color-pick" data-color="#8dff6b" style="--c:#8dff6b" onclick="setArenaColor('#8dff6b')"></button><button class="color-pick" data-color="#ff7ab8" style="--c:#ff7ab8" onclick="setArenaColor('#ff7ab8')"></button><button class="color-pick" data-color="#111111" style="--c:#111111" title="Premium" onclick="setArenaColor('#111111')"></button></div><button class="btn" id="joinBtn" onclick="arenaJoin()">Войти в лобби</button><button class="btn ghost hide" id="leaveBtn" onclick="arenaLeave()">Покинуть лобби</button><button class="btn green hide" id="addBetBtn" onclick="arenaAdd()">Добавить к ставке</button></div><div class="panel"><h2>Участники</h2><div class="players" id="players"><p class="muted">Пока никого нет.</p></div></div><div class="panel"><h2>Последние победители</h2><div id="arenaHistory" class="muted">Пока нет завершённых раундов.</div></div><div class="panel"><h2>Подарки в арене</h2><p class="muted">Выбери NFT-фото для аватара в арене.</p><div class="gift-grid" id="arenaGifts"><p class="muted">Загрузка…</p></div><button class="btn ghost" onclick="setArenaGift('')">Сбросить аватар</button></div><div class="panel"><h2>Как это работает</h2><p class="muted">Собери до 10 игроков. Когда в лобби два и более участника, начинается отсчёт 15 секунд. Шарик катится по полю и останавливается на победителе: шанс пропорционален ставке. Победитель забирает банк, 10% уходит в казну. Любая ставка от 1 RCOIN.</p></div></section>
 <section id="career" class="page"><div class="panel"><h2>💻 IT-карьера <span class="badge" id="jobStage">Стажёр</span></h2><div class="stats"><div class="stat"><span>Уровень</span><b id="jobLevel">1</b></div><div class="stat"><span>Опыт</span><b id="jobXp">0 XP</b></div><div class="stat"><span>Заработано</span><b id="jobCoins">0</b></div><div class="stat"><span>Заданий</span><b id="jobTasks">0</b></div></div><p class="muted" id="jobCooldown">Выполняй задания, повышай уровень и открывай новые должности.</p><button class="btn green" id="taskBtn" onclick="doTask()">🚀 Получить IT-задание</button></div><div class="panel"><h2>💼 Зарплата за активность</h2><p class="muted">Пиши сообщения в групповых чатах. Команда /зп покажет начисление и позволит забрать ежедневную зарплату.</p><button class="btn ghost" onclick="toast('Открой чат с ботом и отправь /зп')">Как получить зарплату</button></div></section>
 <section id="trade" class="page"><div class="panel"><h2>📈 RCOIN MARKET <span class="badge">LIVE</span></h2><div class="row"><div><div class="muted">Текущий курс v-RCOIN</div><div class="price" id="price">—</div></div><div style="text-align:right"><div class="muted">Изменение</div><b id="change">—</b></div></div><canvas id="chart" class="chart" width="640" height="190"></canvas><p class="muted" style="margin-top:8px">Внутриигровой симулятор курса. Это не реальные деньги и не финансовый инструмент.</p></div><div class="panel"><h2>💼 Портфель</h2><div class="stats"><div class="stat"><span>v-RCOIN</span><b id="holding">0</b></div><div class="stat"><span>Стоимость</span><b id="value">0</b></div><div class="stat"><span>Вложено</span><b id="invested">0</b></div><div class="stat"><span>Результат</span><b id="profit">0</b></div></div></div><div class="panel"><h2>Обмен</h2><input id="amount" type="number" min="1000" step="1000" value="100000" placeholder="Сумма RCOIN"><div class="trade-buttons" style="margin-top:10px"><button class="btn green" onclick="buy()">🟢 Купить</button><button class="btn red" onclick="sell()">🔴 Продать всё</button></div></div></section>
 <section id="events" class="page"><div class="panel"><h2>⛄ СНЕЖНЫЙ МАРАФОН <span class="badge">DAILY TOP 3</span></h2><div class="stats"><div class="stat"><span>Снежки</span><b id="snowballs">0</b></div><div class="stat"><span>Снеговики сегодня</span><b id="snowmen">0</b></div></div><p class="muted">Собирай снежки каждые 20 секунд. Из 20 снежков можно слепить снеговика. Топ-3 дня получают случайную награду из казны от 1 до 10 млрд RCOIN, если средств достаточно.</p><div class="row"><button class="btn" onclick="snowCollect()">❄️ Собрать снежки</button><button class="btn green" onclick="snowBuild()">☃️ Слепить</button></div><div class="panel"><h2>🏆 Рейтинг дня</h2><div id="snowTop" class="muted">Загрузка рейтинга…</div></div></div><div class="panel"><h2>🎄 СЕЗОННЫЕ ИВЕНТЫ</h2><p class="muted">Собирай коллекционные предметы, выполняй задания и открывай награды. Новогодние эмодзи доступны в сообщениях бота при поддержке Telegram Premium Emoji.</p><div class="gridcards" style="margin-top:12px"><div class="tile"><div class="ico">❄️</div><b>Снежный марафон</b><small>Ежедневные задания</small></div><div class="tile"><div class="ico">🎅</div><b>Помощь Санте</b><small>Сезонная цепочка</small></div><div class="tile"><div class="ico">🐻‍❄️</div><b>Полярная коллекция</b><small>Собери предметы</small></div><div class="tile"><div class="ico">🎁</div><b>NFT-чеканка</b><small>Создай предмет в коллекцию</small></div></div><button class="btn" onclick="toast('Открой в боте команду «ивенты» для полного списка заданий')">Открыть задания в боте</button></div></section>
-<section id="nft" class="page"><div class="panel"><h2>🖼️ NFT-коллекция <span class="muted" id="nftCount">0 предметов</span></h2><p class="muted">Твои сгенерированные цифровые предметы и коллекционные изображения.</p><div class="gridcards" id="nftGrid" style="margin-top:12px"><p class="muted">Загружаем коллекцию…</p></div><button class="btn" onclick="mintNft()">✨ Создать NFT · 10 000 RCOIN</button></div></section>
-<section id="mining" class="page"><div class="panel" style="text-align:center"><h2>⛏ Майнинг</h2><div class="mine-disc"><div class="ruby"></div></div><div class="tc-amount"><b id="minePending">0</b> <span>RCOIN</span></div><div class="tc-meta"><span id="mineRate">0</span> RCOIN в сутки · серверы работают 30 дней</div><button class="btn green" onclick="mineCollect()">Снять в баланс</button></div><div class="panel"><h2>Серверы</h2><div id="mineShop"><p class="muted">Загрузка…</p></div></div><div class="panel"><h2>Донат и Premium</h2><p class="muted">1 ⭐ = 10 000 000 RCOIN, от 10 ⭐. Premium: галочка, ранг «Лудоман», +50% к выигрышу.</p><div class="row"><button class="btn" onclick="payStars('don',10)">10 ⭐ → 100кк</button><button class="btn" onclick="payStars('don',100)">100 ⭐ → 1ккк</button></div><button class="btn ghost" onclick="payStars('prem')">💎 Premium · 100 ⭐</button></div></section>
-<section id="archive" class="page"><div class="panel"><h2>◍ Апгрейдер</h2><p class="muted">Добавь до 5 NFT — чем реже, тем выше шанс. Победа: подарок из архива. Провал: NFT уходят в архив.</p><div class="eyebrow" style="text-align:center;margin-top:12px">Улучшить на</div><div class="bet-row" id="upgTargetRow" style="justify-content:center;margin:6px 0 2px"><button class="chip on" data-t="" onclick="setUpgTarget('')">Любая</button><button class="chip" data-t="common" onclick="setUpgTarget('common')">Обычная</button><button class="chip" data-t="uncommon" onclick="setUpgTarget('uncommon')">Необычная</button><button class="chip" data-t="rare" onclick="setUpgTarget('rare')">Редкая</button><button class="chip" data-t="epic" onclick="setUpgTarget('epic')">Эпик</button><button class="chip" data-t="legendary" onclick="setUpgTarget('legendary')">Легенда</button></div><div class="upg-wheel" id="upgWheel"><div class="upg-needle" id="upgNeedle"></div><div class="upg-chance" id="upgChance">0%</div></div><div class="upg-stake" id="upgStake">Выбери до 5 NFT</div><button class="btn ghost" id="upgAddBtn" onclick="toggleUpgInv()">＋ Добавить подарок</button><div id="upgInv" class="hide" style="margin-top:12px"><div class="gridcards upg-pick" id="upgPick"><p class="muted">Загрузка…</p></div><button class="btn green" onclick="toggleUpgInv(false)">Добавить в круг</button></div><div class="status" id="upgStatus">Крути на удачу</div><button class="btn" id="upgBtn" onclick="upgSpin()" disabled>Крутить</button></div><div class="panel"><h2>🎁 NFT-архив <span class="muted" id="archCount">0 NFT</span></h2><p class="muted">Пополнить архив: передай NFT на @rubinarxiv командой «передать» или «в архив #id».</p><div class="gridcards" id="archGrid"><p class="muted">Загрузка…</p></div></div></section>
-</main><nav class="nav"><button class="active" data-page="home" onclick="go('home')"><i>⌂</i>Главная</button><button data-page="arena" onclick="go('arena')"><i>◉</i>Арена</button><button data-page="career" onclick="go('career')"><i>⌘</i>Работа</button><button data-page="trade" onclick="go('trade')"><i>↗</i>Трейдинг</button><button data-page="events" onclick="go('events')"><i>✧</i>Ивенты</button><button data-page="mining" onclick="go('mining')"><i>⛏</i>Майнинг</button><button data-page="archive" onclick="go('archive')"><i>◍</i>Апгрейд</button></nav><div class="toast" id="toast"></div>
+<section id="nft" class="page"><div class="panel"><h2>🖼️ NFT-коллекция <span class="muted" id="nftCount">0 предметов</span></h2><p class="muted">Твои сгенерированные цифровые предметы и коллекционные изображения.</p><div class="gridcards" id="nftGrid" style="margin-top:12px"><p class="muted">Загружаем коллекцию…</p></div><label id="photoBtn" class="btn ghost hide" style="display:flex;align-items:center;justify-content:center;cursor:pointer">📷 NFT из фото<input type="file" accept="image/*" style="display:none" onchange="nftPhoto(this)"></label><button class="btn" onclick="mintNft()">✨ Случайный NFT · 10 000 RCOIN</button></div></section>
+<section id="mining" class="page">
+<div class="tc-card"><div class="tc-head"><div><div class="tc-label">Баланс</div><div class="tc-bal"><b id="mineBal">0</b> <span>RCOIN</span></div></div><div class="tc-head-r"><span class="tc-chip" id="mineServers">0 серверов</span><span class="tc-help" onclick="toast('Серверы дают доход 30 дней. Забери добычу кнопкой «Снять».')">?</span></div></div>
+<div class="tc-actions"><button class="tc-btn glass" onclick="mineScroll()">Купить</button><button class="tc-btn glass" onclick="toast('Награда копится сама — жми «Снять»')">Награды</button><button class="tc-btn glass" onclick="mineCheck()">Проверить</button></div></div>
+<div class="tc-turbine-wrap"><div class="tc-dot"></div><svg class="turbine" viewBox="0 0 240 240" aria-hidden="true"><defs><linearGradient id="tRing" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4a3486"/><stop offset=".5" stop-color="#1a1230"/><stop offset="1" stop-color="#5a3ea6"/></linearGradient><radialGradient id="tDisc" cx="40%" cy="34%" r="66%"><stop offset="0" stop-color="#2c1c56"/><stop offset="1" stop-color="#0b0715"/></radialGradient><linearGradient id="tBlade" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#d3b4ff"/><stop offset=".45" stop-color="#8f57f5"/><stop offset="1" stop-color="#43199e"/></linearGradient></defs><circle cx="120" cy="120" r="112" fill="none" stroke="url(#tRing)" stroke-width="15"/><circle cx="120" cy="120" r="103" fill="url(#tDisc)"/><circle cx="120" cy="120" r="103" fill="none" stroke="#00000088" stroke-width="6"/><g class="fan"><g transform="rotate(0 120 120)"><path d="M120 120 C 110 94 114 60 138 36 C 158 60 152 102 120 120 Z" fill="url(#tBlade)"/><path d="M116 108 C 110 86 116 62 134 44" stroke="#ffffff" stroke-opacity=".26" stroke-width="2.5" fill="none"/></g><g transform="rotate(40 120 120)"><path d="M120 120 C 110 94 114 60 138 36 C 158 60 152 102 120 120 Z" fill="url(#tBlade)"/><path d="M116 108 C 110 86 116 62 134 44" stroke="#ffffff" stroke-opacity=".26" stroke-width="2.5" fill="none"/></g><g transform="rotate(80 120 120)"><path d="M120 120 C 110 94 114 60 138 36 C 158 60 152 102 120 120 Z" fill="url(#tBlade)"/><path d="M116 108 C 110 86 116 62 134 44" stroke="#ffffff" stroke-opacity=".26" stroke-width="2.5" fill="none"/></g><g transform="rotate(120 120 120)"><path d="M120 120 C 110 94 114 60 138 36 C 158 60 152 102 120 120 Z" fill="url(#tBlade)"/><path d="M116 108 C 110 86 116 62 134 44" stroke="#ffffff" stroke-opacity=".26" stroke-width="2.5" fill="none"/></g><g transform="rotate(160 120 120)"><path d="M120 120 C 110 94 114 60 138 36 C 158 60 152 102 120 120 Z" fill="url(#tBlade)"/><path d="M116 108 C 110 86 116 62 134 44" stroke="#ffffff" stroke-opacity=".26" stroke-width="2.5" fill="none"/></g><g transform="rotate(200 120 120)"><path d="M120 120 C 110 94 114 60 138 36 C 158 60 152 102 120 120 Z" fill="url(#tBlade)"/><path d="M116 108 C 110 86 116 62 134 44" stroke="#ffffff" stroke-opacity=".26" stroke-width="2.5" fill="none"/></g><g transform="rotate(240 120 120)"><path d="M120 120 C 110 94 114 60 138 36 C 158 60 152 102 120 120 Z" fill="url(#tBlade)"/><path d="M116 108 C 110 86 116 62 134 44" stroke="#ffffff" stroke-opacity=".26" stroke-width="2.5" fill="none"/></g><g transform="rotate(280 120 120)"><path d="M120 120 C 110 94 114 60 138 36 C 158 60 152 102 120 120 Z" fill="url(#tBlade)"/><path d="M116 108 C 110 86 116 62 134 44" stroke="#ffffff" stroke-opacity=".26" stroke-width="2.5" fill="none"/></g><g transform="rotate(320 120 120)"><path d="M120 120 C 110 94 114 60 138 36 C 158 60 152 102 120 120 Z" fill="url(#tBlade)"/><path d="M116 108 C 110 86 116 62 134 44" stroke="#ffffff" stroke-opacity=".26" stroke-width="2.5" fill="none"/></g></g><circle cx="120" cy="120" r="31" fill="#0f0a1c" stroke="#8a5fe8" stroke-width="3"/><circle cx="120" cy="120" r="24" fill="url(#tBlade)" opacity=".35"/><text x="120" y="127" text-anchor="middle" font-size="20" font-weight="800" fill="#f3eaff">R</text></svg></div>
+<div class="tc-amount"><b id="minePending">0</b> <span>RCOIN</span></div>
+<div class="tc-meta"><span id="mineRate">0</span> RCOIN/сутки · комиссия 15%</div>
+<div class="tc-meta2" id="mineEta">≈ 0 в час · полный сбор через —</div>
+<div class="tc-two"><button class="tc-btn primary" onclick="mineCollect()">⤓ Снять</button><button class="tc-btn dark" onclick="mineScroll()">◉ Мои серверы</button></div>
+<div class="tc-card" id="mineServersBox" style="margin-top:14px"><div class="tc-label" style="margin-bottom:10px">Серверы</div><div id="mineShop"><p class="muted">Загрузка…</p></div></div>
+</section>
+<section id="archive" class="page">
+<div class="panel"><h2>◍ Апгрейдер</h2>
+<div class="upg-tabs"><button class="upg-tab on" id="tabNft" onclick="upgTab('nft')">NFT</button><button class="upg-tab" id="tabCoin" onclick="upgTab('coin')">RCOIN</button></div>
+<div id="upgNftBlock"><p class="muted">Добавь до 5 NFT — чем реже карты, тем выше шанс. Победа: подарок из архива (или коины, если архив пуст). Провал: NFT уходят в архив.</p>
+<div class="eyebrow" style="text-align:center;margin-top:12px">Улучшить на</div>
+<div class="bet-row" id="upgTargetRow" style="justify-content:center;margin:6px 0 2px"><button class="chip on" data-t="" onclick="setUpgTarget('')">Любая</button><button class="chip" data-t="common" onclick="setUpgTarget('common')">Обычная</button><button class="chip" data-t="uncommon" onclick="setUpgTarget('uncommon')">Необычная</button><button class="chip" data-t="rare" onclick="setUpgTarget('rare')">Редкая</button><button class="chip" data-t="epic" onclick="setUpgTarget('epic')">Эпик</button><button class="chip" data-t="legendary" onclick="setUpgTarget('legendary')">Легенда</button></div>
+<div class="upg-wheel" id="upgWheel"><div class="upg-needle" id="upgNeedle"></div><div class="upg-chance" id="upgChance">0%</div></div>
+<div class="upg-stake" id="upgStake">Выбери до 5 NFT</div>
+<button class="btn ghost" id="upgAddBtn" onclick="toggleUpgInv()">＋ Добавить подарок</button>
+<div id="upgInv" class="hide" style="margin-top:12px"><div class="gridcards upg-pick" id="upgPick"><p class="muted">Загрузка…</p></div><button class="btn green" onclick="toggleUpgInv(false)">Добавить в круг</button></div>
+<div class="status" id="upgStatus">Крути на удачу</div>
+<button class="btn" id="upgBtn" onclick="upgSpin()" disabled>Улучшить</button></div>
+<div id="upgCoinBlock" class="hide">
+<p class="muted">Улучшай RCOIN: выбирай множитель, шанс — в центре круга. Выплата идёт из пула архива.</p>
+<div class="upg-wheel" id="coinWheel"><div class="upg-needle" id="coinNeedle"></div><div class="upg-chance" id="coinChance">0%</div></div>
+<div class="upg-stake" id="coinStake">Введи сумму</div>
+<input id="coinBet" type="number" min="10000" step="10000" value="1000000" inputmode="numeric" oninput="coinPreview()">
+<div class="bet-row" id="coinMultRow" style="margin-top:10px"><button class="chip" data-m="1.5" onclick="setCoinMult(1.5)">×1.5</button><button class="chip on" data-m="2" onclick="setCoinMult(2)">×2</button><button class="chip" data-m="3" onclick="setCoinMult(3)">×3</button><button class="chip" data-m="5" onclick="setCoinMult(5)">×5</button></div>
+<p class="muted" id="coinPool" style="text-align:center;margin-top:10px">Пул архива: —</p>
+<div class="status" id="coinStatus">Крути на удачу</div>
+<button class="btn" onclick="coinSpin()">Улучшить</button>
+</div>
+<div class="panel"><h2>🎁 NFT-архив <span class="muted" id="archCount">0 NFT</span></h2><p class="muted">Дорогие лоты до 1ккк. Пополнить: передай NFT боту @rubinarxiv командой «передать».</p><div class="gridcards" id="archGrid"><p class="muted">Загрузка…</p></div></div>
+</section>
+</main><nav class="nav"><button class="active" data-page="home" onclick="go('home')"><i>⌂</i>Главная</button><button data-page="arena" onclick="go('arena')"><i>◉</i>Арена</button><button data-page="career" onclick="go('career')"><i>⌘</i>Работа</button><button data-page="trade" onclick="go('trade')"><i>↗</i>Трейдинг</button><button data-page="mining" onclick="go('mining')"><i>⛏</i>Майнинг</button><button data-page="archive" onclick="go('archive')"><i>◍</i>Апгрейд</button></nav><div class="toast" id="toast"></div>
 <script>
 
 // Original RUBIN line icons, drawn as compact SVG paths.
@@ -6217,13 +6487,17 @@ const ICONS={
  snow:'<path d="M12 2v20M3.3 7l17.4 10M3.3 17 20.7 7M8 4l4 3 4-3M8 20l4-3 4 3"/>',
  trophy:'<path d="M7 4h10v5a5 5 0 0 1-10 0V4ZM7 6H4v2a4 4 0 0 0 4 4M17 6h3v2a4 4 0 0 1-4 4M12 14v4M8 21h8M9 18h6"/>',
  home:'<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z"/>',
- work:'<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12h18M10 12v2h4v-2"/>'
+ work:'<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12h18M10 12v2h4v-2"/>',
+ wheel:'<circle cx="12" cy="12" r="9.5"/><circle cx="12" cy="12" r="2.6"/><path d="M12 2.5v6.9M20.2 7.2l-6 3.5M20.2 16.8l-6-3.5M12 21.5v-6.9M3.8 16.8l6-3.5M3.8 7.2l6 3.5"/>',
+ cube:'<path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7L12 2.6Z"/><path d="M3.9 7.2 12 11.7l8.1-4.5M12 11.7v9.5"/>',
+ bolt:'<path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z"/>',
+ bag:'<path d="M4.5 8h15l-1.2 12.5H5.7L4.5 8Z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/>'
 };
 function glyph(name){return '<span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24">'+(ICONS[name]||ICONS.arena)+'</svg></span>'}
 function applyCustomIcons(){
  const tiles=[['arena','arena'],['career','career'],['trade','market'],['events','events'],['nft','nft'],['commands','commands']];
  document.querySelectorAll('.tile .ico').forEach((el,i)=>{if(tiles[i])el.innerHTML=glyph(tiles[i][1])});
- const nav=['home','arena','work','market','events'];document.querySelectorAll('.nav button i').forEach((el,i)=>{if(nav[i])el.innerHTML=glyph(nav[i])});
+ const nav=['home','arena','work','market','wheel','cube'];document.querySelectorAll('.nav button i').forEach((el,i)=>{if(nav[i])el.innerHTML=glyph(nav[i])});
  document.querySelectorAll('.stat span').forEach(el=>{const t=el.textContent.trim();let k=t.includes('Сыграно')?'arena':t.includes('Ранг')?'trophy':t.includes('Победы')?'trophy':t.includes('Проиграно')?'market':null;if(k)el.innerHTML=glyph(k)+' '+t.replace(/^[^ ]+\s*/, '')});
  document.querySelectorAll('.panel h2').forEach(el=>{if(el.querySelector('.glyph'))return;const t=el.textContent;let k=t.includes('ARENA')?'arena':t.includes('IT-карьера')?'career':t.includes('MARKET')?'market':t.includes('СНЕЖНЫЙ')||t.includes('СЕЗОННЫЕ')?'snow':t.includes('NFT')?'nft':t.includes('Рейтинг')?'trophy':null;if(k){const first=el.firstChild;if(first&&first.nodeType===3)first.textContent=first.textContent.replace(/^\s*[^\s]+\s*/, '');el.insertAdjacentHTML('afterbegin',glyph(k))}});
  document.querySelectorAll('.btn').forEach(el=>{if(el.querySelector('.glyph'))return;const t=el.textContent;let k=t.includes('задание')?'career':t.includes('снежки')?'snow':t.includes('Слепить')?'events':t.includes('NFT')?'nft':t.includes('куп')?'market':t.includes('прод')?'market':null;if(k)el.insertAdjacentHTML('afterbegin',glyph(k))});
@@ -6232,13 +6506,16 @@ function applyCustomIcons(){
 
 const tg=window.Telegram&&Telegram.WebApp;if(tg){try{tg.ready();tg.expand();tg.setHeaderColor('#080b10');tg.setBackgroundColor('#080b10')}catch(e){}}
 const INIT=tg?tg.initData:"",TU=tg?.initDataUnsafe?.user||{},$=id=>document.getElementById(id),fmt=n=>Math.floor(Number(n)||0).toLocaleString('en-US').replace(/,/g,"'");let ME=null,AS=null,AT=0,TS=null,tradeTimer=null,arenaTimer=null,arenaColor='#ff8a3d',arenaAvatar='';
-async function api(p,b={}){try{const r=await fetch('/api/'+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init:INIT,photo_url:TU.photo_url||'',display_name:[TU.first_name,TU.last_name].filter(Boolean).join(' '),...b})});return await r.json()}catch(e){return{ok:false,err:'Нет соединения с сервером'}}}
+async function api(p,b={}){try{const r=await fetch('/api/'+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init:INIT,photo_url:TU.photo_url||'',display_name:[TU.first_name,TU.last_name].filter(Boolean).join(' '),...b})});
+ if(r.status===413)return{ok:false,err:'Фото слишком большое — сожми или выбери меньше 6 МБ'};
+ const t=await r.text();try{return JSON.parse(t)}catch(e){return{ok:false,err:'Сервер вернул ошибку ('+r.status+')'}}}catch(e){return{ok:false,err:'Нет соединения с сервером'}}}
 function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.remove('show'),2600)}function haptic(){try{tg.HapticFeedback.impactOccurred('light')}catch(e){}}
 function go(p){document.querySelectorAll('.page').forEach(e=>e.classList.toggle('active',e.id===p));document.querySelectorAll('.nav button').forEach(e=>e.classList.toggle('active',e.dataset.page===p));if(p==='arena'){startArena();loadArenaGifts()}if(p==='trade')startTrade();if(p==='career')loadCareer();if(p==='nft')loadNft();if(p==='events')loadSnowman();if(p==='mining')loadMining();if(p==='archive')loadArchive()}
 function setBalance(v){const x=fmt(v);$('topBal').textContent=x;$('heroBal').innerHTML=x+' <small>RCOIN</small>';$('copyBal').textContent=x}
+function applyAdminUi(){const b=$('photoBtn');if(b)b.classList.toggle('hide',!(ME&&ME.is_admin))}
 async function copyBalance(){const value=ME?Number(ME.balance||0).toLocaleString('en-US').replace(/,/g,"'"):'0';try{await navigator.clipboard.writeText(value);toast('Баланс '+value+' скопирован')}catch(e){toast('Баланс: '+value)}}
 function sendBotAction(action){if(!tg||typeof tg.sendData!=='function'){toast('Открой приложение через кнопку бота в Telegram');return}try{tg.sendData(action)}catch(e){toast('Не удалось передать действие боту')}}
-async function loadMe(){if(!INIT){$('arenaStatus').textContent='Открой веб-приложение через меню бота в Telegram';return}const j=await api('me');if(!j.ok)return toast(j.err||'Не удалось загрузить профиль');ME=j;setBalance(j.balance);$('playerName').textContent=j.name||'Игрок';$('profileRank').textContent=j.rank||'Новичок';const ph=$('profilePhoto');const pv=j.nft_profile_url||j.photo_url||TU.photo_url||'';if(pv){ph.src=pv;ph.style.display='block'}else{ph.style.display='none'}const ha=$('heroArt');if(ha&&j.nft_balance_url)ha.src=j.nft_balance_url;$('games').textContent=fmt(j.games);$('rank').textContent=j.rank||'Новичок';$('wins').textContent=fmt(j.wins);$('lost').textContent=fmt(j.lost);$('badges').innerHTML=(j.badges||[]).map(x=>typeof x==='string'?'<span class="badge">'+safe(x)+'</span>':'<span class="badge">'+(x.emoji_id?'<img class="ce" src="/emoji/'+x.emoji_id+'.webp" alt="" onerror="this.remove()"> ':'')+safe(x.title||x.role||'')+'</span>').join('')||'<span class="muted">Пока нет выбранных галочек</span>'}
+async function loadMe(){if(!INIT){applyAdminUi();$('arenaStatus').textContent='Открой веб-приложение через меню бота в Telegram';return}const j=await api('me');if(!j.ok)return toast(j.err||'Не удалось загрузить профиль');ME=j;applyAdminUi();setBalance(j.balance);$('playerName').textContent=j.name||'Игрок';$('profileRank').textContent=j.rank||'Новичок';const ph=$('profilePhoto');const pv=j.nft_profile_url||j.photo_url||TU.photo_url||'';if(pv){ph.src=pv;ph.style.display='block'}else{ph.style.display='none'}const ha=$('heroArt');if(ha&&j.nft_balance_url)ha.src=j.nft_balance_url;$('games').textContent=fmt(j.games);$('rank').textContent=j.rank||'Новичок';$('wins').textContent=fmt(j.wins);$('lost').textContent=fmt(j.lost);$('badges').innerHTML=(j.badges||[]).map(x=>typeof x==='string'?'<span class="badge">'+safe(x)+'</span>':'<span class="badge">'+(x.emoji_id?'<img class="ce" src="/emoji/'+x.emoji_id+'.webp" alt="" onerror="this.remove()"> ':'')+safe(x.title||x.role||'')+'</span>').join('')||'<span class="muted">Пока нет выбранных галочек</span>'}
 function safe(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 /* Custom emoji for web app */
 const CE_IDS={games:'5841551282321497604',dice:'5312533460324199794',roulette:'6228608791529656524',fortune:'5434093331292377553',mines:'5370692462882857093',crash:'5283080528818360566',basket:'5384327463629233871',darts:'5310278924616356636',blackjack:'5285420684699260907',sun:'5391270767889497941',hunt:'5370553185683394181',spin:'5915833712368424979',football:'5413474404485061402',pyramid:'5224257782013769471',miner:'5370692462882857093',hi_lo:'5926783847453692661',ttt:'5222158908805632010',door:'5259067694396474462',profile:'5202216593966244027',balance:'5197491391206281629',bank:'5881948563591666817',diamond:'5438496463044752972',star:'5438496463044752972',lock:'5305621469134857194',nft:'5262517101578443800',referral:'5942877472163892475',check:'5810189259327413739',treasury:'5798678875823153004',win:'5305747221996177787',lose:'5305474786400690766',settings:'5258096772776991776',admin:'6129805886383723340',donate:'5438496463044752972',ad:'5213391561999526028',market:'5278702045883292456',question:'5436113877181941026',item_1:'5332717942599618048',item_2:'5404752966584394198',item_3:'5280924618444514633',item_4:'5368488358681000659',item_5:'5398024200235529935',item_6:'5449449325434266744',item_7:'5201924046563852634',item_8:'5199959030306456092',item_9:'5316599316884766402',black:'5789386473560088107',blue:'5810189259327413739',rubin:'5341454906807034418',moder:'5766894601709296405',support:'5888937609253623352',tester:'5888937609253623352',ny:'5954111328493771983',dev:'5251635454041675257'};
@@ -6272,7 +6549,7 @@ if(ph==='rolling'){
   if(BY>100-R){BY=100-R;BVY=-Math.abs(BVY)*(.9+Math.random()*.15);BVX+=(Math.random()-.5)*.3;bounceRing(BX,BY)}
  }
  if(Math.random()<.035){BVX+=(Math.random()-.5)*.22;BVY+=(Math.random()-.5)*.22}
- const prog=AS.roll_total?Math.min(1,(AS.roll_elapsed+(performance.now()-AT)/1000)/AS.roll_total):0;const sp=Math.hypot(BVX,BVY);const tgt=Math.max(.16,1.25*Math.pow(1-prog,1.7));if(sp>0){const kk=1+(tgt/sp-1)*.07;BVX*=kk;BVY*=kk}
+ const sp=Math.hypot(BVX,BVY);if(sp>1.35){BVX*=1.35/sp;BVY*=1.35/sp}
  BANG+=sp*dt*.4;setBall(BX,BY);trailTick();
 }else if(ph==='done'&&AS.winner_idx>=0){
  if(BSTATE!=='done'){
@@ -6280,16 +6557,17 @@ if(ph==='rolling'){
   const tx=50+Math.cos(a*Math.PI/180)*rad,ty=50+Math.sin(a*Math.PI/180)*rad;
   const dx=tx-BX,dy=ty-BY,dist=Math.hypot(dx,dy);
   const mx=BX+dx*.5-dy*.16,my=BY+dy*.5+dx*.16;
-  BLAND={t0:performance.now(),dur:Math.max(2800,Math.min(4400,dist*95)),from:{x:BX,y:BY},ctrl:{x:mx,y:my},to:{x:tx,y:ty}};
+  const dur=Math.max(2400,Math.min(3800,1100+dist*70));
+  BLAND={t0:performance.now(),dur:dur,from:{x:BX,y:BY},ctrl:{x:mx,y:my},to:{x:tx,y:ty}};
   b.classList.remove('win');b.classList.add('live');b.style.transition='none';
  }
- if(BLAND){const k=Math.min(1,(performance.now()-BLAND.t0)/BLAND.dur);const e=1-Math.pow(1-k,2.6);const u=1-e;BX=u*u*BLAND.from.x+2*u*e*BLAND.ctrl.x+e*e*BLAND.to.x;BY=u*u*BLAND.from.y+2*u*e*BLAND.ctrl.y+e*e*BLAND.to.y;setBall(BX,BY);trailTick();if(k>=1){const ex=BLAND.to.x,ey=BLAND.to.y;BLAND=null;BX=ex;BY=ey;setBall(BX,BY);b.classList.add('win');bounceRing(BX,BY);arenaFinish(ex,ey)}}
+ if(BLAND){const k=Math.min(1,(performance.now()-BLAND.t0)/BLAND.dur);const e=1-Math.pow(1-k,2.7);const u=1-e;BX=u*u*BLAND.from.x+2*u*e*BLAND.ctrl.x+e*e*BLAND.to.x;BY=u*u*BLAND.from.y+2*u*e*BLAND.ctrl.y+e*e*BLAND.to.y;BANG+=dt*(1-k)*0.55;setBall(BX,BY);trailTick();if(k>=1){const ex=BLAND.to.x,ey=BLAND.to.y;BLAND=null;BX=ex;BY=ey;setBall(BX,BY);b.classList.add('win');bounceRing(BX,BY);const sq=$('arenaSquare');if(sq){sq.style.transformOrigin=ex+'% '+ey+'%';sq.classList.add('finish')}}}
 }else{
- if(BSTATE!==ph){BSTATE=ph;BLAND=null;BTRAIL=[];b.classList.remove('win');b.classList.remove('live');b.style.transition='left .45s ease,top .45s ease';hideTrails();arenaFinishReset()}
+ if(BSTATE!==ph){BSTATE=ph;BLAND=null;BTRAIL=[];b.classList.remove('win');b.classList.remove('live');b.style.transition='left .45s ease,top .45s ease';hideTrails();const sq=$('arenaSquare');if(sq){sq.classList.remove('finish');sq.style.transformOrigin='50% 50%'};const wn=$('arenaWin');if(wn)wn.classList.remove('show')}
  const t=performance.now()/1000;const rad=ph==='countdown'?9:0;BX=50+Math.cos(t*1.5)*rad;BY=50+Math.sin(t*1.5)*rad;BANG+=dt*.02;setBall(BX,BY);
 }}
 function ballLoop(t){const dt=Math.min(50,t-_bt||16);_bt=t;renderBall(dt);requestAnimationFrame(ballLoop)}requestAnimationFrame(ballLoop);
-function renderArena(){if(!AS)return;const n=AS.players.length,ph=AS.phase;const left=Math.max(0,AS.cd_left-(performance.now()-AT)/1000);$('arenaSquare').classList.toggle('many',n>4);$('arenaSquare').classList.toggle('dense',n>6);$('arenaCount').textContent=n+'/'+AS.max;$('arenaBank').innerHTML=fmt(AS.pool)+' <small>RCOIN</small>';let title=ph==='idle'?'Лобби свободно':ph==='waiting'?'Ожидаем второго игрока':ph==='countdown'?'Старт через '+Math.ceil(left)+' сек.':ph==='rolling'?'Шарик катится по полю…':'Раунд завершён';if(ph==='done'&&AS.winner_idx>=0)title='Победитель: '+AS.players[AS.winner_idx].name;$('arenaStatus').textContent=title;$('arenaHint').textContent=ph==='idle'?(AS.free?'Вход бесплатный. Собери до 10 участников.':'Каждый выбирает свою ставку. Победитель забирает банк минус 10%.'):ph==='waiting'?'Нужен ещё один игрок — затем начнётся отсчёт 15 секунд.':AS.free?'У каждого равные шансы. Победитель получает 25 XP.':'Шанс пропорционален ставке. Победитель забирает '+fmt(AS.prize)+' RCOIN.';$('joinBtn').classList.toggle('hide',AS.you||!['idle','waiting','countdown'].includes(ph));$('addBetBtn').classList.toggle('hide',!(AS.you&&['waiting','countdown'].includes(ph)));$('joinBtn').disabled=!['idle','waiting','countdown'].includes(ph);$('leaveBtn').classList.toggle('hide',!(AS.you&&ph==='waiting'));$('arenaYourBet').textContent=AS.you?(AS.your_bet?fmt(AS.your_bet)+' RCOIN':'бесплатно'):'—';const meP=AS.players.find(p=>p.you);if(meP)arenaColor=meP.color;$('arenaYourColor').textContent=meP?meP.color:'—';document.querySelectorAll('#colorPicks .color-pick').forEach(c=>{const col=c.dataset.color;const used=AS.players.some(p=>p.color===col&&!p.you);c.disabled=!!meP||used;c.classList.toggle('selected',col===arenaColor)});const locked=!['idle','waiting','countdown'].includes(ph);const bi=$('arenaBetInput');if(bi){bi.disabled=locked}document.querySelectorAll('#betRow .chip').forEach(c=>{const v=Number(c.dataset.bet);c.disabled=locked;c.classList.toggle('on',!locked&&v===arenaBet)});const box=$('arenaPlayersBox');box.innerHTML='';AS.players.forEach((p,i)=>{const a=apAngle(i,n),rad=n===1?0:30,x=50+Math.cos(a*Math.PI/180)*rad,y=50+Math.sin(a*Math.PI/180)*rad;const d=document.createElement('div');d.className='arena-player'+(p.you?' you':'')+((ph==='done'&&AS.winner_idx===i)?' win':'');d.style.left=x+'%';d.style.top=y+'%';d.style.setProperty('--c',p.color);const av=document.createElement('div');av.className='ap-ava';const sp=document.createElement('span');if(p.avatar){const im=document.createElement('img');im.src=p.avatar;im.alt='';im.onerror=()=>{im.remove();sp.textContent=(p.name||'?').slice(0,1).toUpperCase()};sp.append(im)}else sp.textContent=(p.name||'?').slice(0,1).toUpperCase();av.append(sp);const b=document.createElement('b');b.textContent=p.name;const sm=document.createElement('small');sm.textContent=(AS.free?'бесплатно':fmt(p.bet)+' RCOIN')+' · '+p.pct+'%';d.append(av,b,sm);box.append(d)});arenaSectors();$('arenaCenter').textContent=ph==='countdown'?String(Math.ceil(left)):ph==='rolling'?'...':'ARENA';const list=$('players');list.innerHTML='';if(!n)list.innerHTML='<p class="muted">Пока никого нет.</p>';AS.players.forEach(p=>{const d=document.createElement('div');d.className='player';const a=document.createElement('div');a.className='avatar';a.style.background=p.color;if(p.avatar){const im=document.createElement('img');im.src=p.avatar;im.alt='';im.style.cssText='width:35px;height:35px;border-radius:50%;object-fit:cover';a.append(im)}else{a.textContent=(p.name||'?').slice(0,1).toUpperCase()}const t=document.createElement('div');t.innerHTML='<b>'+safe(p.name)+'</b><small>'+(AS.free?'бесплатно':fmt(p.bet)+' RCOIN')+' · '+safe(String(p.pct||0))+'% шанс</small>';d.append(a,t);list.append(d)});$('arenaHistory').textContent=AS.history?.length?AS.history.map(x=>x.name+' · '+x.reward).join('  •  '):'Пока нет завершённых раундов'}
+function renderArena(){if(!AS)return;const n=AS.players.length,ph=AS.phase;const left=Math.max(0,AS.cd_left-(performance.now()-AT)/1000);$('arenaSquare').classList.toggle('many',n>4);$('arenaSquare').classList.toggle('dense',n>6);$('arenaCount').textContent=n+'/'+AS.max;$('arenaBank').innerHTML=fmt(AS.pool)+' <small>RCOIN</small>';let title=ph==='idle'?'Лобби свободно':ph==='waiting'?'Ожидаем второго игрока':ph==='countdown'?'Старт через '+Math.ceil(left)+' сек.':ph==='rolling'?'Шарик катится по полю…':'Раунд завершён';if(ph==='done'&&AS.winner_idx>=0)title='Победитель: '+AS.players[AS.winner_idx].name;$('arenaStatus').textContent=title;$('arenaHint').textContent=ph==='idle'?(AS.free?'Вход бесплатный. Собери до 10 участников.':'Каждый выбирает свою ставку. Победитель забирает банк минус 10%.'):ph==='waiting'?'Нужен ещё один игрок — затем начнётся отсчёт 15 секунд.':AS.free?'У каждого равные шансы. Победитель получает 25 XP.':'Шанс пропорционален ставке. Победитель забирает '+fmt(AS.prize)+' RCOIN.';$('joinBtn').classList.toggle('hide',AS.you||!['idle','waiting','countdown'].includes(ph));$('addBetBtn').classList.toggle('hide',!(AS.you&&['waiting','countdown'].includes(ph)));$('joinBtn').disabled=!['idle','waiting','countdown'].includes(ph);$('leaveBtn').classList.toggle('hide',!(AS.you&&ph==='waiting'));$('arenaYourBet').textContent=AS.you?(AS.your_bet?fmt(AS.your_bet)+' RCOIN':'бесплатно'):'—';const meP=AS.players.find(p=>p.you);if(meP)arenaColor=meP.color;$('arenaYourColor').textContent=meP?meP.color:'—';document.querySelectorAll('#colorPicks .color-pick').forEach(c=>{const col=c.dataset.color;const used=AS.players.some(p=>p.color===col&&!p.you);c.disabled=!!meP||used;c.classList.toggle('selected',col===arenaColor)});const locked=!['idle','waiting','countdown'].includes(ph);const bi=$('arenaBetInput');if(bi){bi.disabled=locked}document.querySelectorAll('#betRow .chip').forEach(c=>{const v=Number(c.dataset.bet);c.disabled=locked;c.classList.toggle('on',!locked&&v===arenaBet)});const box=$('arenaPlayersBox');box.innerHTML='';AS.players.forEach((p,i)=>{const a=apAngle(i,n),rad=n===1?0:30,x=50+Math.cos(a*Math.PI/180)*rad,y=50+Math.sin(a*Math.PI/180)*rad;const d=document.createElement('div');d.className='arena-player'+(p.you?' you':'')+((ph==='done'&&AS.winner_idx===i)?' win':'');d.style.left=x+'%';d.style.top=y+'%';d.style.setProperty('--c',p.color);const av=document.createElement('div');av.className='ap-ava';const sp=document.createElement('span');if(p.avatar){const im=document.createElement('img');im.src=p.avatar;im.alt='';im.onerror=()=>{im.remove();sp.textContent=(p.name||'?').slice(0,1).toUpperCase()};sp.append(im)}else sp.textContent=(p.name||'?').slice(0,1).toUpperCase();av.append(sp);const b=document.createElement('b');b.textContent=p.name;const sm=document.createElement('small');sm.textContent=(AS.free?'бесплатно':fmt(p.bet)+' RCOIN')+' · '+p.pct+'%';d.append(av,b,sm);box.append(d)});arenaSectors();$('arenaCenter').textContent=ph==='countdown'?String(Math.ceil(left)):ph==='rolling'?'...':'ARENA';const list=$('players');list.innerHTML='';if(!n)list.innerHTML='<p class="muted">Пока никого нет.</p>';AS.players.forEach(p=>{const d=document.createElement('div');d.className='player';const a=document.createElement('div');a.className='avatar';a.style.background=p.color;if(p.avatar){const im=document.createElement('img');im.src=p.avatar;im.alt='';im.style.cssText='width:35px;height:35px;border-radius:50%;object-fit:cover';a.append(im)}else{a.textContent=(p.name||'?').slice(0,1).toUpperCase()}const t=document.createElement('div');t.innerHTML='<b>'+safe(p.name)+'</b><small>'+(AS.free?'бесплатно':fmt(p.bet)+' RCOIN')+' · '+safe(String(p.pct||0))+'% шанс</small>';d.append(a,t);list.append(d)});$('arenaHistory').textContent=AS.history?.length?AS.history.map(x=>x.name+' · '+x.reward).join('  •  '):'Пока нет завершённых раундов';const wn=$('arenaWin');if(wn){if(ph==='done'&&AS.winner_idx>=0){wn.textContent='🏆 '+AS.players[AS.winner_idx].name;wn.classList.add('show')}else wn.classList.remove('show')}arenaFx(ph)}
 async function pollArena(){if(!INIT)return;const j=await api('arena');if(j.ok){AS=j.state;AT=performance.now();renderArena()}arenaTimer=setTimeout(pollArena,AS&&['countdown','rolling'].includes(AS.phase)?450:1300)}function startArena(){if(!arenaTimer)pollArena()}
 function setArenaBet(v,fill){v=Math.max(0,Math.floor(Number(v)||0));arenaBet=v;const inp=$('arenaBetInput');if(inp&&(fill||document.activeElement!==inp))inp.value=v;document.querySelectorAll('#betRow .chip').forEach(c=>c.classList.toggle('on',Number(c.dataset.bet)===v))}
 async function arenaJoin(){let bet=Math.max(1,Math.floor(Number(arenaBet)||0));const j=await api('arena_join',{color:arenaColor,bet,photo_url:arenaAvatar||TU.photo_url||''});if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);haptic();toast('Ты в лобби!')}async function arenaLeave(){const j=await api('arena_leave');if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);toast('Ты покинул лобби')}
@@ -6299,13 +6577,23 @@ function setArenaGift(url){arenaAvatar=url||'';try{localStorage.setItem('rcoin_a
 function applyLook(){let t='dark',w='gradient';try{t=localStorage.getItem('rcoin_theme')||'dark';w=localStorage.getItem('rcoin_wall')||'gradient'}catch(e){}document.body.classList.remove('theme-blue','theme-purple','theme-green');if(t!=='dark')document.body.classList.add('theme-'+t);document.body.classList.toggle('wall-banner',w==='banner');document.body.classList.toggle('wall-plain',w==='plain');document.querySelectorAll('#themeRow .theme-chip').forEach(b=>b.classList.toggle('on',b.dataset.theme===t));document.querySelectorAll('#wallRow .chip').forEach(b=>b.classList.toggle('on',b.dataset.wall===w))}
 function setTheme(t){try{localStorage.setItem('rcoin_theme',t)}catch(e){}applyLook()}
 function setWall(w){try{localStorage.setItem('rcoin_wall',w)}catch(e){}applyLook()}
+function setAccent(a){try{localStorage.setItem('rcoin_accent',a||'')}catch(e){}applyAccent();toast(a?'Тема: '+a:'Тема: сапфир')}
+function applyAccent(){let a='';try{a=localStorage.getItem('rcoin_accent')||''}catch(e){}
+ document.body.classList.remove('acc-ruby','acc-ice','acc-emerald','acc-gold');if(a)document.body.classList.add('acc-'+a);
+ document.querySelectorAll('#accRow .chip').forEach(b=>b.classList.toggle('on',(b.dataset.acc||'')===a))}
 /* IT career */
 async function loadCareer(){const j=await api('it_state');if(!j.ok)return;$('jobStage').textContent=j.stage;$('jobLevel').textContent=j.level;$('jobXp').textContent=fmt(j.xp)+' XP';$('jobCoins').textContent=fmt(j.coins);$('jobTasks').textContent=fmt(j.tasks);$('jobCooldown').textContent=j.cooldown>0?'Следующее задание через '+Math.ceil(j.cooldown)+' сек.':'Можно брать новое задание.';$('taskBtn').disabled=j.cooldown>0}
 async function doTask(){const j=await api('it_task');if(!j.ok)return toast(j.err||'Не удалось выполнить задание');toast(j.msg||'Задание завершено');setBalance(j.balance);loadCareer()}
 /* NFT inventory */
-async function loadNft(){const j=await api('nft_state');if(!j.ok)return;const g=$('nftGrid');g.innerHTML='';$('nftCount').textContent=j.items.length+' предметов';if(!j.items.length){g.innerHTML='<p class="muted">Коллекция пока пуста. Создай первый NFT.</p>';return}j.items.forEach(x=>{const d=document.createElement('div');d.className='nft';const im=document.createElement('img');im.src=x.url;im.alt=x.name;const lnk=document.createElement('a');lnk.href=x.url;lnk.target='_blank';lnk.rel='noopener';lnk.append(im);const b=document.createElement('b');b.textContent=x.name+' #'+x.id;if(x.emoji_id){const ic=document.createElement('img');ic.className='ce';ic.src='/emoji/'+x.emoji_id+'.webp';ic.alt='';ic.onerror=()=>ic.remove();b.prepend(ic)}const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity;const acts=document.createElement('div');acts.className='nft-actions';const bb=document.createElement('button');bb.className='btn mini '+(x.in_balance?'red':'ghost');bb.textContent=x.in_balance?'Убрать из баланса':'В баланс';bb.onclick=()=>nftSet(x.id,'balance');const pb=document.createElement('button');pb.className='btn mini '+(x.in_profile?'red':'ghost');pb.textContent=x.in_profile?'Убрать из профиля':'В профиль';pb.onclick=()=>nftSet(x.id,'profile');acts.append(bb,pb);d.append(lnk,b,sm,acts);g.append(d)})}
+async function loadNft(){const j=await api('nft_state');if(!j.ok)return;const g=$('nftGrid');g.innerHTML='';$('nftCount').textContent=j.items.length+' предметов';if(!j.items.length){g.innerHTML='<p class="muted">Коллекция пока пуста. Создай первый NFT.</p>';return}j.items.forEach(x=>{const d=document.createElement('div');d.className='nft';const im=document.createElement('img');im.src=x.url;im.alt=x.name;const lnk=document.createElement('a');lnk.href=x.url;lnk.target='_blank';lnk.rel='noopener';lnk.append(im);const b=document.createElement('b');b.textContent=x.name+' #'+x.id;if(x.emoji_id){const ic=document.createElement('img');ic.className='ce';ic.src='/emoji/'+x.emoji_id+'.webp';ic.alt='';ic.onerror=()=>ic.remove();b.prepend(ic)}const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity;const acts=document.createElement('div');acts.className='nft-actions';const ab=document.createElement('button');ab.className='btn mini ghost';ab.textContent='В архив';ab.onclick=(e)=>{e.stopPropagation();nftToArchive(x.id)};acts.append(ab);const bb=document.createElement('button');bb.className='btn mini '+(x.in_balance?'red':'ghost');bb.textContent=x.in_balance?'Убрать из баланса':'В баланс';bb.onclick=()=>nftSet(x.id,'balance');const pb=document.createElement('button');pb.className='btn mini '+(x.in_profile?'red':'ghost');pb.textContent=x.in_profile?'Убрать из профиля':'В профиль';pb.onclick=()=>nftSet(x.id,'profile');acts.append(bb,pb);d.append(lnk,b,sm,acts);g.append(d)})}
 async function nftSet(id,target){const j=await api('nft_set',{id,target});if(!j.ok)return toast(j.err||'Не удалось закрепить');toast(j.msg||'Готово');loadNft();loadMe()}
 async function mintNft(){const j=await api('nft_mint');if(!j.ok)return toast(j.err||'Не удалось создать NFT');setBalance(j.balance);toast(j.msg||'NFT создан');loadNft()}
+async function nftToArchive(id){const j=await api('nft_to_archive',{id});if(!j.ok)return toast(j.err||'Не удалось');toast(j.msg||'NFT в архиве');loadNft()}
+async function nftPhoto(inp){const f=inp.files&&inp.files[0];if(!f)return;if(f.size>6*1024*1024)return toast('Фото до 6 МБ');
+ const img=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.onerror=()=>r(null);fr.readAsDataURL(f)});
+ if(!img)return toast('Не удалось прочитать фото');toast('Готовим NFT…');
+ const j=await api('nft_photo',{image:img,name:(TU.first_name||'')});inp.value='';
+ if(!j.ok)return toast(j.err||'Не удалось создать NFT');toast('NFT из фото создан');loadNft()}
 /* Live simulated market */
 const cc=$('chart'),cx=cc.getContext('2d');function drawChart(){if(!TS?.series?.length)return;const w=cc.width,h=cc.height,ps=TS.series.map(x=>x.p),lo=Math.min(...ps),hi=Math.max(...ps),rg=hi-lo||1;cx.clearRect(0,0,w,h);const up=ps.at(-1)>=ps[0];const gr=cx.createLinearGradient(0,0,0,h);gr.addColorStop(0,up?'rgba(39,201,130,.28)':'rgba(255,82,104,.28)');gr.addColorStop(1,'rgba(0,0,0,0)');cx.beginPath();ps.forEach((v,i)=>{const x=i/(ps.length-1)*w,y=h-12-(v-lo)/rg*(h-28);i?cx.lineTo(x,y):cx.moveTo(x,y)});cx.lineTo(w,h);cx.lineTo(0,h);cx.closePath();cx.fillStyle=gr;cx.fill();cx.beginPath();ps.forEach((v,i)=>{const x=i/(ps.length-1)*w,y=h-12-(v-lo)/rg*(h-28);i?cx.lineTo(x,y):cx.moveTo(x,y)});cx.strokeStyle=up?'#27c982':'#ff5268';cx.lineWidth=3;cx.stroke()}
 function renderTrade(){if(!TS)return;$('price').textContent=Number(TS.price).toFixed(2);const ch=(TS.price-TS.prev)/TS.prev*100;$('change').textContent=(ch>=0?'+':'')+ch.toFixed(2)+'%';$('change').className=ch>=0?'up':'down';$('holding').textContent=Number(TS.coins||0).toFixed(2);$('value').textContent=fmt(TS.value);$('invested').textContent=fmt(TS.invested);const pl=(TS.value||0)-(TS.invested||0);$('profit').textContent=(pl>=0?'+':'')+fmt(pl);$('profit').className=pl>=0?'up':'down';drawChart()}
@@ -6314,51 +6602,69 @@ async function loadSnowman(){const j=await api('snowman_state');if(!j.ok)return;
 async function snowCollect(){const j=await api('snowman_collect');if(!j.ok)return toast(j.err||'Не удалось собрать снежки');toast('+'+j.gained+' снежков!');loadSnowman();haptic()}
 async function snowBuild(){const j=await api('snowman_build');if(!j.ok)return toast(j.err||'Не удалось слепить снеговика');toast('Слеплено снеговиков: '+j.built+' ☃️');loadSnowman();haptic()}
 function setArenaColor(c){if(c==='#111111'&&!(ME&&ME.premium)){toast('Чёрный цвет доступен с Premium');return}arenaColor=c;document.querySelectorAll('#colorPicks .color-pick').forEach(x=>x.classList.toggle('selected',x.dataset.color===c));const el=$('arenaYourColor');if(el)el.textContent='выбран'}
-applyLook();try{arenaAvatar=localStorage.getItem('rcoin_arena_avatar')||''}catch(e){}applyCustomIcons();initBallTrails();premiumize(document.body);_ceObs.observe(document.body,{childList:true,subtree:true,characterData:true});loadMe();
-
-/* ---- майнинг ---- */
+/* ---- MINING (TonCry style) ---- */
+let MINE=null;
+function mineScroll(){const b=$('mineServersBox');if(b)b.scrollIntoView({behavior:'smooth',block:'center'})}
+function mineCheck(){loadMining();toast('Данные обновлены')}
 let mineTimer=null,mineBase=0,mineRate=0,mineTs=0;
 function mineTick(){const add=mineRate*((Date.now()-mineTs)/1000)/86400;const el=$('minePending');if(el)el.textContent=fmt(Math.floor(mineBase+add))}
-async function loadMining(){const j=await api('mining_state');if(!j.ok)return toast(j.err||'Майнинг недоступен');
+async function loadMining(){const j=await api('mining_state');if(!j.ok)return toast(j.err||'Майнинг недоступен');MINE=j;
  mineBase=Number(j.pending)||0;mineRate=Number(j.rate)||0;mineTs=Date.now();
  if(mineTimer)clearInterval(mineTimer);mineTimer=setInterval(mineTick,1000);mineTick();
- $('mineRate').textContent=fmt(j.rate);const box=$('mineShop');box.innerHTML='';
- j.servers.forEach(s=>{const d=document.createElement('div');d.className='srv'+(s.owned?' owned':'');const t=document.createElement('div');const b=document.createElement('b');b.textContent=s.name;const sm=document.createElement('small');sm.textContent=(s.owned?'работает · осталось '+Math.ceil(s.left/86400)+' дн. · ':'')+fmt(s.per_day)+'/сутки';t.append(b,sm);d.append(t);
-  if(!s.owned){const w=document.createElement('div');w.className='srv-btns';const a=document.createElement('button');a.textContent=fmt(s.cost);a.onclick=()=>mineBuy(s.tier);const st=document.createElement('button');st.className='star';st.textContent='50 ⭐';st.onclick=()=>payStars('srv',50,s.tier);w.append(a,st);d.append(w)}
-  box.append(d)})}
+ $('mineRate').textContent=fmt(j.rate);$('mineBal').textContent=fmt(ME?ME.balance:0);
+ const owned=j.servers.filter(s=>s.owned);$('mineServers').textContent=owned.length+' серверов';
+ const perHour=Math.floor(j.rate/24),left=j.rate>0?Math.max(0,Math.ceil(((j.cap||j.rate*30)-j.pending)/j.rate*24)):0;
+ $('mineEta').textContent='≈ '+fmt(perHour)+' в час · полный сбор через '+(j.rate>0?left+' ч':'—');
+ const box=$('mineShop');box.innerHTML='';
+ if(!owned.length&&!j.servers.length)box.innerHTML='<p class="muted">Серверов пока нет.</p>';
+ j.servers.forEach(s=>{const d=document.createElement('div');d.className='srv'+(s.owned?' owned':'');const ic=document.createElement('div');ic.className='srv-ic';ic.innerHTML=glyph('wheel');const txt=document.createElement('div');const b=document.createElement('b');b.textContent=s.name;const sm=document.createElement('small');sm.textContent=(s.owned?'куплен · осталось '+Math.ceil(s.left/86400)+' дн.':'')+' '+fmt(s.per_day)+'/сутки';txt.append(b,sm);d.append(ic,txt);if(!s.owned){const bt=document.createElement('button');bt.className='srv-buy';bt.textContent=fmt(s.cost);bt.onclick=()=>mineBuy(s.tier);d.append(bt)}box.append(d)})}
 async function mineBuy(tier){const j=await api('mining_buy',{tier});if(!j.ok)return toast(j.err||'Не куплено');setBalance(j.balance);toast(j.msg);loadMining()}
 async function mineCollect(){const j=await api('mining_collect');if(!j.ok)return toast(j.err||'Пока пусто');setBalance(j.balance);toast(j.msg+(j.archived?' · '+fmt(j.archived)+' в Архив':''));loadMining()}
-async function payStars(kind,stars,tier){const j=await api('invoice',{kind,stars,tier});if(!j.ok)return toast(j.err||'Не удалось создать счёт');if(tg&&tg.openInvoice)tg.openInvoice(j.link,s=>{if(s==='paid'){toast('Оплачено ✅');setTimeout(()=>{loadMe();loadMining()},1200)}});else window.open(j.link,'_blank')}
-/* ---- апгрейдер ---- */
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){const pg=document.getElementById('mining');if(pg&&pg.classList.contains('active'))loadMining()}});
+/* ---- ARCHIVE / UPGRADER ---- */
 let AR=null,upgSel=[],upgTarget='';
-function setUpgTarget(t){upgTarget=t;document.querySelectorAll('#upgTargetRow .chip').forEach(b=>b.classList.toggle('on',(b.dataset.t||'')===t))}
+function upgTab(t){const nft=t==='nft';$('upgNftBlock').classList.toggle('hide',!nft);$('upgCoinBlock').classList.toggle('hide',nft);$('tabNft').classList.toggle('on',nft);$('tabCoin').classList.toggle('on',!nft);if(!nft)coinPreview()}
+let coinMult=2;
+function setCoinMult(m){coinMult=m;document.querySelectorAll('#coinMultRow .chip').forEach(b=>b.classList.toggle('on',Number(b.dataset.m)===m));coinPreview()}
+function coinPreview(){const table=(AR&&AR.coin_chance)||{1.5:60,2:40,3:22,5:10};const ch=table[coinMult]||table[String(coinMult)]||40;
+ const el=$('coinChance');if(el)el.textContent=ch+'%';const w=$('coinWheel');if(w)w.style.setProperty('--ch',ch);
+ const bet=Math.max(0,Math.floor(Number($('coinBet').value)||0));const st=$('coinStake');if(st)st.textContent=bet?fmt(bet)+' × '+coinMult+' = '+fmt(Math.floor(bet*coinMult)):'Введи сумму';
+ const p=$('coinPool');if(p)p.textContent='Пул архива: '+fmt((AR&&AR.pool)||0)+' RCOIN'}
+async function coinSpin(){const bet=Math.max(0,Math.floor(Number($('coinBet').value)||0));if(bet<10000)return toast('Минимум 10 000');const nd=$('coinNeedle');
+ nd.style.transition='transform 3.2s cubic-bezier(.12,.72,.1,1)';nd.style.transform='rotate('+(1800+Math.floor(Math.random()*360))+'deg)';
+ const j=await api('archive_spin_coins',{bet,mult:coinMult});await new Promise(r=>setTimeout(r,3200));
+ nd.style.transition='none';nd.style.transform='rotate(0deg)';
+ if(!j.ok){toast(j.err||'Не удалось');return}
+ if(j.win){$('coinStatus').textContent='Победа! +'+fmt(j.payout)+' RCOIN';$('coinStatus').style.color='#35d07f';confetti(80)}
+ else{$('coinStatus').textContent='Провал';$('coinStatus').style.color='#ff5268'}
+ setBalance(j.balance);if(AR){AR.pool=j.pool||AR.pool}coinPreview()}
+function setUpgTarget(t){upgTarget=t;document.querySelectorAll('#upgTargetRow .chip').forEach(b=>b.classList.toggle('on',(b.dataset.t||'')===t));renderSel()}
 function toggleUpgInv(force){const el=$('upgInv');const show=force===undefined?el.classList.contains('hide'):force;el.classList.toggle('hide',!show);$('upgAddBtn').textContent=show?'Скрыть инвентарь':'＋ Добавить подарок'}
 async function loadArchive(){const j=await api('archive_state');if(!j.ok)return toast(j.err||'Архив недоступен');AR=j;upgSel=upgSel.filter(id=>j.items.some(x=>x.id===id));
- $('archCount').textContent=j.archive+' NFT';const g=$('archGrid');g.innerHTML='';if(!j.gifts.length)g.innerHTML='<p class="muted">Архив пуст — улучшение выплатит коины.</p>';
+ $('archCount').textContent=j.archive+' NFT';
+ const g=$('archGrid');g.innerHTML='';if(!j.gifts.length)g.innerHTML='<p class="muted">Архив пуст — улучшение выплатит коины.</p>';
  j.gifts.forEach(x=>{const d=document.createElement('div');d.className='nft';const b=document.createElement('b');b.textContent=x.name;const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity;d.append(b,sm);if(x.price){const pr=document.createElement('div');pr.className='arch-price';pr.textContent='≈ '+fmt(x.price)+' RCOIN';d.append(pr)}g.append(d)});
  const box=$('upgPick');box.innerHTML='';if(!j.items.length)box.innerHTML='<p class="muted">Нет NFT — открой бокс в боте.</p>';
  j.items.forEach(x=>{const d=document.createElement('div');d.className='nft';d.dataset.id=x.id;const im=document.createElement('img');im.src=x.url;im.alt=x.name;im.loading='lazy';const b=document.createElement('b');b.textContent=x.name+' #'+x.id;const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity+' · '+fmt(x.value);d.append(im,b,sm);d.onclick=()=>toggleSel(x.id);box.append(d)});
  renderSel()}
 function toggleSel(id){const i=upgSel.indexOf(id);if(i>=0)upgSel.splice(i,1);else{if(upgSel.length>=5)return toast('Максимум 5 NFT');upgSel.push(id)}renderSel()}
 function renderSel(){document.querySelectorAll('#upgPick .nft').forEach(d=>d.classList.toggle('on',upgSel.includes(Number(d.dataset.id))));
- const items=((AR&&AR.items)||[]).filter(x=>upgSel.includes(x.id));const table=(AR&&AR.chance)||{};let ch=0;
- if(items.length){const best=items.reduce((a,b)=>((table[b.rt]||30)>(table[a.rt]||30)?b:a),items[0]);ch=Math.min(88,(table[best.rt]||30)+5*(items.length-1))}
- const w=$('upgWheel');if(w)w.style.setProperty('--ch',ch);$('upgChance').textContent=ch+'%';$('upgBtn').disabled=!items.length;
+ const items=((AR&&AR.items)||[]).filter(x=>upgSel.includes(x.id));const table=(AR&&AR.chance)||{};
+ let ch=0;if(items.length){const best=items.reduce((a,b)=>((table[b.rt]||30)>(table[a.rt]||30)?b:a),items[0]);ch=Math.min(88,(table[best.rt]||30)+5*(items.length-1))}
+ const w=$('upgWheel');if(w)w.style.setProperty('--ch',ch);$('upgChance').textContent=ch+'%';
+ $('upgBtn').disabled=!items.length;
  $('upgStake').textContent=items.length?('В круге: '+items.map(x=>'#'+x.id).join(' · ')):'Выбери до 5 NFT'}
 async function upgSpin(){if(!upgSel.length)return;const nd=$('upgNeedle');$('upgBtn').disabled=true;
- const j=await api('archive_spin',{ids:upgSel,target:upgTarget});
- if(!j.ok){$('upgBtn').disabled=false;return toast(j.err||'Не удалось')}
- /* стрелка останавливается по результату: зелёный сектор начинается сверху и идёт по часовой */
- const ch=j.chance;let stop;if(j.win)stop=Math.random()*ch*3.6*.8+ch*3.6*.1;else stop=ch*3.6+Math.random()*(360-ch*3.6)*.8+(360-ch*3.6)*.1;
- nd.style.transition='none';nd.style.transform='rotate(0deg)';void nd.offsetWidth;
- nd.style.transition='transform 4.2s cubic-bezier(.12,.72,.1,1)';nd.style.transform='rotate('+(1800+stop)+'deg)';
- await new Promise(r=>setTimeout(r,4300));$('upgBtn').disabled=false;
+ nd.style.transition='transform 3.2s cubic-bezier(.12,.72,.1,1)';
+ nd.style.transform='rotate('+(1800+Math.floor(Math.random()*360))+'deg)';
+ const j=await api('archive_spin',{ids:upgSel,target:upgTarget});await new Promise(r=>setTimeout(r,3200));
+ nd.style.transition='none';nd.style.transform='rotate(0deg)';$('upgBtn').disabled=false;
+ if(!j.ok)return toast(j.err||'Не удалось');
  if(j.win){$('upgStatus').textContent='Победа! '+j.name;$('upgStatus').style.color='#35d07f';confetti(90)}else{$('upgStatus').textContent='Провал — NFT ушли в архив';$('upgStatus').style.color='#ff5268'}
  setBalance(j.balance);upgSel=[];loadArchive()}
-/* ---- конфетти и финал арены ---- */
 function confetti(n=80){const box=document.createElement('div');box.className='confetti';const cols=['#ffd23d','#35d07f','#3d9bff','#ff7ab8','#ffffff'];for(let i=0;i<n;i++){const s=document.createElement('i');s.style.left=(Math.random()*100)+'%';s.style.top='-20px';s.style.background=cols[i%cols.length];s.style.animationDuration=(1.6+Math.random()*1.6)+'s';s.style.animationDelay=(Math.random()*.4)+'s';box.append(s)}document.body.append(box);setTimeout(()=>box.remove(),3800)}
-function arenaFinish(x,y){const sq=$('arenaSquare');if(!sq)return;sq.style.transformOrigin=x+'% '+y+'%';sq.classList.add('finish');confetti(130)}
-function arenaFinishReset(){const sq=$('arenaSquare');if(!sq)return;sq.classList.remove('finish');sq.style.transformOrigin='50% 50%'}
+function arenaFx(ph){if((window._lastPhase||'')!==ph){window._lastPhase=ph;if(ph==='done'&&AS&&AS.winner_idx>=0){confetti(120);$('arenaSquare').classList.add('finish');setTimeout(()=>$('arenaSquare').classList.remove('finish'),2200)}else{$('arenaSquare').classList.remove('finish')}}}
+applyAccent();applyLook();try{arenaAvatar=localStorage.getItem('rcoin_arena_avatar')||''}catch(e){}applyCustomIcons();initBallTrails();premiumize(document.body);_ceObs.observe(document.body,{childList:true,subtree:true,characterData:true});loadMe();go('home');
 </script></body></html>"""
 
 
@@ -6391,7 +6697,7 @@ async def _keepalive():
 
 
 async def start_web():
-    app = web.Application()
+    app = web.Application(client_max_size=20 * 1024 * 1024)
     app.router.add_get("/", page)
     app.router.add_get("/webapp", page)
     app.router.add_get("/health", health)
@@ -6406,11 +6712,12 @@ async def start_web():
                    "trade_sell": api_trade_sell, "it_state": api_it_state,
                    "it_task": api_it_task, "nft_state": api_nft_state, "nft_mint": api_nft_mint, "nft_set": api_nft_set,
                    "mining_state": api_mining_state, "mining_buy": api_mining_buy, "mining_collect": api_mining_collect,
-                   "archive_state": api_archive_state, "archive_spin": api_archive_spin, "nft_to_archive": api_nft_to_archive})
+                   "archive_state": api_archive_state, "archive_spin": api_archive_spin,
+                   "nft_photo": api_nft_photo, "nft_to_archive": api_nft_to_archive,
+                   "archive_spin_coins": api_archive_spin_coins})
     for name, fn in routes.items():
         app.router.add_post("/api/" + name, api(fn))
     app.router.add_get("/api/prices", _prices)
-    app.router.add_post("/api/invoice", invoice_handler)
     asyncio.create_task(_keepalive())
     runner = web.AppRunner(app)
     await runner.setup()
@@ -6480,9 +6787,7 @@ async def main():
                                    BotCommand(command="zp", description="Зарплата за активность в чате"),
                                    BotCommand(command="snowman", description="Снежный марафон и топ дня"),
                                    BotCommand(command="mining", description="Майнинг: серверы и добыча"),
-                                   BotCommand(command="archive", description="Архив: сверх лимита баланса"),
-                                   BotCommand(command="room", description="Приватная комната с кодом"),
-                                   BotCommand(command="donate", description="Донат звёздами"),
+                                   BotCommand(command="archive", description="Архив: что сверх лимита баланса"),
                                    BotCommand(command="help", description="Помощь")])
         if WEBAPP_URL:
             from aiogram.types import MenuButtonWebApp
@@ -6493,6 +6798,7 @@ async def main():
     asyncio.create_task(warm_nft_emojis())
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(arena_loop())
+    asyncio.create_task(db_backup_loop())
     while True:
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
@@ -6535,7 +6841,7 @@ BADGE_RANK = {
     "rubin": ("Premium", {"is_donater": 1}),
     "premium2": ("Premium", {"is_donater": 1}),
     "black": ("Donate", {"is_donater": 1}),
-    "blue": ("Verified", {"is_official": 1}),
+    "blue": ("Лудоман", {}),
     "ny": ("Event", {"is_official": 1}),
 }
 MAX_PROFILE_BADGES = 4
@@ -6568,6 +6874,10 @@ def init_tables():
         "CREATE TABLE IF NOT EXISTS it_progress(user_id INTEGER PRIMARY KEY, level INTEGER DEFAULT 1, xp INTEGER DEFAULT 0, coins INTEGER DEFAULT 0, tasks_done INTEGER DEFAULT 0, last_task INTEGER DEFAULT 0)",
         "CREATE TABLE IF NOT EXISTS snowman_daily(user_id INTEGER, day TEXT, snowballs INTEGER DEFAULT 0, snowmen INTEGER DEFAULT 0, last_collect INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0, PRIMARY KEY(user_id,day))",
         "CREATE TABLE IF NOT EXISTS snowman_rewards(day TEXT, user_id INTEGER, place INTEGER, amount INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0, PRIMARY KEY(day,place))",
+        "CREATE TABLE IF NOT EXISTS mining_servers(user_id INTEGER, tier INTEGER, bought_at INTEGER DEFAULT 0, expires_at INTEGER DEFAULT 0, PRIMARY KEY(user_id,tier))",
+        "CREATE TABLE IF NOT EXISTS nft_archive(id INTEGER PRIMARY KEY AUTOINCREMENT, rarity TEXT, name TEXT, photo TEXT, model TEXT, background TEXT, price INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS upg_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, nft_id INTEGER, rarity TEXT, result TEXT, chance INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY, owner_id INTEGER, bet INTEGER DEFAULT 0, players TEXT DEFAULT '[]', status TEXT DEFAULT 'wait', created_at INTEGER DEFAULT 0)",
     ):
         x(sql)
 
@@ -6613,7 +6923,10 @@ def my_badges(uid: int):
 
 
 def sync_badge_rank(uid: int) -> Optional[str]:
-    """Ставит ранг по старшей галочке игрока. Возвращает название ранга."""
+    """Ранг по старшей галочке. Ранг, выданный админом вручную, не перезаписываем."""
+    u = get_user(uid)
+    if int(u.get("is_admin_rank") or 0) or int(u.get("is_official") or 0):
+        return None
     have = set(my_badges(uid))
     for key in BADGE_ORDER:
         if key in have and key in BADGE_RANK:
@@ -6865,12 +7178,33 @@ def _nft_cocktail(d, cx, cy, accent):
 
 
 def _nft_blob(d, cx, cy, accent):
-    d.ellipse((cx - 90, cy - 84, cx + 90, cy + 92), fill=accent + (235,))
-    d.ellipse((cx - 92, cy - 48, cx - 42, cy + 2), fill=(255, 255, 255, 32))
-    d.ellipse((cx - 48, cy - 30, cx - 20, cy - 2), fill=(18, 24, 36))
-    d.ellipse((cx + 20, cy - 30, cx + 48, cy - 2), fill=(18, 24, 36))
-    d.arc((cx - 40, cy + 4, cx + 40, cy + 56), 12, 168, fill=(18, 24, 36), width=6)
-    d.polygon(_nft_star_points(cx + 68, cy - 62, 18, 7), fill=(255, 245, 190))
+    """Плюшевый персонаж в стиле Plush Pepe: объём, свечение, большие глаза и сердечко."""
+    r, g, b = accent[:3]
+    light = (min(255, r + 78), min(255, g + 78), min(255, b + 82))
+    deep = (int(r * .52), int(g * .48), int(b * .58))
+    for pad, a in ((30, 22), (20, 34), (12, 52)):
+        d.ellipse((cx - 96 - pad, cy - 100 - pad, cx + 96 + pad, cy + 104 + pad), fill=accent + (a,))
+    d.ellipse((cx - 88, cy - 98, cx + 88, cy + 102), fill=deep + (242,))
+    d.ellipse((cx - 84, cy - 94, cx + 84, cy + 94), fill=accent + (248,))
+    d.ellipse((cx - 62, cy - 84, cx - 14, cy - 36), fill=light + (70,))
+    d.ellipse((cx - 54, cy - 76, cx - 20, cy - 46), fill=(255, 255, 255, 55))
+    for dx in (-36, 36):
+        d.ellipse((cx + dx - 28, cy - 62, cx + dx + 28, cy + 2), fill=(255, 255, 255, 255))
+        d.ellipse((cx + dx - 15, cy - 50, cx + dx + 15, cy - 10), fill=(32, 48, 82, 255))
+        d.ellipse((cx + dx - 9, cy - 45, cx + dx + 1, cy - 33), fill=(255, 255, 255, 240))
+        d.ellipse((cx + dx + 3, cy - 20, cx + dx + 11, cy - 12), fill=(255, 255, 255, 175))
+    d.arc((cx - 22, cy + 12, cx + 22, cy + 44), 16, 164, fill=(38, 22, 40, 236), width=7)
+    d.ellipse((cx - 74, cy - 4, cx - 50, cy + 12), fill=(255, 140, 180, 70))
+    d.ellipse((cx + 50, cy - 4, cx + 74, cy + 12), fill=(255, 140, 180, 70))
+    d.ellipse((cx - 80, cy + 48, cx - 30, cy + 78), fill=accent + (255,))
+    d.ellipse((cx + 30, cy + 48, cx + 80, cy + 78), fill=accent + (255,))
+    hx, hy = cx, cy + 74
+    d.ellipse((hx - 26, hy - 18, hx + 2, hy + 8), fill=(255, 84, 138, 255))
+    d.ellipse((hx - 2, hy - 18, hx + 26, hy + 8), fill=(255, 84, 138, 255))
+    d.polygon([(hx - 24, hy - 6), (hx + 24, hy - 6), (hx, hy + 22)], fill=(255, 84, 138, 255))
+    d.ellipse((hx - 16, hy - 12, hx - 6, hy - 2), fill=(255, 255, 255, 140))
+    d.polygon(_nft_star_points(cx + 76, cy - 70, 17, 7), fill=(255, 250, 214))
+    d.polygon(_nft_star_points(cx - 74, cy - 58, 10, 4), fill=(255, 250, 214, 190))
 
 
 def _nft_rollix(d, cx, cy, accent):
@@ -7165,7 +7499,7 @@ def _nft_accessory(d, model: str, seed: int, cx: int, cy: int, accent):
         d.rectangle((cx - 58, cy - 114, cx + 58, cy - 96), fill=(246, 250, 255))
         d.ellipse((cx - 12, cy - 174, cx + 12, cy - 150), fill=(246, 250, 255))
     elif m == "Снежный":
-        d.arc((cx - 96, cy - 110, cx + 96, cy + 44), 198, 342, fill=(225, 245, 255, 190), width=8)
+        d.arc((cx - 96, cy - 122, cx + 96, cy + 30), 198, 342, fill=(225, 245, 255, 190), width=8)
         for x in (cx - 90, cx + 90):
             d.ellipse((x - 24, cy - 88, x + 24, cy - 40), fill=(238, 248, 255))
             d.ellipse((x - 12, cy - 76, x + 12, cy - 52), fill=(170, 210, 240))
@@ -7177,9 +7511,10 @@ def _nft_accessory(d, model: str, seed: int, cx: int, cy: int, accent):
         for x, col in ((cx - 30, (255, 80, 110)), (cx, (80, 205, 255)), (cx + 30, (110, 240, 150))):
             d.ellipse((x - 7, cy - 116, x + 7, cy - 102), fill=col)
     elif m == "Неоновый":
-        d.rounded_rectangle((cx - 70, cy - 40, cx + 70, cy + 8), radius=14,
-                            fill=(12, 12, 28, 120), outline=accent + (230,), width=4)
-        d.line((cx - 48, cy - 16, cx + 48, cy - 16), fill=(255, 255, 255, 210), width=2)
+        for dx in (-36, 36):
+            d.rounded_rectangle((cx + dx - 33, cy - 70, cx + dx + 33, cy + 8), radius=18,
+                                outline=accent + (235,), width=4)
+        d.line((cx - 10, cy - 34, cx + 10, cy - 34), fill=accent + (235,), width=4)
     elif m == "Призрачный":
         d.ellipse((cx - 62, cy - 166, cx + 62, cy - 132), outline=(255, 255, 255, 185), width=7)
         d.arc((cx - 62, cy - 166, cx + 62, cy - 132), 200, 340, fill=accent + (120,), width=3)
@@ -7296,7 +7631,7 @@ def _nft_top_pills(im, seed: int):
     w = im.width
     d = ImageDraw.Draw(im, "RGBA")
     f = _nft_font(True, 25)
-    _nft_pill(d, 34, 30, "RCOIN", f, icon=True)
+    _nft_pill(d, 34, 30, "RUBIN", f, icon=True)
     _nft_pill(d, w - 34, 30, f"#{seed}", f, right=True)
 
 
@@ -7309,7 +7644,7 @@ def _nft_bottom_labels(im, title: str, rarity: str, model: str, accent, big: boo
     d.text((38, h - 82), name, font=f1, fill=(255, 255, 255, 235))
     sub = f"{RARITY_NAME.get(str(rarity), str(rarity).title())} · {model or 'Стандартный'}"
     d.text((40, h - 40), sub, font=f2, fill=(255, 255, 255, 145))
-    d.text((w - 40 - d.textlength("RCOIN NFT", font=f2), h - 40), "RCOIN NFT", font=f2,
+    d.text((w - 40 - d.textlength("RUBIN NFT", font=f2), h - 40), "RUBIN NFT", font=f2,
            fill=accent + (185,))
 
 
@@ -7396,6 +7731,29 @@ def _nft_character_card(seed: int, title: str, photo: str, model: str,
     return out.getvalue()
 
 
+def _nft_blank_card(seed: int, title: str, rarity: str, level: int) -> bytes:
+    """Белая карточка для неулучшенного NFT: фото ещё нет."""
+    w, h = 1280, 720
+    accent = NFT_RARITY_COLOR.get(rarity, (200, 190, 255))
+    im = Image.new("RGBA", (w, h), (249, 250, 253, 255))
+    d = ImageDraw.Draw(im, "RGBA")
+    for y in range(h):
+        k = y / h
+        d.line((0, y, w, y), fill=(int(250 - 8 * k), int(251 - 8 * k), int(254 - 6 * k), 255))
+    d.rounded_rectangle((w // 2 - 210, 170, w // 2 + 210, 520), 44, outline=(206, 210, 222, 255), width=4)
+    d.ellipse((w // 2 - 58, 250, w // 2 + 58, 366), outline=(178, 186, 204, 255), width=7)
+    d.arc((w // 2 - 26, 292, w // 2 + 26, 344), 200, 340, fill=(178, 186, 204, 255), width=7)
+    d.text((w // 2, 420), "НЕ УЛУЧШЕН", font=_nft_font(True, 44), fill=(118, 128, 148, 255), anchor="mm")
+    d.text((w // 2, 470), "Улучши NFT, чтобы открыть арт", font=_nft_font(False, 24),
+           fill=(152, 160, 178, 255), anchor="mm")
+    _nft_top_pills(im, seed)
+    _nft_bottom_labels(im, title, rarity, "Ожидает улучшения", accent)
+    _nft_frame(im, rarity)
+    out = io.BytesIO()
+    im.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
 def _nft_watch_card(seed: int, title: str, model: str, background: str,
                     rarity: str, level: int) -> bytes:
     w, h = 1280, 720
@@ -7438,6 +7796,20 @@ def _nft_watch_card(seed: int, title: str, model: str, background: str,
 def png_nft(seed: int, title: str, photo: str = "", model: str = "",
             background: str = "", rarity: str = "common", level: int = 1) -> bytes:
     """Премиум-карточка NFT: тёмный фон, свет, объём, часы Rolex-класса для «Роликсов»."""
+    if photo == "blank":
+        return _nft_blank_card(seed, title, rarity, level)
+    if photo == "photo":
+        fp = NFT_DIR / f"photo_{seed}.png"
+        if fp.is_file():
+            try:
+                return _nft_photo_card(fp.read_bytes(), title, rarity, seed)
+            except Exception:
+                log.exception("photo nft card")
+    if photo and (NFT_DIR / str(photo)).is_file():
+        try:
+            return _nft_photo_card((NFT_DIR / str(photo)).read_bytes(), title, rarity, seed)
+        except Exception:
+            log.exception("photo nft card")
     if _nft_kind(photo, title) == "rollix":
         return _nft_watch_card(seed, title, model, background, rarity, level)
     return _nft_character_card(seed, title, photo, model, background, rarity, level)
@@ -7551,7 +7923,15 @@ async def cb_earn(cb: CallbackQuery):
 # =====================================================================
 #                      ЗАРПЛАТА ЗА АКТИВНОСТЬ (/зп)
 # =====================================================================
-SALARY_PER_MSG = 1_500
+SALARY_MIN_PER_MSG = 5_000
+SALARY_MAX_PER_MSG = 15_000
+
+
+def salary_reward(uid: int) -> int:
+    """5 000 за сообщение, до 15 000 при активности за день (shortcut: без истории прошлых дней)."""
+    row = q("SELECT msg_count FROM chat_activity WHERE user_id=? AND day=?", (uid, today()), one=True)
+    msgs = int(row["msg_count"] or 0) if row else 1
+    return min(SALARY_MAX_PER_MSG, SALARY_MIN_PER_MSG + msgs * 50)
 
 
 async def track_activity(message: Message):
@@ -7564,7 +7944,7 @@ async def track_activity(message: Message):
       "ON CONFLICT(user_id,day) DO UPDATE SET msg_count=msg_count+1", (tu.id, today()))
     if not user_exists(tu.id):
         get_user(tu.id)
-    x("UPDATE users SET salary_pending=salary_pending+? WHERE user_id=?", (SALARY_PER_MSG, tu.id))
+    x("UPDATE users SET salary_pending=salary_pending+? WHERE user_id=?", (salary_reward(tu.id), tu.id))
 
 
 class ActivityTrackingMiddleware(BaseMiddleware):
@@ -7592,7 +7972,7 @@ def salary_view(uid: int):
     amount, msgs = salary_amount(uid)
     text = (f"💼 <b>ЗАРПЛАТА ЗА АКТИВНОСТЬ</b>\n\n"
             f"💬 Сообщений в чате сегодня: <b>{fmt(msgs)}</b>\n"
-            f"💰 За каждое сообщение: <b>+{fmt(SALARY_PER_MSG)} RCOIN</b>\n"
+            f"💰 За сообщение: <b>{fmt(SALARY_MIN_PER_MSG)}–{fmt(SALARY_MAX_PER_MSG)}</b> RCOIN (растёт с активностью)\n"
             f"🔥 Накоплено: <b>{fmt(amount)}</b> RCOIN\n\n"
             + ("✅ Всё выплачено. Пиши ещё — начисления продолжаются!"
                if amount <= 0 else "🎁 Доступно к получению — нажми «Забрать»!"))
@@ -8303,6 +8683,49 @@ def api_nft_set(u, body):
     return {"ok": True, "msg": "Откреплено" if new_value == 0 else "Фото закреплено", "pinned": new_value}
 
 
+def api_nft_photo(u, body):
+    raw = str(body.get("image") or "")
+    if not raw.startswith("data:image"):
+        return w_err("Нужно фото")
+    try:
+        data = base64.b64decode(raw.split(",", 1)[1])
+    except Exception:
+        return w_err("Битое изображение")
+    if not data or len(data) > 8 * 1024 * 1024:
+        return w_err("Фото до 6 МБ")
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.verify()
+    except Exception:
+        return w_err("Это не картинка")
+    uid = u["user_id"]
+    if not is_admin(uid):
+        return w_err("NFT из фото создаёт только владелец")
+    title = (str(body.get("name") or "").strip() or "Фото NFT")[:30]
+    nid = make_nft(uid, title, "rare", "photo", "NFT из личного фото",
+                   RARITY_BASE["rare"], model="Призрачный", background="Галактика")
+    try:
+        NFT_DIR.mkdir(parents=True, exist_ok=True)
+        (NFT_DIR / f"photo_{nid}.png").write_bytes(data)
+        card = _nft_photo_card(data, title, "rare", nid)
+        (NFT_DIR / f"photo_{nid}_card.png").write_bytes(card)
+        kv_set(f"nftimg:{nid}", f"photo_{nid}_card.png")
+        kv_set(f"nftpng:{nid}", base64.b64encode(card).decode("ascii"))
+    except Exception:
+        log.exception("api_nft_photo save")
+    return {"ok": True, "msg": f"NFT #{nid} создан", "id": nid}
+
+
+def api_nft_to_archive(u, body):
+    try:
+        nid = int(body.get("id", 0))
+    except (TypeError, ValueError):
+        return w_err("Неверный NFT")
+    if not archive_take_nft(nid, u["user_id"]):
+        return w_err("NFT не найден или стоит на продаже")
+    return {"ok": True, "msg": "NFT пополнил архив"}
+
+
 def api_nft_mint(u, body):
     try:
         ok, msg = mint_nft(u["user_id"])
@@ -8476,89 +8899,11 @@ async def watchdog():
         await asyncio.sleep(3600)
 
 
+
 # =====================================================================
-#        ПРЕДНОВОГОДНЕЕ ОБНОВЛЕНИЕ RUBIN BOT
-#  лимиты 5ккк + АРХИВ · майнинг · NFT-архив и апгрейдер · комнаты ·
-#  донат Stars · Premium · исправления порядка обработчиков и NFT
+#            ПРЕДНОВОГОДНЕЕ ОБНОВЛЕНИЕ: АРХИВ / МАЙНИНГ / АПГРЕЙДЕР
 # =====================================================================
-MAX_BALANCE = int(os.getenv("MAX_BALANCE", "5000000000"))   # потолок баланса, остальное — в Архив
-MAX_BET = int(os.getenv("MAX_BET", "1000000000"))           # максимальная ставка
-MAX_TRANSFER = int(os.getenv("MAX_TRANSFER", "1000000000")) # максимальный перевод
-DONATE_RATE = 10_000_000       # 1 ⭐ = 10 000 000 RCOIN  (10⭐ = 100кк, 100⭐ = 1ккк)
-DONATE_MIN_STARS = 10
-PREMIUM_STARS = 100
 ARCHIVE_TG = "@rubinarxiv"
-
-USER_COLS.update({"archive_coin": "INTEGER DEFAULT 0", "mine_pending": "INTEGER DEFAULT 0",
-                  "mine_last": "INTEGER DEFAULT 0", "rank_manual": "INTEGER DEFAULT 0"})
-
-
-# ---------------------------- таблицы и первичное наполнение ----------------------------
-_init_db_orig = init_db
-
-
-def init_db():
-    _init_db_orig()
-    for sql in (
-        "CREATE TABLE IF NOT EXISTS mining_servers(user_id INTEGER, tier INTEGER, bought_at INTEGER DEFAULT 0, expires_at INTEGER DEFAULT 0, PRIMARY KEY(user_id,tier))",
-        "CREATE TABLE IF NOT EXISTS nft_archive(id INTEGER PRIMARY KEY AUTOINCREMENT, rarity TEXT, name TEXT, photo TEXT, model TEXT, background TEXT, price INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0)",
-        "CREATE TABLE IF NOT EXISTS upg_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, nft_id INTEGER, rarity TEXT, result TEXT, chance INTEGER DEFAULT 0, created_at INTEGER DEFAULT 0)",
-        "CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY, owner_id INTEGER, bet INTEGER DEFAULT 0, players TEXT DEFAULT '[]', status TEXT DEFAULT 'wait', created_at INTEGER DEFAULT 0)",
-    ):
-        x(sql)
-    ensure_cols("nft_archive", {"price": "INTEGER DEFAULT 0"})
-    try:
-        archive_seed()
-    except Exception:
-        log.exception("archive_seed")
-
-
-# ---------------------------- лимит баланса ----------------------------
-def add_coin(uid: int, n: int) -> int:
-    """Начисление с потолком MAX_BALANCE; излишек уходит в Архив. Возвращает сумму излишка."""
-    n = int(n)
-    if n <= 0:
-        if n < 0:
-            x("UPDATE users SET balance_coin=balance_coin+? WHERE user_id=?", (n, uid))
-        return 0
-    r = q("SELECT balance_coin FROM users WHERE user_id=?", (uid,), one=True)
-    cur = int(r["balance_coin"] or 0) if r else 0
-    add = min(n, max(0, MAX_BALANCE - cur))
-    over = n - add
-    if add:
-        x("UPDATE users SET balance_coin=balance_coin+? WHERE user_id=?", (add, uid))
-    if over:
-        x("UPDATE users SET archive_coin=COALESCE(archive_coin,0)+? WHERE user_id=?", (over, uid))
-    return over
-
-
-def cap_sweep():
-    """Страховка для мест, где баланс меняется прямым SQL (бонус, банк, зарплата, авто-чеки)."""
-    x("UPDATE users SET archive_coin=COALESCE(archive_coin,0)+(balance_coin-?), balance_coin=? WHERE balance_coin>?",
-      (MAX_BALANCE, MAX_BALANCE, MAX_BALANCE))
-
-
-async def cap_sweeper():
-    while True:
-        try:
-            cap_sweep()
-        except Exception:
-            log.exception("cap_sweep")
-        await asyncio.sleep(5)
-
-
-_take_bet_orig = take_bet
-
-
-async def take_bet(m: Message, u: Dict[str, Any], raw: str, count: int = 1) -> int:
-    """Ставка не выше MAX_BET; «все» = min(баланс, MAX_BET)."""
-    u2 = dict(u)
-    u2["balance_coin"] = min(int(u["balance_coin"]), MAX_BET)
-    bet = parse_amount(raw, u2["balance_coin"])
-    if bet * max(1, count) > MAX_BET:
-        await m.reply(f"{E('lock')} Максимальная ставка — <b>{fmt(MAX_BET)}</b> RCOIN.")
-        return 0
-    return await _take_bet_orig(m, u2, raw, count)
 
 
 # ---------------------------- АРХИВ БАЛАНСА ----------------------------
@@ -8571,8 +8916,7 @@ def archive_view(uid: int) -> str:
                f"💰 Баланс: <b>{fmt(bal)}</b> / лимит {fmt(MAX_BALANCE)}",
                f"🏛 В Архиве: <b>{fmt(arch)}</b>",
                f"📥 Доступно к снятию: {fmt(min(arch, room))}",
-               "Всё, что приходит сверх лимита, автоматически падает в Архив и не пропадает.",
-               "Снять: кнопками ниже или <code>архив снять 1кк</code>")
+               "Всё, что приходит сверх лимита, автоматически падает в Архив.")
 
 
 def archive_kb(uid: int) -> InlineKeyboardMarkup:
@@ -8582,6 +8926,7 @@ def archive_kb(uid: int) -> InlineKeyboardMarkup:
 
 
 def archive_withdraw(uid: int, amount: int = 0) -> tuple:
+    """Архив → баланс, не выше MAX_BALANCE. Возвращает (переведено, остаток архива)."""
     u = get_user(uid)
     arch = int(u.get("archive_coin") or 0)
     room = max(0, MAX_BALANCE - int(u.get("balance_coin") or 0))
@@ -8599,23 +8944,15 @@ def archive_withdraw(uid: int, amount: int = 0) -> tuple:
 @dp.message(P("архив", "archive"))
 async def cmd_archive(message: Message):
     uid = message.from_user.id
-    u = get_user(uid)
-    p = message.text.split()
-    if len(p) >= 2 and p[1].lower() in ("снять", "вывести", "withdraw"):
-        arch = int(u.get("archive_coin") or 0)
-        want = parse_amount(p[2], arch) if len(p) >= 3 else 0
-        got, left = archive_withdraw(uid, want)
-        if got <= 0:
-            return await message.reply(f"{E('lock')} Нечего снимать: архив пуст или баланс уже {fmt(MAX_BALANCE)}.")
-        return await message.reply(box(f"{E('treasury')} <b>Архив</b>", f"✅ Снято на баланс: <b>{fmt(got)}</b> RCOIN",
-                                       f"🏛 Осталось в архиве: {fmt(left)}"))
+    get_user(uid)
     await message.reply(archive_view(uid), reply_markup=archive_kb(uid))
 
 
 @dp.callback_query(F.data.startswith("arch:w:"))
 async def cb_archive_withdraw(cb: CallbackQuery):
     uid = cb.from_user.id
-    got, left = archive_withdraw(uid, int(cb.data.split(":")[2]))
+    amount = int(cb.data.split(":")[2])
+    got, left = archive_withdraw(uid, amount)
     if got <= 0:
         return await ans(cb, "Снимать нечего или баланс уже на лимите", True)
     await safe_edit(cb, archive_view(uid), archive_kb(uid))
@@ -8632,11 +8969,11 @@ MINING_SERVERS = [
     (4, "Квант", 5_000_000_000, 200_000_000),
 ]
 SERVER_BY_TIER = {v[0]: v for v in MINING_SERVERS}
-SERVER_STARS = 50
 
 
 def grant_server(uid: int, tier: int) -> bool:
-    if int(tier) not in SERVER_BY_TIER:
+    sv = SERVER_BY_TIER.get(int(tier))
+    if not sv:
         return False
     mining_sync(uid)
     x("INSERT INTO mining_servers(user_id,tier,bought_at,expires_at) VALUES(?,?,?,?) "
@@ -8669,21 +9006,22 @@ def mining_sync(uid: int) -> int:
     return pending
 
 
-def mining_view(uid: int):
+def mining_view(uid: int) -> str:
     pending = mining_sync(uid)
     rate = mining_rate(uid)
     owned = {r["tier"]: r for r in mining_servers(uid)}
     lines = [f"{E('miner')} <b>МАЙНИНГ</b>", ""]
     for tier, name, cost, per_day in MINING_SERVERS:
         if tier in owned:
-            lines.append(f"🟢 <b>{name}</b> — {fmt(per_day)}/сутки, осталось {dur(owned[tier]['expires_at'] - now())}")
+            left = dur(owned[tier]["expires_at"] - now())
+            lines.append(f"🟢 <b>{name}</b> — {fmt(per_day)}/сутки, осталось {left}")
         else:
             lines.append(f"⚪ <b>{name}</b> — {fmt(cost)} RCOIN · {fmt(per_day)}/сутки · 30 дней")
     rows = []
     for tier, name, cost, _ in MINING_SERVERS:
         if tier not in owned:
             rows.append([btn(f"{name} · {fmt(cost)}", f"mng:b:{tier}", "miner"),
-                         btn(f"{SERVER_STARS} ⭐", f"mng:s:{tier}", "star")])
+                         btn("50 ⭐", f"mng:s:{tier}", "star")])
     rows.append([btn(f"Снять {fmt(pending)}", "mng:c", "balance")])
     rows.append([btn("Назад", "menu:main", "door")])
     lines += ["", f"⛏ Добыча: <b>{fmt(rate)}</b>/сутки", f"📦 Накоплено: <b>{fmt(pending)}</b> RCOIN"]
@@ -8692,7 +9030,6 @@ def mining_view(uid: int):
 
 @dp.message(P("майнинг", "mining"))
 async def cmd_mining(message: Message):
-    get_user(message.from_user.id)
     text, markup = mining_view(message.from_user.id)
     await message.reply(text, reply_markup=markup)
 
@@ -8701,22 +9038,31 @@ async def cmd_mining(message: Message):
 async def cb_mining(cb: CallbackQuery):
     uid = cb.from_user.id
     parts = cb.data.split(":")
-    if parts[1] in ("b", "s"):
+    if parts[1] == "b":
         tier = int(parts[2])
         sv = SERVER_BY_TIER.get(tier)
         if not sv:
             return await ans(cb, "Нет такого сервера", True)
         if q("SELECT 1 FROM mining_servers WHERE user_id=? AND tier=? AND expires_at>?", (uid, tier, now()), one=True):
             return await ans(cb, "Уже куплен", True)
-        if parts[1] == "s":
-            await stars_invoice(uid, SERVER_STARS, f"Сервер «{sv[1]}»", f"Сервер на 30 дней за {SERVER_STARS} ⭐", f"server:{tier}")
-            return await ans(cb, f"Счёт на {SERVER_STARS} ⭐ выставлен")
         if not spend(uid, sv[2]):
             return await ans(cb, f"Нужно {fmt(sv[2])} RCOIN", True)
-        grant_server(uid, tier)
+        mining_sync(uid)
+        x("INSERT INTO mining_servers(user_id,tier,bought_at,expires_at) VALUES(?,?,?,?) "
+          "ON CONFLICT(user_id,tier) DO UPDATE SET expires_at=excluded.expires_at, bought_at=excluded.bought_at",
+          (uid, tier, now(), now() + MINING_TERM))
         text, markup = mining_view(uid)
         await safe_edit(cb, text, markup)
         return await ans(cb, f"Сервер «{sv[1]}» куплен!", True)
+    if parts[1] == "s":
+        tier = int(parts[2])
+        sv = SERVER_BY_TIER.get(tier)
+        if not sv:
+            return await ans(cb, "Нет такого сервера", True)
+        if q("SELECT 1 FROM mining_servers WHERE user_id=? AND tier=? AND expires_at>?", (uid, tier, now()), one=True):
+            return await ans(cb, "Уже куплен", True)
+        await stars_invoice(uid, 50, f"Сервер «{sv[1]}»", "Сервер на 30 дней за 50 ⭐", f"server:{tier}")
+        return await ans(cb, "Счёт на 50 ⭐ выставлен")
     if parts[1] == "c":
         pending = mining_sync(uid)
         if pending <= 0:
@@ -8730,9 +9076,15 @@ async def cb_mining(cb: CallbackQuery):
         return await ans(cb, f"+{fmt(pending - over)} RCOIN{note}", True)
 
 
-# ---------------------------- NFT-АРХИВ И АПГРЕЙДЕР ----------------------------
+# ---------------------------- NFT-АРХИВ / АПГРЕЙДЕР ----------------------------
 UPG_CHANCE = {"common": 30, "uncommon": 40, "rare": 50, "epic": 60, "legendary": 70}
 RARITY_IDX = {r: i for i, r in enumerate(RARITIES)}
+
+
+def archive_count() -> int:
+    return int(q("SELECT COUNT(*) c FROM nft_archive", one=True)["c"])
+
+
 PREMIUM_LOTS = [
     ("Дух Нового года", "🎆", "legendary", 1_000_000_000),
     ("Ёлка-мультивселенная", "🌌", "legendary", 850_000_000),
@@ -8743,10 +9095,6 @@ PREMIUM_LOTS = [
 ]
 
 
-def archive_count() -> int:
-    return int(q("SELECT COUNT(*) c FROM nft_archive", one=True)["c"])
-
-
 def archive_add(nft: dict, price: int = 0) -> None:
     x("INSERT INTO nft_archive(rarity,name,photo,model,background,price,created_at) VALUES(?,?,?,?,?,?,?)",
       (nft["rarity"], nft["name"], nft.get("photo") or "🎁", nft.get("model") or "Стандартный",
@@ -8755,16 +9103,18 @@ def archive_add(nft: dict, price: int = 0) -> None:
 
 def archive_seed(n: int = 40) -> int:
     """Наполняет NFT-архив, чтобы апгрейдер работал с первого дня."""
+    have = archive_count()
+    if have >= n:
+        return 0
     made = 0
-    if archive_count() < n:
-        per = max(2, n // len(RARITIES))
-        for rar in RARITIES:
-            for _ in range(per):
-                name, photo = random.choice(NFT_POOL[rar])
-                archive_add({"rarity": rar, "name": name, "photo": photo,
-                             "model": random.choice([m[0] for m in MODELS]),
-                             "background": random.choice([b[0] for b in BGS])})
-                made += 1
+    per = max(2, n // len(RARITIES))
+    for rar in RARITIES:
+        for _ in range(per):
+            name, photo = random.choice(NFT_POOL[rar])
+            archive_add({"rarity": rar, "name": name, "photo": photo,
+                         "model": random.choice([m[0] for m in MODELS]),
+                         "background": random.choice([b[0] for b in BGS])})
+            made += 1
     if not q("SELECT 1 FROM nft_archive WHERE price>=500000000", one=True):
         for name, photo, rar, price in PREMIUM_LOTS:
             archive_add({"rarity": rar, "name": name, "photo": photo,
@@ -8773,8 +9123,16 @@ def archive_seed(n: int = 40) -> int:
     return made
 
 
+def seed_nft_archive():
+    try:
+        ensure_cols("nft_archive", {"price": "INTEGER DEFAULT 0"})
+        archive_seed()
+    except Exception:
+        log.exception("seed_nft_archive")
+
+
 def archive_take_nft(nid: int, uid: int) -> bool:
-    """NFT игрока → в архив (для @rubinarxiv и проигрыша в апгрейдере)."""
+    """Переносит NFT игрока в архив (для @rubinarxiv и проигрыша в апгрейдере)."""
     n = q("SELECT * FROM nft_items WHERE id=? AND owner_id=?", (nid, uid), one=True)
     if not n or nft_is_infinite(n) or n["for_sale"]:
         return False
@@ -8784,19 +9142,64 @@ def archive_take_nft(nid: int, uid: int) -> bool:
     return True
 
 
+UPG_COIN_CHANCE = {1.5: 60, 2.0: 40, 3.0: 22, 5.0: 10}
+
+
+def upg_pool() -> int:
+    try:
+        return max(0, int(kv_get("upg:pool") or 0))
+    except Exception:
+        return 0
+
+
+def upg_pool_add(n: int):
+    kv_set("upg:pool", str(upg_pool() + int(n)))
+
+
+def upg_pool_take(n: int) -> bool:
+    pool = upg_pool()
+    if n <= 0 or pool < n:
+        return False
+    kv_set("upg:pool", str(pool - n))
+    return True
+
+
+def upg_coins(uid: int, bet: int, mult: float) -> dict:
+    """Апгрейд RCOIN: ставка уходит в пул, при победе выплата ставка×множитель из пула."""
+    bet = int(bet)
+    mult = float(mult)
+    if bet < 10_000:
+        return {"ok": False, "err": "Минимум 10 000 RCOIN"}
+    if bet > MAX_BALANCE:
+        return {"ok": False, "err": f"Максимум {fmt(MAX_BALANCE)}"}
+    if mult not in UPG_COIN_CHANCE:
+        return {"ok": False, "err": "Неверный множитель"}
+    chance = UPG_COIN_CHANCE[mult]
+    if not spend(uid, bet):
+        return {"ok": False, "err": "Недостаточно RCOIN"}
+    upg_pool_add(bet)
+    win = random.randint(1, 100) <= chance
+    payout = int(bet * mult)
+    if win:
+        if not upg_pool_take(payout):
+            upg_pool_take(bet)
+            add_coin(uid, bet)
+            return {"ok": False, "err": "В архиве апгрейдера не хватает RCOIN — пополни его"}
+        over = add_coin(uid, payout)
+        return {"ok": True, "win": True, "chance": chance, "payout": payout - over,
+                "archived": over, "pool": upg_pool()}
+    return {"ok": True, "win": False, "chance": chance, "pool": upg_pool()}
+
+
 def upg_chance(n: dict, bet: int = 0) -> int:
     return min(88, UPG_CHANCE.get(n["rarity"], 30) + min(10, max(0, int(bet)) // 100_000_000))
 
 
-def upg_stuck() -> int:
-    return int(q("SELECT COUNT(*) c FROM upg_log WHERE result='lose'", one=True)["c"])
-
-
 def upg_spin(uid: int, ids, bet: int = 0, target: str = "") -> dict:
-    """Апгрейдер: до 5 NFT игрока. Победа — подарок из архива (или коины), провал — NFT уходят в архив."""
+    """Крутит апгрейдер. ids — до 5 NFT игрока. Успех: подарок из архива или коины."""
     if isinstance(ids, int):
         ids = [ids]
-    ids = [int(i) for i in (ids or [])][:5]
+    ids = [int(x) for x in (ids or [])][:5]
     if not ids:
         return {"ok": False, "err": "Выбери NFT"}
     rows = [r for r in (q("SELECT * FROM nft_items WHERE id=? AND owner_id=?", (i, uid), one=True) for i in ids) if r]
@@ -8815,8 +9218,9 @@ def upg_spin(uid: int, ids, bet: int = 0, target: str = "") -> dict:
     if random.randint(1, 100) <= chance:
         all_rows = q("SELECT * FROM nft_archive")
         if target in RARITY_IDX:
-            pool = [r for r in all_rows if r["rarity"] == target] or \
-                   [r for r in all_rows if RARITY_IDX.get(r["rarity"], 0) >= RARITY_IDX[target]]
+            pool = [r for r in all_rows if r["rarity"] == target]
+            if not pool:
+                pool = [r for r in all_rows if RARITY_IDX.get(r["rarity"], 0) >= RARITY_IDX[target]]
         else:
             pool = [r for r in all_rows if RARITY_IDX.get(r["rarity"], 0) >= RARITY_IDX.get(best["rarity"], 0)]
         if not pool:
@@ -8828,14 +9232,16 @@ def upg_spin(uid: int, ids, bet: int = 0, target: str = "") -> dict:
                               model=pick["model"], background=pick["background"])
             x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
               (uid, ids[0], best["rarity"], "win", chance, now()))
-            return {"ok": True, "win": True, "chance": chance, "nft_id": new_id, "name": pick["name"],
-                    "rarity": RARITY_NAME.get(pick["rarity"], pick["rarity"]), "url": f"/nft/{new_id}"}
+            return {"ok": True, "win": True, "chance": chance, "nft_id": new_id,
+                    "name": pick["name"], "rarity": RARITY_NAME.get(pick["rarity"], pick["rarity"]),
+                    "url": f"/nft/{new_id}"}
+        # Архив пуст — улучшение выплачивается коинами.
         coins = max(int(stake * 1.5), RARITY_BASE.get(best["rarity"], 50_000))
         over = add_coin(uid, coins)
         x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
           (uid, ids[0], best["rarity"], "coins", chance, now()))
-        return {"ok": True, "win": True, "coins": coins - over, "archived": over, "chance": chance,
-                "name": f"{fmt(coins - over)} RCOIN", "rarity": "coins"}
+        return {"ok": True, "win": True, "coins": coins - over, "archived": over,
+                "chance": chance, "name": f"{fmt(coins - over)} RCOIN", "rarity": "coins"}
     for r in rows:
         archive_add(r)
     x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
@@ -8843,15 +9249,29 @@ def upg_spin(uid: int, ids, bet: int = 0, target: str = "") -> dict:
     return {"ok": True, "win": False, "chance": chance, "msg": "NFT ушли в архив"}
 
 
+def upg_stuck() -> int:
+    return int(q("SELECT COUNT(*) c FROM upg_log WHERE result='lose'", one=True)["c"])
+
+
 def api_archive_state(u, body):
     uid = u["user_id"]
     rows = q("SELECT * FROM nft_items WHERE owner_id=? AND for_sale=0 AND price>=0 ORDER BY id DESC LIMIT 40", (uid,))
-    return {"ok": True, "archive": archive_count(), "stuck": upg_stuck(), "chance": UPG_CHANCE,
+    return {"ok": True, "archive": archive_count(), "stuck": upg_stuck(),
+            "chance": UPG_CHANCE, "coin_chance": UPG_COIN_CHANCE, "pool": upg_pool(),
             "items": [{"id": r["id"], "name": r["name"], "rarity": RARITY_NAME.get(r["rarity"], r["rarity"]),
                        "rt": r["rarity"], "value": nft_value(r), "url": f"/nft/{r['id']}"} for r in rows],
             "gifts": [{"id": r["id"], "name": r["name"], "rarity": RARITY_NAME.get(r["rarity"], r["rarity"]),
                        "price": int(r.get("price") or 0)}
                       for r in q("SELECT * FROM nft_archive ORDER BY price DESC, id DESC LIMIT 12")]}
+
+
+def api_archive_spin_coins(u, body):
+    try:
+        bet = int(body.get("bet", 0))
+        mult = float(body.get("mult", 0))
+    except (TypeError, ValueError):
+        return w_err("Неверные данные")
+    return upg_coins(u["user_id"], bet, mult)
 
 
 def api_archive_spin(u, body):
@@ -8866,22 +9286,14 @@ def api_archive_spin(u, body):
     return upg_spin(u["user_id"], ids, bet, target)
 
 
-def api_nft_to_archive(u, body):
-    try:
-        nid = int(body.get("id", 0))
-    except (TypeError, ValueError):
-        return w_err("Неверный NFT")
-    if not archive_take_nft(nid, u["user_id"]):
-        return w_err("NFT не найден или стоит на продаже")
-    return {"ok": True, "msg": "NFT пополнил архив"}
-
-
 def api_mining_state(u, body):
     uid = u["user_id"]
     pending = mining_sync(uid)
     owned = {r["tier"]: r for r in mining_servers(uid)}
-    return {"ok": True, "pending": pending, "rate": mining_rate(uid),
-            "servers": [{"tier": t, "name": n, "cost": c, "per_day": p, "owned": t in owned,
+    rate = mining_rate(uid)
+    return {"ok": True, "pending": pending, "rate": rate, "cap": rate * 30,
+            "servers": [{"tier": t, "name": n, "cost": c, "per_day": p,
+                         "owned": t in owned,
                          "left": max(0, owned[t]["expires_at"] - now()) if t in owned else 0}
                         for t, n, c, p in MINING_SERVERS]}
 
@@ -8899,7 +9311,10 @@ def api_mining_buy(u, body):
         return w_err("Уже куплен")
     if not spend(uid, sv[2]):
         return w_err(f"Нужно {fmt(sv[2])} RCOIN")
-    grant_server(uid, tier)
+    mining_sync(uid)
+    x("INSERT INTO mining_servers(user_id,tier,bought_at,expires_at) VALUES(?,?,?,?) "
+      "ON CONFLICT(user_id,tier) DO UPDATE SET expires_at=excluded.expires_at, bought_at=excluded.bought_at",
+      (uid, tier, now(), now() + MINING_TERM))
     return {"ok": True, "msg": f"Сервер «{sv[1]}» куплен"}
 
 
@@ -8914,132 +9329,20 @@ def api_mining_collect(u, body):
     return {"ok": True, "got": pending - over, "archived": over, "msg": f"+{fmt(pending - over)} RCOIN"}
 
 
-async def invoice_handler(request: web.Request):
-    """Ссылка на оплату Stars для веб-приложения (донат, Premium, сервер)."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    tu = check_init(str(body.get("init", "")))
-    if not tu:
-        return web.json_response({"ok": False, "err": "Открой приложение через бота в Telegram"})
-    kind = body.get("kind")
-    try:
-        if kind == "prem":
-            title, desc, payload, stars = "RUBIN Premium", "Галочка, ранг «Лудоман», +50% к выигрышу", f"premium:{tu['id']}", PREMIUM_STARS
-        elif kind == "srv":
-            tier = int(body.get("tier", 0))
-            sv = SERVER_BY_TIER.get(tier)
-            if not sv:
-                return web.json_response({"ok": False, "err": "Нет такого сервера"})
-            title, desc, payload, stars = f"Сервер «{sv[1]}»", "30 дней работы", f"server:{tier}", SERVER_STARS
-        else:
-            stars = max(DONATE_MIN_STARS, int(body.get("stars", DONATE_MIN_STARS)))
-            title, desc, payload = f"{fmt(stars * DONATE_RATE)} RCOIN", "Пополнение баланса", f"donate:{stars * DONATE_RATE}"
-        link = await bot.create_invoice_link(title=title, description=desc, payload=payload, provider_token="",
-                                             currency="XTR", prices=[LabeledPrice(label=title[:32], amount=int(stars))])
-        return web.json_response({"ok": True, "link": link})
-    except Exception:
-        log.exception("invoice_handler")
-        return web.json_response({"ok": False, "err": "Не удалось создать счёт"})
-
-
-# ---------------------------- ПЕРЕДАЧА NFT НА @rubinarxiv ----------------------------
-_nft_transfer_orig = nft_transfer
-
-
-async def nft_transfer(uid: int, nid: int, target_token: str) -> str:
-    if (target_token or "").strip().lstrip("@").lower() in ("rubinarxiv", "rubin_archive"):
-        if not archive_take_nft(nid, uid):
-            return "NFT не найден, не твой или стоит на продаже."
-        return "✅ NFT отправлен в архив — его можно выиграть в апгрейдере."
-    return await _nft_transfer_orig(uid, nid, target_token)
-
-
-@dp.message(P("в архив", "вархив"))
-async def cmd_nft_to_archive(message: Message):
-    uid = message.from_user.id
-    p = message.text.split()
-    nid = 0
-    for token in p:
-        if token.startswith("#") and token[1:].isdigit():
-            nid = int(token[1:])
-    if not nid and len(p) >= 3 and p[2].lstrip("#").isdigit():
-        nid = int(p[2].lstrip("#"))
-    if not nid:
-        rows = q("SELECT id,name FROM nft_items WHERE owner_id=? ORDER BY id DESC LIMIT 8", (uid,))
-        if not rows:
-            return await message.reply("У тебя нет NFT.")
-        listing = "\n".join(f"• #{r['id']} — {esc(r['name'])}" for r in rows)
-        return await message.reply(box("🏛 <b>В NFT-АРХИВ</b>", listing, "Напиши: <code>в архив #12</code>"),
-                                   reply_markup=kb(*[[btn(f"#{r['id']} → архив", f"arx2:{r['id']}")] for r in rows[:6]]))
-    if archive_take_nft(nid, uid):
-        return await message.reply(box("🏛 <b>NFT В АРХИВЕ</b>", f"#{nid} теперь можно выиграть в апгрейдере."))
-    await message.reply("NFT не найден, не твой или стоит на продаже.")
-
-
-@dp.callback_query(F.data.startswith("arx2:"))
-async def cb_nft_to_archive(cb: CallbackQuery):
-    nid = int(cb.data.split(":")[1])
-    if archive_take_nft(nid, cb.from_user.id):
-        await safe_edit(cb, box("🏛 <b>NFT В АРХИВЕ</b>", f"#{nid} добавлен в апгрейдер."))
-        return await ans(cb, "В архиве", True)
-    await ans(cb, "Не получилось", True)
-
-
-@dp.message(P("нфтархив", "nftarchive"))
-async def cmd_nft_archive_info(message: Message):
-    get_user(message.from_user.id)
-    rows = [box("🏛 <b>NFT-АРХИВ</b>", f"В апгрейдере: <b>{archive_count()}</b> NFT",
-                f"Застряло (проигрыши): <b>{upg_stuck()}</b>",
-                f"Пополнить: передай NFT на {ARCHIVE_TG} или <code>в архив #id</code>")]
-    markup = None
-    if is_admin(message.from_user.id):
-        markup = kb([btn("Пополнить на 20", "arx:fill", "treasury")])
-    await message.reply(rows[0], reply_markup=markup)
-
-
-@dp.callback_query(F.data == "arx:fill")
-async def cb_admin_archive(cb: CallbackQuery):
-    if not is_admin(cb.from_user.id):
-        return await ans(cb, "Нет доступа", True)
-    made = archive_seed(archive_count() + 20)
-    await ans(cb, f"Архив +{made} NFT", True)
-
-
-# ---------------------------- NFT: белая заглушка до улучшения, NFT из фото ----------------------------
-def _nft_blank_card(seed: int, title: str, rarity: str, level: int) -> bytes:
-    """Белая карточка неулучшенного NFT: фото появится после улучшения."""
-    w, h = 1280, 720
-    accent = NFT_RARITY_COLOR.get(rarity, (200, 190, 255))
-    im = Image.new("RGBA", (w, h), (249, 250, 253, 255))
-    d = ImageDraw.Draw(im, "RGBA")
-    for y in range(h):
-        k = y / h
-        d.line((0, y, w, y), fill=(int(250 - 8 * k), int(251 - 8 * k), int(254 - 6 * k), 255))
-    d.rounded_rectangle((w // 2 - 210, 170, w // 2 + 210, 520), 44, outline=(206, 210, 222, 255), width=4)
-    d.ellipse((w // 2 - 58, 250, w // 2 + 58, 366), outline=(178, 186, 204, 255), width=7)
-    d.arc((w // 2 - 26, 292, w // 2 + 26, 344), 200, 340, fill=(178, 186, 204, 255), width=7)
-    d.text((w // 2, 420), "НЕ УЛУЧШЕН", font=_nft_font(True, 44), fill=(118, 128, 148, 255), anchor="mm")
-    d.text((w // 2, 470), "Улучши NFT, чтобы открыть арт", font=_nft_font(False, 24), fill=(152, 160, 178, 255), anchor="mm")
-    _nft_top_pills(im, seed)
-    _nft_bottom_labels(im, title, rarity, "Ожидает улучшения", accent)
-    _nft_frame(im, rarity)
-    out = io.BytesIO()
-    im.convert("RGB").save(out, format="PNG", optimize=True)
-    return out.getvalue()
-
-
+# ---------------------------- NFT ИЗ ФОТО (владелец) ----------------------------
 def _nft_photo_card(raw: bytes, title: str, rarity: str, seed: int = 0) -> bytes:
-    """Карточка NFT из загруженного фото: размытый фон + фото + рамка."""
+    """Карточка NFT из загруженного фото: размытый фон + фото по центру + рамка."""
     w, h = 1280, 720
     accent = NFT_RARITY_COLOR.get(rarity, (200, 190, 255))
     src = Image.open(io.BytesIO(raw)).convert("RGB")
     cover = src.copy()
     scale = max(w / cover.width, h / cover.height)
     cover = cover.resize((int(cover.width * scale) + 1, int(cover.height * scale) + 1), Image.LANCZOS)
-    cover = cover.crop(((cover.width - w) // 2, (cover.height - h) // 2, (cover.width - w) // 2 + w, (cover.height - h) // 2 + h))
-    im = ImageEnhance.Brightness(cover.filter(ImageFilter.GaussianBlur(26))).enhance(0.45).convert("RGBA")
+    cover = cover.crop(((cover.width - w) // 2, (cover.height - h) // 2,
+                        (cover.width - w) // 2 + w, (cover.height - h) // 2 + h))
+    im = cover.filter(ImageFilter.GaussianBlur(26))
+    im = ImageEnhance.Brightness(im).enhance(0.45)
+    im = im.convert("RGBA")
     inner = min(h - 220, w - 260)
     photo = src.copy()
     scale = inner / max(photo.width, photo.height)
@@ -9057,40 +9360,15 @@ def _nft_photo_card(raw: bytes, title: str, rarity: str, seed: int = 0) -> bytes
     return out.getvalue()
 
 
-_png_nft_orig = png_nft
-
-
-def png_nft(seed: int, title: str, photo: str = "", model: str = "", background: str = "",
-            rarity: str = "common", level: int = 1) -> bytes:
-    if photo == "blank":
-        return _nft_blank_card(seed, title, rarity, level)
-    try:
-        if photo == "photo":
-            fp = NFT_DIR / f"photo_{seed}.png"
-            if fp.is_file():
-                return _nft_photo_card(fp.read_bytes(), title, rarity, seed)
-        elif photo and str(photo).lower().endswith((".png", ".jpg", ".jpeg")) and (NFT_DIR / str(photo)).is_file():
-            return _nft_photo_card((NFT_DIR / str(photo)).read_bytes(), title, rarity, seed)
-    except Exception:
-        log.exception("photo nft card")
-    return _png_nft_orig(seed, title, photo, model, background, rarity, level)
-
-
-def gift_open(uid: int, gid: int) -> Optional[int]:
-    """Открытие бокса: NFT без фото (белый фон) — арт появится после улучшения."""
-    g = q("SELECT * FROM gifts WHERE id=?", (gid,), one=True)
-    if not g or g["used"] or g["owner_id"] not in (0, uid):
-        return None
-    if x("UPDATE gifts SET used=1, used_by=? WHERE id=? AND used=0 AND owner_id IN (0,?)", (uid, gid, uid))[0] != 1:
-        return None
-    name, _emoji = random.choice(NFT_POOL[g["rarity"]] if g["rarity"] in NFT_POOL else NFT_POOL["common"])
-    return make_nft(uid, name, g["rarity"], "blank", "Открыто из коллекционного бокса")
-
-
 async def _create_photo_nft(target_uid: int, photo, caption: str) -> Optional[int]:
+    """Скачивает фото и создаёт NFT. Возвращает id или None."""
     parts = [p.strip() for p in (caption or "").split(maxsplit=2)]
     title = parts[1][:30] if len(parts) > 1 and parts[1].lower() not in RARITY_BASE else "Фото NFT"
-    rarity = next((p.lower() for p in parts[1:] if p.lower() in RARITY_BASE), "rare")
+    rarity = "rare"
+    for p in parts[1:]:
+        if p.lower() in RARITY_BASE:
+            rarity = p.lower()
+            break
     try:
         f = await bot.get_file(photo.file_id)
         buf = await bot.download_file(f.file_path)
@@ -9098,12 +9376,14 @@ async def _create_photo_nft(target_uid: int, photo, caption: str) -> Optional[in
     except Exception:
         log.exception("nft photo download")
         return None
-    nid = make_nft(target_uid, title, rarity, "photo", "NFT из личного фото", RARITY_BASE[rarity],
-                   model="Призрачный", background="Галактика")
+    nid = make_nft(target_uid, title, rarity, "photo", "NFT из личного фото",
+                   RARITY_BASE[rarity], model="Призрачный", background="Галактика")
     try:
         NFT_DIR.mkdir(parents=True, exist_ok=True)
         (NFT_DIR / f"photo_{nid}.png").write_bytes(raw)
         card = _nft_photo_card(raw, title, rarity, nid)
+        (NFT_DIR / f"photo_{nid}_card.png").write_bytes(card)
+        kv_set(f"nftimg:{nid}", f"photo_{nid}_card.png")
         kv_set(f"nftpng:{nid}", base64.b64encode(card).decode("ascii"))
     except Exception:
         log.exception("nft photo save")
@@ -9118,21 +9398,16 @@ def _is_nft_photo(message: Message) -> bool:
 
 @dp.message(_is_nft_photo)
 async def cmd_nft_from_photo(message: Message):
-    """Владелец: фото с подписью «нфт Название редкость @юзер» — NFT по своему фото себе или игроку."""
     if not is_admin(message.from_user.id):
         return await message.reply(f"{E('lock')} Только для администрации.")
     photo = message.photo[-1] if message.photo else message.reply_to_message.photo[-1]
-    target = message.from_user.id
-    for token in (message.caption or "").split():
-        if token.startswith("@") or token.isdigit():
-            t = find_user(token)
-            if t:
-                target = t["user_id"]
-    nid = await _create_photo_nft(target, photo, re.sub(r"@\w+", "", message.caption or ""))
+    nid = await _create_photo_nft(message.from_user.id, photo, message.caption or "")
     if not nid:
         return await message.reply("Не удалось скачать фото.")
     n = q("SELECT * FROM nft_items WHERE id=?", (nid,), one=True)
-    caption = box("🎨 <b>NFT ИЗ ФОТО ГОТОВ</b>", nft_card(n), f"Номер: <code>#{nid}</code> · владелец: <code>{target}</code>")
+    caption = box("🎨 <b>NFT ИЗ ФОТО ГОТОВ</b>", nft_card(n),
+                  f"Номер: <code>#{nid}</code>",
+                  "Передать игроку: склад → NFT → «Передать».")
     try:
         raw = png_nft(nid, n["name"], n["photo"], n["model"], n["background"], n["rarity"], n["level"])
         await message.reply_photo(BufferedInputFile(raw, filename=f"nft_{nid}.png"), caption=caption)
@@ -9140,125 +9415,142 @@ async def cmd_nft_from_photo(message: Message):
         await message.reply(caption)
 
 
-# ---------------------------- ДОНАТ (Stars) И ОПЛАТА ----------------------------
-async def stars_invoice(uid: int, stars: int, title: str, description: str, payload: str) -> bool:
+@dp.message(Command("нфтфото"))
+async def cmd_nft_photo_reply(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    srcm = message.reply_to_message
+    if not srcm or not srcm.photo:
+        return await message.reply("Ответь этой командой на фото или отправь фото с подписью «нфтфото Название редкость».")
+    nid = await _create_photo_nft(message.from_user.id, srcm.photo[-1], message.text or "")
+    if not nid:
+        return await message.reply("Не удалось скачать фото.")
+    n = q("SELECT * FROM nft_items WHERE id=?", (nid,), one=True)
+    caption = box("🎨 <b>NFT ИЗ ФОТО ГОТОВ</b>", nft_card(n), f"Номер: <code>#{nid}</code>")
     try:
-        await bot.send_invoice(chat_id=uid, title=title, description=description[:255], payload=payload,
-                               provider_token="", currency="XTR", prices=[LabeledPrice(label=title[:32], amount=int(stars))])
-        return True
-    except Exception as e:
-        log.warning("invoice %s: %s", payload, e)
-        try:
-            await bot.send_message(uid, "Не удалось создать счёт. Открой диалог с ботом и попробуй снова.")
-        except Exception:
-            pass
-        return False
+        raw = png_nft(nid, n["name"], n["photo"], n["model"], n["background"], n["rarity"], n["level"])
+        await message.reply_photo(BufferedInputFile(raw, filename=f"nft_{nid}.png"), caption=caption)
+    except Exception:
+        await message.reply(caption)
 
 
-async def _donate_invoice(uid: int, stars: int) -> bool:
-    stars = int(stars)
-    if stars < DONATE_MIN_STARS:
-        await _dm(uid, f"Минимальная покупка — {DONATE_MIN_STARS} ⭐.")
-        return False
-    coins = stars * DONATE_RATE
-    return await stars_invoice(uid, stars, "Пополнение RCOIN", f"{fmt(coins)} RCOIN за {stars} ⭐", f"donate:{coins}")
-
-
-def donate_text(uid: int) -> str:
-    u = get_user(uid)
-    return (f"{E('donate')} <b>ПОПОЛНЕНИЕ RCOIN</b>\n\n{E('balance')} Баланс: <b>{fmt(u['balance_coin'])}</b> RCOIN\n"
-            f"{E('treasury')} Архив: {fmt(u.get('archive_coin') or 0)}\n\n"
-            f"⭐ <b>10 звёзд</b> → {fmt(10 * DONATE_RATE)} RCOIN\n⭐ <b>100 звёзд</b> → {fmt(100 * DONATE_RATE)} RCOIN\n"
-            f"Минимум {DONATE_MIN_STARS} ⭐. Любая сумма: <code>донат 25</code>")
-
-
-def donate_kb() -> InlineKeyboardMarkup:
-    return kb([btn("10 ⭐ → 100кк", "don:buy:10", "star")], [btn("100 ⭐ → 1ккк", "don:buy:100", "star")],
-              [btn("Своя сумма", "don:stars", "donate")],
-              [btn(f"RUBIN Premium · {PREMIUM_STARS} ⭐", "don:premium", "diamond")],
-              [btn("Назад", "menu:main", "door")])
-
-
-@dp.message(P("донат", "donate"))
-async def cmd_donate_new(message: Message):
-    get_user(message.from_user.id)
-    p = message.text.split()
-    if len(p) >= 2 and p[1].isdigit():
-        await _donate_invoice(message.from_user.id, int(p[1]))
-        return
-    await message.reply(donate_text(message.from_user.id), reply_markup=donate_kb())
-
-
-@dp.message(P("премиум", "premium"))
-async def cmd_premium(message: Message):
-    get_user(message.from_user.id)
-    await stars_invoice(message.from_user.id, PREMIUM_STARS, "RUBIN Premium",
-                        "Галочка «Лудоман», +50% к выигрышу, премиум-эмодзи", f"premium:{message.from_user.id}")
-
-
-@dp.callback_query(F.data.startswith("don:buy:"))
-async def cb_don_preset(cb: CallbackQuery):
-    await _donate_invoice(cb.from_user.id, int(cb.data.split(":")[2]))
-    await ans(cb)
-
-
-@dp.callback_query(F.data == "don:premium")
-async def cb_don_premium(cb: CallbackQuery):
-    if is_premium(cb.from_user.id):
-        return await ans(cb, "Premium уже активен", True)
-    await stars_invoice(cb.from_user.id, PREMIUM_STARS, "RUBIN Premium",
-                        "Галочка «Лудоман», +50% к выигрышу, премиум-эмодзи", f"premium:{cb.from_user.id}")
-    await ans(cb, "Счёт выставлен")
-
-
-@dp.callback_query(F.data == "don:stars")
-async def cb_don_custom(cb: CallbackQuery, state: FSMContext):
-    await ask(cb, state, "stars", f"Сколько звёзд ⭐ потратить? Минимум {DONATE_MIN_STARS}. 1 ⭐ = {fmt(DONATE_RATE)} RCOIN.")
-
-
-@flow("stars")
-async def f_stars_new(m: Message, state: FSMContext, d, txt):
-    if not txt.isdigit() or not DONATE_MIN_STARS <= int(txt) <= 100000:
-        return await m.reply(f"Введи целое число звёзд, не меньше {DONATE_MIN_STARS}.")
-    if await _donate_invoice(m.from_user.id, int(txt)):
-        await state.clear()
-
-
-@dp.message(F.successful_payment)
-async def on_paid_new(message: Message):
-    sp = message.successful_payment
-    if kv_get("pay:" + sp.telegram_payment_charge_id):
-        return
-    kv_set("pay:" + sp.telegram_payment_charge_id, "1")
+@dp.message(P("в архив", "вархив"))
+async def cmd_nft_to_archive(message: Message):
+    """Отправляет NFT в веб-архив: «в архив #12» или ответом на сообщение с номером."""
     uid = message.from_user.id
-    get_user(uid)
-    payload = sp.invoice_payload or ""
-    if payload.startswith("premium:"):
-        set_premium(uid, 30 * 86400)
-        give_badge(uid, "blue")
-        return await message.reply(box("💎 <b>RUBIN PREMIUM АКТИВЕН</b>", "30 дней премиума и голубая галочка",
-                                       "Ранг: <b>Лудоман</b> (ранг от админа не меняется)", "+50% к выигрышу · бонус ×2"))
-    if payload.startswith("server:"):
+    p = message.text.split()
+    nid = 0
+    for token in p:
+        if token.startswith("#") and token[1:].isdigit():
+            nid = int(token[1:])
+    if not nid and len(p) >= 3 and p[2].lstrip("#").isdigit():
+        nid = int(p[2].lstrip("#"))
+    if not nid:
+        rows = q("SELECT id,name FROM nft_items WHERE owner_id=? ORDER BY id DESC LIMIT 8", (uid,))
+        if not rows:
+            return await message.reply("У тебя нет NFT.")
+        listing = "\n".join(f"• #{r['id']} — {esc(r['name'])}" for r in rows)
+        return await message.reply(box("🏛 <b>В NFT-АРХИВ</b>", listing,
+                                       "Напиши: <code>в архив #12</code>"),
+                                   reply_markup=kb(*[[btn(f"#{r['id']} → архив", f"arx2:{r['id']}")] for r in rows[:6]]))
+    if archive_take_nft(nid, uid):
+        return await message.reply(box("🏛 <b>NFT В АРХИВЕ</b>",
+                                       f"#{nid} теперь можно выиграть в апгрейдере на сайте."))
+    await message.reply("NFT не найден, не твой или стоит на продаже.")
+
+
+@dp.callback_query(F.data.startswith("arx2:"))
+async def cb_nft_to_archive(cb: CallbackQuery):
+    nid = int(cb.data.split(":")[1])
+    if archive_take_nft(nid, cb.from_user.id):
+        await safe_edit(cb, box("🏛 <b>NFT В АРХИВЕ</b>", f"#{nid} добавлен в веб-архив."))
+        return await ans(cb, "В архиве", True)
+    await ans(cb, "Не получилось", True)
+
+
+@dp.message(P("нфт архив", "nft архив", "нфтархив"))
+async def cmd_nft_archive_view(message: Message):
+    lots = q("SELECT * FROM nft_archive ORDER BY price DESC, id DESC LIMIT 8")
+    lines = [f"🏛 <b>NFT-АРХИВ</b>", f"Всего NFT: <b>{archive_count()}</b>",
+             f"Пул выплат: <b>{fmt(upg_pool())}</b> RCOIN", ""]
+    for r in lots:
+        lines.append(f"• {RARITY_NAME.get(r['rarity'], r['rarity'])} · {esc(r['name'])}"
+                     + (f" · ≈{fmt(r['price'])}" if int(r.get('price') or 0) else ""))
+    rows = []
+    if is_admin(message.from_user.id):
+        rows = [[btn("Пополнить NFT (+25)", "arx:fill", "treasury")],
+                [btn("Пополнить пул на 100кк", "arx:pool:100000000", "balance")],
+                [btn("Пополнить пул на 1ккк", "arx:pool:1000000000", "balance")]]
+    await message.reply("\n".join(lines), reply_markup=kb(*rows) if rows else None)
+
+
+@dp.message(P("апгрейд архив"))
+async def cmd_upg_archive(message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.reply(f"{E('lock')} Только для владельца.")
+    parts = message.text.split()
+    rest = parts[2:] if len(parts) > 2 else []
+    if rest and rest[0].lower() in ("нфт", "nft"):
         try:
-            tier = int(payload.split(":")[1])
-        except (ValueError, IndexError):
-            tier = -1
-        sv = SERVER_BY_TIER.get(tier)
-        if sv and grant_server(uid, tier):
-            return await message.reply(box("🖥 <b>СЕРВЕР КУПЛЕН</b>", f"«{sv[1]}» на 30 дней",
-                                           f"Доход: {fmt(sv[3])} RCOIN/сутки", "Забирай добычу в разделе «Майнинг»"))
+            n = int(rest[1]) if len(rest) > 1 else 25
+        except ValueError:
+            n = 25
+        made = archive_seed(archive_count() + max(1, min(n, 200)))
+        return await message.reply(f"🏛 Архив пополнен на {made} NFT. Всего: {archive_count()}")
+    if rest:
+        amount = parse_amount(rest[0])
+        if amount <= 0:
+            return await message.reply("Формат: <code>апгрейд архив 100ккк</code> или <code>апгрейд архив нфт 25</code>")
+        upg_pool_add(amount)
+        return await message.reply(f"💰 Пул выплат пополнен на {fmt(amount)}. Сейчас: {fmt(upg_pool())}")
+    await message.reply(
+        box("🛠 <b>АРХИВ АПГРЕЙДЕРА</b>",
+            f"NFT в архиве: <b>{archive_count()}</b>",
+            f"Пул выплат: <b>{fmt(upg_pool())}</b> RCOIN",
+            "Пополнить: <code>апгрейд архив 100ккк</code>",
+            "NFT: <code>апгрейд архив нфт 25</code>"),
+        reply_markup=kb([btn("+25 NFT", "arx:fill", "treasury")],
+                        [btn("+100кк в пул", "arx:pool:100000000", "balance")]))
+
+
+@dp.callback_query(F.data.startswith("arx:pool:"))
+async def cb_pool_add(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        return await ans(cb, "Нет доступа", True)
+    amount = int(cb.data.split(":")[2])
+    upg_pool_add(amount)
+    await ans(cb, f"Пул: {fmt(upg_pool())} RCOIN", True)
+
+
+# ---------------------------- АДМИН: NFT-АРХИВ ----------------------------
+@dp.message(P("архивнфт", "nftarchive"))
+async def cmd_admin_archive(message: Message):
+    if not is_admin(message.from_user.id):
         return
-    if payload.startswith("donate:"):
-        coins = sp.total_amount * DONATE_RATE
-        over = add_coin(uid, coins)
-        note = f"\n🏛 Сверх лимита в Архив: {fmt(over)}" if over else ""
-        return await message.reply(box(f"{E('star')} <b>ПОПОЛНЕНИЕ УСПЕШНО!</b>", f"💰 +{fmt(coins - over)} RCOIN{note}", "Спасибо! 🎉"))
-    rbp = sp.total_amount * 5     # старые счета на RBP
-    x("UPDATE users SET balance_point=balance_point+? WHERE user_id=?", (rbp, uid))
-    await message.reply(box(f"{E('star')} <b>ПОПОЛНЕНИЕ УСПЕШНО!</b>", f"💎 +{fmt(rbp)} RBP", "Спасибо! 🎉"))
+    await message.reply(
+        box("🏛 <b>NFT-АРХИВ</b>",
+            f"В архиве: <b>{archive_count()}</b> NFT",
+            f"Застряло в апгрейдере: <b>{upg_stuck()}</b>",
+            "Пополнение: «передать» NFT боту @rubinarxiv."),
+        reply_markup=kb([btn("Пополнить на 20", "arx:fill", "treasury")],
+                        [btn("Сбросить счётчик", "arx:reset", "settings")]))
 
 
-# ---------------------------- ПРИВАТНЫЕ КОМНАТЫ С КОДОМ ----------------------------
+@dp.callback_query(F.data.startswith("arx:"))
+async def cb_admin_archive(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        return await ans(cb, "Нет доступа", True)
+    if cb.data == "arx:fill":
+        made = archive_seed(archive_count() + 20)
+        return await ans(cb, f"Архив +{made} NFT", True)
+    if cb.data == "arx:reset":
+        x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(0,0,'','reset',0,?)", (now(),))
+        return await ans(cb, "Счётчик обнулён", True)
+
+
+# =====================================================================
+#                  ПРИВАТНЫЕ КОМНАТЫ С КОДОМ
+# =====================================================================
 ROOM_MAX = 6
 
 
@@ -9277,8 +9569,9 @@ def room_save(code: str, players: list, status: str):
 
 
 def room_create(uid: int, bet: int) -> str:
+    """Создаёт комнату и сразу списывает ставку. Возвращает код или "" при нехватке денег."""
     bet = int(bet)
-    if bet <= 0 or bet > MAX_BET or not spend(uid, bet):
+    if bet <= 0 or not spend(uid, bet):
         return ""
     code = gen_code(6, string.digits)
     x("INSERT INTO rooms(code,owner_id,bet,players,status,created_at) VALUES(?,?,?,?,?,?)",
@@ -9307,9 +9600,11 @@ def room_join(uid: int, code: str) -> tuple:
 
 async def room_play(code: str):
     r = room_get(code)
-    if not r or r["status"] != "wait" or len(r["players"]) < 2:
+    if not r or r["status"] != "wait":
         return
     players = r["players"]
+    if len(players) < 2:
+        return
     room_save(code, players, "play")
     ids = [p["id"] for p in players]
     bets = {p["id"]: int(p["bet"]) for p in players}
@@ -9321,29 +9616,31 @@ async def room_play(code: str):
     treasury_add(rake)
     for uid in ids:
         settle(uid, "room", bets[uid], prize if uid == winner else 0, "room " + code)
-    txt = box("🎉 <b>ПРИВАТНАЯ КОМНАТА</b>", f"🔑 Код: <code>{code}</code>", f"🏆 Победитель: {uname(get_user(winner), False)}",
+    wu = get_user(winner)
+    txt = box("🎉 <b>ПРИВАТНАЯ КОМНАТА</b>",
+              f"🔑 Код: <code>{code}</code>",
+              f"🏆 Победитель: {uname(wu, False)}",
               f"💰 Банк: {fmt(pot)} · выигрыш: <b>{fmt(prize)}</b> RCOIN")
     for uid in ids:
-        await _dm(uid, txt)
-        await asyncio.sleep(0.05)
+        try:
+            await bot.send_message(uid, txt, reply_markup=kb([btn("Создать свою", "room:new", "arena")]))
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
 
 
 def room_view(uid: int) -> str:
     mine = q("SELECT * FROM rooms WHERE owner_id=? AND status='wait' ORDER BY created_at DESC LIMIT 1", (uid,), one=True)
-    return box("🔐 <b>ПРИВАТНАЯ КОМНАТА</b>", "Создай комнату, скинь другу код — и играйте на равных.",
-               "До 6 игроков · одинаковая ставка · 10% в казну.",
+    text = box("🔐 <b>ПРИВАТНАЯ КОМНАТА</b>",
+               "Создай комнату, скинь другу код — и играйте на равных.",
+               "До 6 игроков · ставка одинаковая · 10% в казну.",
                f"Твоя открытая комната: <code>{mine['code']}</code> · {fmt(mine['bet'])}" if mine else "Открытых комнат нет.")
-
-
-def room_kb() -> InlineKeyboardMarkup:
-    return kb([btn("Создать комнату", "room:new", "games")], [btn("Войти по коду", "room:join", "door")],
-              [btn("Назад", "menu:main", "door")])
+    return text
 
 
 @dp.message(P("комната", "приват", "room"))
 async def cmd_room(message: Message):
     uid = message.from_user.id
-    get_user(uid)
     p = message.text.split()
     if len(p) >= 2 and p[1].lower() in ("создать", "create"):
         bet = parse_amount(p[2], get_user(uid)["balance_coin"]) if len(p) >= 3 else 0
@@ -9352,20 +9649,24 @@ async def cmd_room(message: Message):
         code = room_create(uid, bet)
         if not code:
             return await message.reply(f"{E('lock')} Недостаточно RCOIN.")
-        return await message.reply(box("🔐 <b>КОМНАТА СОЗДАНА</b>", f"Код: <code>{code}</code>", f"Ставка: {fmt(bet)} RCOIN",
-                                       f"Друг входит: <code>комната войти {code}</code>"),
-                                   reply_markup=kb([btn("Позвать друга", url=deeplink("room_" + code))]))
+        return await message.reply(
+            box("🔐 <b>КОМНАТА СОЗДАНА</b>", f"Код: <code>{code}</code>",
+                f"Ставка: {fmt(bet)} RCOIN", "Отправь код другу: <code>комната войти " + code + "</code>"),
+            reply_markup=kb([btn("Позвать друга", url=deeplink("room_" + code))]))
     if len(p) >= 3 and p[1].lower() in ("войти", "join"):
         code = re.sub(r"\D", "", p[2])[:6]
         okj, res = room_join(uid, code)
         if not okj:
             return await message.reply(f"{E('lock')} {res}")
-        await message.reply(box("✅ <b>ТЫ В КОМНАТЕ</b>", f"Код: <code>{code}</code>", f"Игроков: {len(res['players'])}/{ROOM_MAX}",
-                                f"Ставка: {fmt(res['bet'])}"))
-        if len(res["players"]) >= 2:
+        players = res["players"]
+        await message.reply(box("✅ <b>ТЫ В КОМНАТЕ</b>", f"Код: <code>{code}</code>",
+                                f"Игроков: {len(players)}/{ROOM_MAX}", f"Ставка: {fmt(res['bet'])}"))
+        if len(players) >= 2:
             asyncio.create_task(room_play(code))
         return
-    await message.reply(room_view(uid), reply_markup=room_kb())
+    await message.reply(room_view(uid), reply_markup=kb(
+        [btn("Создать комнату", "room:new", "arena")],
+        [btn("Войти по коду", "room:join", "door")]))
 
 
 @dp.callback_query(F.data == "room:new")
@@ -9383,12 +9684,13 @@ async def f_room_bet(m: Message, state: FSMContext, d, txt):
     bet = parse_amount(txt, get_user(m.from_user.id)["balance_coin"])
     if bet <= 0 or bet > MAX_BET:
         return await m.reply(f"Ставка от 1 до {fmt(MAX_BET)}.")
-    code = room_create(m.from_user.id, bet)
+    uid = m.from_user.id
+    code = room_create(uid, bet)
     if not code:
         return await m.reply(f"{E('lock')} Недостаточно RCOIN.")
     await state.clear()
     await m.reply(box("🔐 <b>КОМНАТА СОЗДАНА</b>", f"Код: <code>{code}</code>", f"Ставка: {fmt(bet)}",
-                      f"Друг входит: <code>комната войти {code}</code>"))
+                      "Друг входит: <code>комната войти " + code + "</code>"))
 
 
 @flow("room_code")
@@ -9400,163 +9702,33 @@ async def f_room_code(m: Message, state: FSMContext, d, txt):
     if not okj:
         return await m.reply(res)
     await state.clear()
-    await m.reply(box("✅ <b>ТЫ В КОМНАТЕ</b>", f"Код: <code>{code}</code>", f"Игроков: {len(res['players'])}/{ROOM_MAX}"))
+    await m.reply(box("✅ <b>ТЫ В КОМНАТЕ</b>", f"Код: <code>{code}</code>",
+                      f"Игроков: {len(res['players'])}/{ROOM_MAX}"))
     if len(res["players"]) >= 2:
         asyncio.create_task(room_play(code))
 
 
-# ---------------------------- ГЛАВНОЕ МЕНЮ И РАЗДЕЛЫ ----------------------------
-def main_kb(uid: int, private: bool) -> InlineKeyboardMarkup:
-    u = get_user(uid)
-    avail, _ = bonus_state(u)
-    rows = []
-    if avail:
-        rows.append([btn(f"Получить бонус {fmt(BONUS_AMOUNT)}", "bonus:get", "donate")])
-    rows += [
-        [btn("Игры", "menu:games", "games"), btn("Профиль", "menu:profile", "profile")],
-        [btn("Ивенты", "menu:events", "star"), btn("Склад", "menu:stash", "diamond")],
-        [btn("Маркет", "menu:market", "market"), btn("Банк", "menu:bank", "bank")],
-        [btn("Майнинг", "menu:mining", "miner"), btn("Архив", "menu:archive", "treasury")],
-        [btn("Комнаты", "menu:rooms", "games"), btn("Санта-босс", "ev:boss", "crash")],
-        [btn("Донат", "menu:donate", "donate"), btn("Заработать", "menu:earn", "balance")],
-    ]
-    if daily5_available(uid):
-        rows.append([btn("Ежедневный 5×5", "menu:db5", "question")])
-    if private and WEBAPP_URL:
-        rows.append([btn("🌐 Веб-апп: арена, апгрейдер, майнинг", web=WEBAPP_URL)])
-    rows.append([btn("Топ", "menu:top", "star"), btn("Помощь", "menu:help", "question")])
-    return kb(*rows)
-
-
-async def v_mining_menu(uid: int, private: bool):
-    return mining_view(uid)
-
-
-async def v_archive_menu(uid: int, private: bool):
-    return archive_view(uid), archive_kb(uid)
-
-
-async def v_rooms_menu(uid: int, private: bool):
-    return room_view(uid), room_kb()
-
-
-async def v_donate_menu(uid: int, private: bool):
-    return donate_text(uid), donate_kb()
-
-
-VIEWS["mining"] = v_mining_menu
-VIEWS["archive"] = v_archive_menu
-VIEWS["rooms"] = v_rooms_menu
-VIEWS["donate"] = v_donate_menu
-
-
-# ---------------------------- РАНГ ОТ АДМИНА НЕ ЗАТИРАЕТСЯ ГАЛОЧКОЙ ----------------------------
-_admin_exec_orig = admin_exec
-
-
-def admin_exec(action: str, tid, a, by: int) -> str:
-    res = _admin_exec_orig(action, tid, a, by)
-    if action.startswith("rank_") and tid and not str(res).startswith(("❌", "⛔")):
-        x("UPDATE users SET rank_manual=? WHERE user_id=?", (0 if action == "rank_clear" else 1, tid))
-    return res
-
-
-_sync_badge_rank_orig = sync_badge_rank
-
-
-def sync_badge_rank(uid: int):
-    if int(get_user(uid).get("rank_manual") or 0):
-        return None
-    return _sync_badge_rank_orig(uid)
-
-
-# ---------------------------- NFT-КАРТИНКА ОБНОВЛЯЕТСЯ ПОСЛЕ УЛУЧШЕНИЯ ----------------------------
-def _nft_sig(row: dict) -> str:
-    raw = "|".join(str(row.get(k, "")) for k in ("photo", "model", "background", "rarity", "level", "name"))
-    return hashlib.md5(raw.encode()).hexdigest()[:10]
-
-
-async def nft_asset(request: web.Request):
-    try:
-        nid = int(request.match_info["nid"])
-    except (ValueError, TypeError):
-        raise web.HTTPNotFound()
-    row = q("SELECT id,photo,name,model,background,rarity,level FROM nft_items WHERE id=?", (nid,), one=True)
-    if not row:
-        raise web.HTTPNotFound()
-    head = {"Cache-Control": "public, max-age=60"}
-    cached = kv_get(f"nftpng:{nid}")
-    if cached and (nid == OWNER_NFT_ID or kv_get(f"nftsig:{nid}") == _nft_sig(row)):
-        try:
-            return web.Response(body=base64.b64decode(cached, validate=True), content_type="image/png", headers=head)
-        except Exception:
-            log.warning("NFT PNG повреждён: %s", nid)
-    try:
-        raw = png_nft(nid, row["name"], row.get("photo", ""), row.get("model", ""), row.get("background", ""),
-                      row.get("rarity", "common"), int(row.get("level", 1)))
-        kv_set(f"nftpng:{nid}", base64.b64encode(raw).decode("ascii"))
-        kv_set(f"nftsig:{nid}", _nft_sig(row))
-        return web.Response(body=raw, content_type="image/png", headers=head)
-    except Exception:
-        log.exception("nft_asset %s", nid)
-    return web.Response(text=svg_nft(nid, row["name"]), content_type="image/svg+xml", headers=head)
-
-
-def nft_public_url(url: str) -> str:
-    if not url:
+def backup_db() -> str:
+    """Копия SQLite-базы в backups/ — чтобы база не потерялась при рестарте."""
+    if DATABASE_URL:
         return ""
-    if url.startswith("http"):
-        return url
-    if url.startswith("db:") and WEBAPP_URL:
-        try:
-            nid = int(url.split(":", 1)[1])
-        except (TypeError, ValueError):
-            return ""
-        row = q("SELECT photo,name,model,background,rarity,level FROM nft_items WHERE id=?", (nid,), one=True) or {}
-        return f"{WEBAPP_URL}/nft/{nid}?v={_nft_sig(row)}"
-    return ""
+    src = Path(DB_FILE)
+    if not src.exists():
+        return ""
+    try:
+        dst_dir = Path("backups")
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / f"{src.stem}-{datetime.now(MSK):%Y%m%d-%H%M%S}.db"
+        with src.open("rb") as f, dst.open("wb") as g:
+            g.write(f.read())
+        log.info("Бэкап БД: %s", dst)
+        return str(dst)
+    except Exception:
+        log.exception("backup_db")
+        return ""
 
 
-# ---------------------------- БЭКАП БАЗЫ ВЛАДЕЛЬЦУ ----------------------------
-async def backup_to_owner():
-    while True:
-        await asyncio.sleep(3 * 3600)
-        try:
-            path = backup_db()
-            if path and bot and OWNER_ID:
-                await bot.send_document(OWNER_ID, FSInputFile(path), caption="🗄 Бэкап базы RCOIN")
-        except Exception:
-            log.exception("backup_to_owner")
-
-
-_main_orig = main
-
-
-async def main():
-    asyncio.create_task(cap_sweeper())
-    asyncio.create_task(backup_to_owner())
-    await _main_orig()
-
-
-# ---------------------------- ПОРЯДОК ОБРАБОТЧИКОВ ----------------------------
-def _fix_handler_order():
-    # «Команда не найдена» ловила ЛЮБОЙ текст на «/» раньше поздних обработчиков (/mining, /archive, /zp, /badges...).
-    mh = dp.message.handlers
-    unk = [h for h in mh if getattr(h.callback, "__name__", "") == "unknown_command"]
-    for h in unk:
-        mh.remove(h)
-    mh.extend(unk)
-    # «Чеканить NFT» (ev:mint) перехватывался общим обработчиком ev: и не делал ничего.
-    ch = dp.callback_query.handlers
-    mint = [h for h in ch if getattr(h.callback, "__name__", "") == "cb_ev_mint"]
-    idx = next((i for i, h in enumerate(ch) if getattr(h.callback, "__name__", "") == "cb_events"), None)
-    if mint and idx is not None:
-        for h in mint:
-            ch.remove(h)
-        ch[idx:idx] = mint
-
-
-_fix_handler_order()
+atexit.register(backup_db)
 
 
 if __name__ == "__main__":
@@ -9564,3 +9736,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         log.info("Бот остановлен")
+    finally:
+        backup_db()
