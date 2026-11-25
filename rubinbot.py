@@ -3117,6 +3117,57 @@ async def cmd_check_book(message: Message):
     await message.reply(t, reply_markup=k)
 
 
+GIGACHAT_AUTH = os.getenv("GIGACHAT_AUTH", "").strip()
+
+
+async def ai_answer(prompt: str, system: str = "") -> Optional[str]:
+    """Ответ внешней модели (GigaChat). Без ключа возвращает None."""
+    if not GIGACHAT_AUTH or not prompt.strip():
+        return None
+    import aiohttp
+    try:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
+            async with s.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+                              headers={"Authorization": "Basic " + GIGACHAT_AUTH,
+                                       "RqUID": gen_code(16, "0123456789abcdef"),
+                                       "Content-Type": "application/x-www-form-urlencoded"},
+                              data={"scope": "GIGACHAT_API_PERS"}) as r:
+                token = (await r.json()).get("access_token")
+            if not token:
+                return None
+            msgs = ([{"role": "system", "content": system}] if system else []) + \
+                   [{"role": "user", "content": prompt[:4000]}]
+            async with s.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+                              headers={"Authorization": "Bearer " + token},
+                              json={"model": "GigaChat", "messages": msgs, "temperature": 0.7}) as r:
+                data = await r.json()
+                return (data["choices"][0]["message"]["content"] or "").strip()[:3500]
+    except Exception:
+        log.exception("ai_answer")
+        return None
+
+
+@dp.message(P("ассистент", "ии", "ai"))
+async def cmd_assistant(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    prompt = message.text.split(maxsplit=1)
+    if len(prompt) < 2:
+        return await message.reply("🤖 <b>AI-ассистент</b>\nНапиши задачу: <code>ассистент добавь игру на реакцию</code>",
+                                   reply_markup=kb([btn("Статус ключа", "ai:status")]))
+    if not GIGACHAT_AUTH:
+        return await message.reply("🔑 Нужен ключ GigaChat: задай переменную окружения <code>GIGACHAT_AUTH</code> "
+                                   "(base64 client_id:client_secret). После этого ассистент заработает без правок кода.")
+    await message.reply("⏳ Думаю…")
+    ans = await ai_answer(prompt[1], system="Ты помощник разработчика Telegram-бота на aiogram. Отвечай кратко и по делу, код — блоками.")
+    await message.reply((ans or "Не удалось получить ответ.")[:4000])
+
+
+@dp.callback_query(F.data == "ai:status")
+async def cb_ai_status(cb: CallbackQuery):
+    await ans(cb, "Ключ задан" if GIGACHAT_AUTH else "Ключ не задан (GIGACHAT_AUTH)", True)
+
+
 @dp.inline_query()
 async def inline_checks(query: InlineQuery):
     raw = (query.query or "").strip()
@@ -3125,23 +3176,27 @@ async def inline_checks(query: InlineQuery):
     u = get_user(uid)
     results = []
     if low.startswith(("чек", "check")):
-        parts = raw.split(maxsplit=2)
+        parts = raw.split(maxsplit=3)
         amount = parse_amount(parts[1], u["balance_coin"]) if len(parts) > 1 else 0
-        note = (parts[2].strip() if len(parts) > 2 else "")[:180]
-        tok = gen_code(6) if note else ""
-        if tok:
-            kv_set("inl:" + tok, note)
+        act = 1
+        rest = parts[2:]
+        if rest and rest[0].strip().isdigit():
+            act = max(1, min(int(rest[0].strip()), 100000))
+            rest = rest[1:]
+        note = (" ".join(rest).strip() if rest else "")[:180]
+        tok = gen_code(6)
+        kv_set("inl:" + tok, note + "\x1f" + str(act))
         if amount > 0:
             results.append(InlineQueryResultArticle(
                 id=f"check:{amount}",
-                title=f"Чек на {fmt(amount)} RCOIN" + (" с текстом" if note else ""),
-                description=(note or f"Создать чек на {fmt(amount)} RCOIN") + f" · баланс {fmt(u['balance_coin'])}",
+                title=f"Чек на {fmt(amount)} RCOIN" + (f" · {act} акт." if act > 1 else "") + (" · с текстом" if note else ""),
+                description=(note or f"Создать чек на {fmt(amount)} RCOIN") + f" · {act} активаций · баланс {fmt(u['balance_coin'])}",
                 input_message_content=InputTextMessageContent(
                     message_text=f"{E('check')} <b>Чек на {fmt(amount)} RCOIN</b>\n"
                                  + (f"{esc(note)}\n" if note else "")
                                  + "Нажми кнопку, чтобы создать чек.",
                     parse_mode=ParseMode.HTML),
-                reply_markup=kb([btn(f"Создать чек · {fmt(amount)}", f"ck:inl:{amount}:{tok}",
+                reply_markup=kb([btn(f"Создать чек · {fmt(amount)}", f"ck:inl:{amount}:{act}:{tok}",
                                      icon="check", style="success")]),
             ))
         else:
@@ -3153,6 +3208,17 @@ async def inline_checks(query: InlineQuery):
                     message_text="Напиши в инлайн-режиме: <code>чек 1000</code>",
                     parse_mode=ParseMode.HTML),
             ))
+    elif low.startswith((".ai ", ".r ", "аи ")):
+        prompt = raw.split(maxsplit=1)[1].strip() if len(raw.split(maxsplit=1)) > 1 else ""
+        answer = await ai_answer(prompt) if prompt else None
+        text = answer or ("🔑 AI не настроен: добавь GIGACHAT_AUTH на хостинге." if not GIGACHAT_AUTH else "Не удалось ответить.")
+        results.append(InlineQueryResultArticle(
+            id="ai",
+            title="AI: " + (prompt[:40] or "вопрос"),
+            description=text[:120],
+            input_message_content=InputTextMessageContent(
+                message_text=f"🤖 <b>AI</b>\n<i>{esc(prompt[:200])}</i>\n\n{esc(text[:3000])}",
+                parse_mode=ParseMode.HTML)))
     else:
         rows = q("SELECT user_id,display_name,username,balance_coin FROM users ORDER BY balance_coin DESC LIMIT 10")
         lines = [f"{E('win')} <b>ТОП RCOIN</b>"]
@@ -3184,7 +3250,11 @@ async def cb_checks(cb: CallbackQuery, state: FSMContext):
     if act == "inl":
         try:
             amount = int(parts[2])
-            note = kv_get("inl:" + parts[3]) if len(parts) > 3 and parts[3] else ""
+            act = max(1, min(int(parts[3]), 100000)) if len(parts) > 3 else 1
+            raw_note = kv_get("inl:" + parts[4]) if len(parts) > 4 and parts[4] else ""
+            note, _, act_saved = (raw_note or "").partition("\x1f")
+            if act_saved.isdigit():
+                act = max(1, min(int(act_saved), 100000))
         except (IndexError, ValueError):
             return await ans(cb, "Неверная сумма", True)
         if amount <= 0:
@@ -3193,7 +3263,7 @@ async def cb_checks(cb: CallbackQuery, state: FSMContext):
             return await ans(cb, "Недостаточно RCOIN", True)
         cid = gen_code()
         x("INSERT INTO checks(check_id,owner_id,amount,max_activations,description,created_at) VALUES(?,?,?,?,?,?)",
-          (cid, uid, amount, 1, (note or "Инлайн-чек")[:200], now()))
+          (cid, uid, amount, act, (note or "Инлайн-чек")[:200], now()))
         text = box(f"{E('check')} <b>Чек создан!</b>", f"💰 {fmt(amount)} RCOIN",
                    ("Сообщение: " + esc(note)) if note else "Отправь ссылку тому, кому хочешь передать чек.")
         markup = kb([btn(f"Забрать {fmt(amount)}", url=deeplink("check_" + cid), icon="check")])
@@ -6410,6 +6480,10 @@ input{background:#0f0f12!important;border:1px solid #2b2b31!important;border-rad
 .tc-btn.primary{background:linear-gradient(165deg,var(--acc1),var(--acc2));color:#fff}
 .tc-btn.dark{background:#16233b;color:#6aa8ff}
 .tc-turbine-wrap{position:relative;display:grid;place-items:center;margin:18px 0 2px}
+.fan-wrap{position:relative;width:min(86vw,320px);aspect-ratio:1;border-radius:50%;overflow:hidden;box-shadow:0 30px 80px #6b3de877,0 0 0 1px #ffffff1a}
+.fan-img{width:100%;height:100%;object-fit:cover;display:block;animation:fanspin 8s linear infinite;filter:saturate(1.12) brightness(1.06)}
+.fan-core{position:absolute;inset:0;margin:auto;width:33%;height:33%;border-radius:50%;display:grid;place-items:center;font-weight:900;font-size:26px;color:#fff;background:radial-gradient(circle at 36% 28%,#ff9db4,#e0284f 55%,#7d0b27);box-shadow:0 0 34px #e0284f99,inset 0 2px 10px #ffffff66;border:2px solid #ffd0da66}
+.fan-core:after{content:"";position:absolute;inset:-8px;border-radius:50%;border:1px solid #ffffff22}
 .turbine{width:min(86vw,332px);height:auto;filter:drop-shadow(0 34px 90px #6b3de877)}
 .tc-btn.glass{background:linear-gradient(165deg,#ffffff1a,#ffffff08)!important;border:1px solid #ffffff1f!important;color:#5aa2ff!important;box-shadow:inset 0 1px 0 #ffffff26,0 8px 20px #00000040!important;backdrop-filter:blur(18px) saturate(1.4);-webkit-backdrop-filter:blur(18px) saturate(1.4)}
 .fan{animation:fanspin 9s linear infinite;transform-origin:110px 110px}
@@ -6485,7 +6559,7 @@ input{background:#0f0f12!important;border:1px solid #2b2b31!important;border-rad
 <section id="mining" class="page">
 <div class="tc-card"><div class="tc-head"><div><div class="tc-label">Баланс</div><div class="tc-bal"><b id="mineBal">0</b> <span>RCOIN</span></div></div><div class="tc-head-r"><span class="tc-chip" id="mineServers">0 серверов</span><span class="tc-help" onclick="toast('Серверы дают доход 30 дней. Забери добычу кнопкой «Снять».')">?</span></div></div>
 <div class="tc-actions"><button class="tc-btn glass" onclick="mineScroll()">Купить</button><button class="tc-btn glass" onclick="toast('Награда копится сама — жми «Снять»')">Награды</button><button class="tc-btn glass" onclick="mineCheck()">Проверить</button></div></div>
-<div class="tc-turbine-wrap"><div class="tc-dot"></div><svg class="turbine" viewBox="0 0 240 240" aria-hidden="true"><defs><linearGradient id="tRing" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4a3486"/><stop offset=".5" stop-color="#171026"/><stop offset="1" stop-color="#5a3ea6"/></linearGradient><radialGradient id="tDisc" cx="42%" cy="32%" r="66%"><stop offset="0" stop-color="#2a1a52"/><stop offset="1" stop-color="#0a0613"/></radialGradient><radialGradient id="tRuby" cx="38%" cy="32%" r="70%"><stop offset="0" stop-color="#ff9db4"/><stop offset=".55" stop-color="#e0284f"/><stop offset="1" stop-color="#7d0b27"/></radialGradient><linearGradient id="tBlade" x1="0" y1="0" x2=".8" y2="1"><stop offset="0" stop-color="#b48bff"/><stop offset=".5" stop-color="#7a42ec"/><stop offset="1" stop-color="#3f1a9c"/></linearGradient><clipPath id="tClip"><circle cx="120" cy="120" r="96"/></clipPath></defs><circle cx="120" cy="120" r="114" fill="none" stroke="#3a3550" stroke-width="2" stroke-dasharray="3 7" opacity=".6"/><circle cx="120" cy="120" r="104" fill="none" stroke="url(#tRing)" stroke-width="14"/><circle cx="120" cy="120" r="96" fill="url(#tDisc)"/><g clip-path="url(#tClip)"><g class="fan"><g transform="rotate(0 120 120)"><path d="M120 120 C 86 96 66 44 96 12 C 150 12 190 58 184 102 C 162 128 136 130 120 120 Z" fill="url(#tBlade)"/><path d="M96 12 C 150 12 190 58 184 102" stroke="#ffffff" stroke-opacity=".42" stroke-width="4" fill="none"/><path d="M120 120 C 86 96 66 44 96 12" stroke="#1b0840" stroke-opacity=".55" stroke-width="4" fill="none"/></g><g transform="rotate(60 120 120)"><path d="M120 120 C 86 96 66 44 96 12 C 150 12 190 58 184 102 C 162 128 136 130 120 120 Z" fill="url(#tBlade)"/><path d="M96 12 C 150 12 190 58 184 102" stroke="#ffffff" stroke-opacity=".42" stroke-width="4" fill="none"/><path d="M120 120 C 86 96 66 44 96 12" stroke="#1b0840" stroke-opacity=".55" stroke-width="4" fill="none"/></g><g transform="rotate(120 120 120)"><path d="M120 120 C 86 96 66 44 96 12 C 150 12 190 58 184 102 C 162 128 136 130 120 120 Z" fill="url(#tBlade)"/><path d="M96 12 C 150 12 190 58 184 102" stroke="#ffffff" stroke-opacity=".42" stroke-width="4" fill="none"/><path d="M120 120 C 86 96 66 44 96 12" stroke="#1b0840" stroke-opacity=".55" stroke-width="4" fill="none"/></g><g transform="rotate(180 120 120)"><path d="M120 120 C 86 96 66 44 96 12 C 150 12 190 58 184 102 C 162 128 136 130 120 120 Z" fill="url(#tBlade)"/><path d="M96 12 C 150 12 190 58 184 102" stroke="#ffffff" stroke-opacity=".42" stroke-width="4" fill="none"/><path d="M120 120 C 86 96 66 44 96 12" stroke="#1b0840" stroke-opacity=".55" stroke-width="4" fill="none"/></g><g transform="rotate(240 120 120)"><path d="M120 120 C 86 96 66 44 96 12 C 150 12 190 58 184 102 C 162 128 136 130 120 120 Z" fill="url(#tBlade)"/><path d="M96 12 C 150 12 190 58 184 102" stroke="#ffffff" stroke-opacity=".42" stroke-width="4" fill="none"/><path d="M120 120 C 86 96 66 44 96 12" stroke="#1b0840" stroke-opacity=".55" stroke-width="4" fill="none"/></g><g transform="rotate(300 120 120)"><path d="M120 120 C 86 96 66 44 96 12 C 150 12 190 58 184 102 C 162 128 136 130 120 120 Z" fill="url(#tBlade)"/><path d="M96 12 C 150 12 190 58 184 102" stroke="#ffffff" stroke-opacity=".42" stroke-width="4" fill="none"/><path d="M120 120 C 86 96 66 44 96 12" stroke="#1b0840" stroke-opacity=".55" stroke-width="4" fill="none"/></g></g></g></g></g><circle cx="120" cy="120" r="34" fill="#0d0818" stroke="#c94a6b" stroke-width="3"/><circle cx="120" cy="120" r="27" fill="url(#tRuby)"/><text x="120" y="129" text-anchor="middle" font-size="24" font-weight="800" fill="#fff1f4">R</text></svg></div>
+<div class="tc-turbine-wrap"><div class="tc-dot"></div><div class="fan-wrap"><img class="fan-img" src="/fan" alt="fan"><span class="fan-core">R</span></div></div>
 <div class="tc-amount"><b id="minePending">0</b> <span>RCOIN</span></div>
 <div class="tc-meta"><span id="mineRate">0</span> RCOIN/сутки · комиссия 15%</div>
 <div class="tc-meta2" id="mineEta">≈ 0 в час · полный сбор через —</div>
@@ -6756,6 +6830,7 @@ async def start_web():
     app.router.add_get("/healthz", health)
     app.router.add_get("/nft/{nid}", nft_asset)
     app.router.add_get("/banner", banner_asset)
+    app.router.add_get("/fan", mining_fan_asset)
     app.router.add_get("/emoji/{eid}", emoji_asset)
     # Веб-приложение: бесплатная арена со ставками в игровой валюте, карьера и симулятор рынка.
     routes = {"me": a_me, "arena": a_arena, "arena_join": a_arena_join, "arena_add": a_arena_add, "arena_leave": a_arena_leave,
@@ -8940,6 +9015,15 @@ async def warm_nft_emojis():
             log.debug("warm emoji %s: %s", eid, e)
         await asyncio.sleep(0.05)
     log.info("NFT-эмодзи прогреты: %s", len(ids))
+
+
+MINING_FAN = Path(__file__).with_name("mining_art") / "fan.jpg"
+
+
+async def mining_fan_asset(request: web.Request):
+    if not MINING_FAN.is_file():
+        raise web.HTTPNotFound()
+    return web.FileResponse(MINING_FAN, headers={"Cache-Control": "public, max-age=604800"})
 
 
 async def banner_asset(request: web.Request):
