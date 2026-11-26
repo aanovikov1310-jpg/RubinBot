@@ -3153,6 +3153,38 @@ async def ai_answer(prompt: str, system: str = "") -> Optional[str]:
         return None
 
 
+@dp.message(P("поддержка", "саппорт", "support"))
+async def cmd_support(message: Message):
+    await message.reply(
+        "🆘 <b>ПОДДЕРЖКА RUBIN</b>\n\n"
+        "Пиши сюда по любым вопросам: баланс, NFT, вывод, ошибки.\n"
+        "Отвечаем в порядке очереди.",
+        reply_markup=kb([btn("Написать в поддержку", url="https://t.me/RubinHelpSBbot", icon="support")]))
+
+
+@dp.message(P("диаг", "диагностика"))
+async def cmd_diag(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    uid = message.from_user.id
+    cols = {r["name"] for r in q("PRAGMA table_info(users)")}
+    art = len(list(NFT_ART_DIR.glob("*.jpg")))
+    fan = (Path(__file__).with_name("mining_art") / "fan.jpg").is_file()
+    try:
+        st = api_mining_state({"user_id": uid}, {})
+        mine = f"ok · серверов {sum(1 for x in st['servers'] if x['owned'])}, доход {fmt(st['rate'])}/сутки"
+    except Exception as e:
+        mine = f"ОШИБКА: {e}"
+    lines = [f"🩺 <b>ДИАГНОСТИКА</b>",
+             f"БД: {'✅' if {'archive_coin','mine_pending','mine_last'} <= cols else '❌ нет колонок'}",
+             f"NFT-архив: {archive_count()} лотов",
+             f"Майнинг: {mine}",
+             f"Арт NFT: {art} шт",
+             f"Кулер: {'✅' if fan else '❌ нет mining_art/fan.jpg'}",
+             f"AI-ключ: {'✅ сохранён' if giga_auth() else '❌ не задан'}"]
+    await message.reply("\n".join(lines))
+
+
 @dp.message(P("ключ", "апиключ", "gigakey"))
 async def cmd_set_giga_key(message: Message):
     if not is_admin(message.from_user.id):
@@ -4103,7 +4135,8 @@ def nft_card(n: dict) -> str:
         pins.append("в профиле")
     pin = ("\n📌 " + " · ".join(pins)) if pins else ""
     return (f"{nft_emoji(n['id'])} {RARITY_EMOJI.get(n['rarity'], '🟢')} <b>{esc(n['name'])}</b> <code>#{n['id']}</code>\n"
-            f"✨ Редкость: {RARITY_NAME.get(n['rarity'], '—')}\n📊 Уровень: {n['level']}\n🎭 Модель: {esc(n['model'])}\n"
+            (f"✨ Редкость: {RARITY_NAME.get(n['rarity'], '—')}\n" if int(n['level']) > 1 else "")
+            + f"📊 Уровень: {n['level']}\n🎭 Модель: {esc(n['model'])}\n"
             f"🖼 Фон: {esc(n['background'])}\n💰 Стоимость: <b>{nft_price_text(n)}</b>{'' if nft_is_infinite(n) else ' RCOIN'}{sale}\n📝 {esc(n['description'] or '—')}{pin}")
 
 
@@ -6822,7 +6855,7 @@ function setCoinMult(m){coinMult=m;document.querySelectorAll('#multRow .uchip').
 function renderSel(){
  const table=(AR&&AR.chance)||{};const items=((AR&&AR.items)||[]).filter(x=>upgSel.includes(x.id));
  let ch=0;
- if(upgMode==='coin'){const t=(AR&&AR.coin_chance)||{2:40,4:20,8:8};ch=t[coinMult]||t[String(coinMult)]||0}
+ if(upgMode==='coin'){const t=(AR&&AR.coin_chance)||{'2.0':40,'4.0':20,'8.0':8};const k=Object.keys(t).find(k=>Number(k)===Number(coinMult));ch=k?t[k]:0}
  else if(items.length){const best=items.reduce((a,b)=>((table[b.rt]||30)>(table[a.rt]||30)?b:a),items[0]);ch=Math.min(88,(table[best.rt]||30)+5*(items.length-1))}
  $('upgChance').textContent=ch+'%';$('upgWheel').style.setProperty('--ch',ch);
  const bet=Math.max(0,Math.floor(Number($('coinBet').value)||0));
@@ -7906,7 +7939,7 @@ def _ai_art():
     if "imgs" in _AI_ART:
         return _AI_ART["imgs"][0] if _AI_ART["imgs"] else None
     imgs = []
-    for path in sorted(NFT_ART_DIR.glob("*.jpg")):
+    for path in []:
         try:
             im = Image.open(path).convert("RGBA")
             im.thumbnail((1000, 1000), Image.LANCZOS)
@@ -7915,6 +7948,185 @@ def _ai_art():
             log.exception("ai art %s", path.name)
     _AI_ART["imgs"] = imgs
     return imgs[0] if imgs else None
+
+
+def _nft_capy_card(seed: int, title: str, rarity: str, model: str = "") -> bytes:
+    """Капибара — рисуется кодом."""
+    w, h = 1200, 780
+    im = Image.new("RGB", (w, h), (238, 231, 214))
+    d = ImageDraw.Draw(im, "RGBA")
+    for gy in range(40, h, 96):
+        for gx in range(40, w, 96):
+            d.ellipse((gx - 7, gy - 3, gx + 7, gy + 11), fill=(206, 190, 160, 80))
+    d.ellipse((w // 2 - 210, h - 150, w // 2 + 210, h - 100), fill=(196, 176, 146, 110))
+    cx, cy = w // 2, h // 2 + 30
+    fur = (150, 112, 76, 255)
+    dark = (120, 86, 56, 255)
+    d.ellipse((cx - 170, cy - 90, cx + 170, cy + 150), fill=fur)
+    d.ellipse((cx - 150, cy - 170, cx + 150, cy + 60), fill=fur)
+    for dx in (-96, 96):
+        d.ellipse((cx + dx - 30, cy - 186, cx + dx + 30, cy - 126), fill=dark)
+    for dx in (-64, 64):
+        d.ellipse((cx + dx - 20, cy - 92, cx + dx + 20, cy - 52), fill=(30, 22, 18, 255))
+        d.ellipse((cx + dx - 8, cy - 86, cx + dx + 2, cy - 74), fill=(255, 255, 255, 230))
+    d.ellipse((cx - 54, cy - 24, cx + 54, cy + 34), fill=(178, 138, 100, 255))
+    d.ellipse((cx - 16, cy - 2, cx + 16, cy + 20), fill=(52, 34, 28, 255))
+    d.arc((cx - 26, cy + 6, cx + 26, cy + 40), 20, 160, fill=(52, 34, 28, 255), width=5)
+    d.ellipse((cx - 120, cy + 130, cx - 30, cy + 168), fill=dark)
+    d.ellipse((cx + 30, cy + 130, cx + 120, cy + 168), fill=dark)
+    d.text((34, h - 34), (model or "Стандартный")[:24], font=_nft_font(False, 24),
+           fill=(120, 104, 84, 210), anchor="lb")
+    d.text((w - 34, h - 34), f"#{seed}", font=_nft_font(False, 26), fill=(120, 104, 84, 220), anchor="rb")
+    out = io.BytesIO()
+    im.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def _nft_snow_card(seed: int, title: str, rarity: str, model: str = "") -> bytes:
+    """Снеговик — новогодняя карточка кодом."""
+    w, h = 1200, 780
+    im = Image.new("RGB", (w, h), (16, 26, 44))
+    d = ImageDraw.Draw(im, "RGBA")
+    import random as _rnd
+    rr = _rnd.Random(seed)
+    for _ in range(120):
+        x, y = rr.randrange(w), rr.randrange(h)
+        d.ellipse((x, y, x + 4, y + 4), fill=(255, 255, 255, rr.randint(40, 140)))
+    d.ellipse((w // 2 - 220, h - 130, w // 2 + 220, h - 90), fill=(255, 255, 255, 30))
+    cx, cy = w // 2, h // 2 + 40
+    d.ellipse((cx - 130, cy - 20, cx + 130, cy + 200), fill=(246, 250, 255, 255))
+    d.ellipse((cx - 100, cy - 130, cx + 100, cy + 60), fill=(250, 252, 255, 255))
+    d.ellipse((cx - 72, cy - 230, cx + 72, cy - 100), fill=(252, 253, 255, 255))
+    for dx in (-26, 26):
+        d.ellipse((cx + dx - 8, cy - 190, cx + dx + 8, cy - 174), fill=(30, 34, 48, 255))
+    d.polygon([(cx, cy - 170), (cx + 54, cy - 150), (cx, cy - 138)], fill=(255, 152, 64, 255))
+    d.rectangle((cx - 74, cy - 262, cx + 74, cy - 226), fill=(200, 34, 54))
+    d.rectangle((cx - 100, cy - 232, cx + 100, cy - 214), fill=(228, 44, 66))
+    d.ellipse((cx - 96, cy - 30, cx + 96, cy + 30), fill=(200, 34, 54))
+    d.ellipse((cx - 40, cy + 30, cx - 8, cy + 56), fill=(40, 44, 60, 255))
+    d.ellipse((cx + 8, cy + 30, cx + 40, cy + 56), fill=(40, 44, 60, 255))
+    for i, yy in enumerate((cy + 100, cy + 140, cy + 180)):
+        d.ellipse((cx - 8, yy, cx + 8, yy + 16), fill=(60, 66, 84, 255))
+    d.text((34, h - 34), (model or "Стандартный")[:24], font=_nft_font(False, 24),
+           fill=(220, 230, 245, 220), anchor="lb")
+    d.text((w - 34, h - 34), f"#{seed}", font=_nft_font(False, 26), fill=(220, 230, 245, 235), anchor="rb")
+    out = io.BytesIO()
+    im.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def _nft_vice_card(seed: int, title: str, rarity: str, model: str = "") -> bytes:
+    """Неоновая вайс-карточка с римской VI: закат, пальмы, сетка. Рисуется кодом."""
+    w, h = 1200, 780
+    im = Image.new("RGB", (w, h), (24, 8, 40))
+    d = ImageDraw.Draw(im)
+    top = (46, 10, 72)
+    mid = (196, 44, 120)
+    bot = (255, 156, 80)
+    for y in range(h):
+        k = y / h
+        if k < 0.55:
+            t = k / 0.55
+            col = tuple(int(top[i] + (mid[i] - top[i]) * t) for i in range(3))
+        else:
+            t = (k - 0.55) / 0.45
+            col = tuple(int(mid[i] + (bot[i] - mid[i]) * t) for i in range(3))
+        d.line((0, y, w, y), fill=col)
+
+    # солнце с полосами
+    cx, cy, r = w // 2, int(h * 0.46), 210
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(255, 214, 130))
+    for i in range(7):
+        yy = cy + 20 + i * 26
+        d.rectangle((cx - r, yy, cx + r, yy + 10), fill=(255, 138, 96))
+
+    # пальмы
+    def palm(px, flip=1):
+        d.line((px, h - 40, px + 18 * flip, h - 250), fill=(38, 12, 46), width=14)
+        lx, ly = px + 18 * flip, h - 250
+        for dx, dy in ((-70, -34), (-46, -70), (0, -84), (46, -70), (70, -34)):
+            d.line((lx, ly, lx + dx * flip, ly + dy), fill=(28, 8, 36), width=16)
+            d.ellipse((lx + dx * flip - 26, ly + dy - 16, lx + dx * flip + 26, ly + dy + 16),
+                      fill=(28, 8, 36))
+
+    palm(120, 1)
+    palm(w - 120, -1)
+
+    # неоновая сетка
+    d.line((0, h - 120, w, h - 120), fill=(255, 90, 200), width=4)
+    for i in range(0, w + 1, 120):
+        d.line((w // 2, h - 120, i, h), fill=(255, 120, 210), width=2)
+    for i in range(1, 5):
+        yy = h - 120 + int((h - (h - 120)) * (i / 5) ** 1.6)
+        d.line((0, yy, w, yy), fill=(255, 120, 210), width=2)
+
+    # VI
+    f = _nft_font(True, 300)
+    txt = "VI"
+    tw = d.textlength(txt, font=f)
+    tx, ty = (w - tw) / 2, h * 0.16
+    for ox, oy in ((-8, 0), (8, 0), (0, -8), (0, 8)):
+        d.text((tx + ox, ty + oy), txt, font=f, fill=(70, 10, 60))
+    d.text((tx, ty), txt, font=f, fill=(255, 255, 255))
+
+    d.text((34, h - 34), (model or "Vice")[:24], font=_nft_font(False, 24), fill=(255, 240, 250, 230), anchor="lb")
+    d.text((w - 34, h - 34), f"#{seed}", font=_nft_font(False, 26), fill=(255, 240, 250, 235), anchor="rb")
+
+    out = io.BytesIO()
+    im.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def _nft_penguin_card(seed: int, title: str, rarity: str, model: str = "") -> bytes:
+    """Пингвин с ножом — рисуется кодом, без внешних файлов."""
+    w, h = 1200, 780
+    im = Image.new("RGB", (w, h), (238, 227, 206))
+    d = ImageDraw.Draw(im, "RGBA")
+    # узор на фоне
+    for gy in range(40, h, 96):
+        for gx in range(40, w, 96):
+            d.ellipse((gx - 7, gy - 3, gx + 7, gy + 11), fill=(206, 188, 158, 90))
+            d.polygon([(gx - 5, gy + 4), (gx + 5, gy + 4), (gx, gy + 14)], fill=(206, 188, 158, 90))
+    # тень
+    d.ellipse((w // 2 - 190, h - 150, w // 2 + 190, h - 96), fill=(196, 176, 146, 110))
+
+    cx, cy = w // 2, h // 2 + 20
+    body = (44, 78, 150, 255)
+    dark = (30, 56, 116, 255)
+    # тело
+    d.ellipse((cx - 150, cy - 150, cx + 150, cy + 170), fill=body)
+    # живот
+    d.ellipse((cx - 96, cy - 70, cx + 96, cy + 160), fill=(168, 206, 240, 255))
+    d.ellipse((cx - 80, cy - 40, cx + 80, cy + 150), fill=(232, 244, 255, 255))
+    # ласты
+    d.ellipse((cx - 176, cy - 40, cx - 116, cy + 90), fill=dark)
+    d.ellipse((cx + 116, cy - 40, cx + 176, cy + 60), fill=dark)
+    # глаза
+    for dx in (-46, 46):
+        d.ellipse((cx + dx - 34, cy - 96, cx + dx + 34, cy - 26), fill=(255, 255, 255, 255))
+        d.ellipse((cx + dx - 16, cy - 80, cx + dx + 16, cy - 42), fill=(20, 26, 40, 255))
+        d.ellipse((cx + dx - 8, cy - 74, cx + dx + 2, cy - 60), fill=(255, 255, 255, 240))
+    # клюв
+    d.ellipse((cx - 26, cy - 34, cx + 26, cy + 6), fill=(240, 160, 70, 255))
+    d.arc((cx - 26, cy - 26, cx + 26, cy + 12), 20, 160, fill=(190, 112, 40, 255), width=4)
+    # лапы
+    d.ellipse((cx - 78, cy + 150, cx - 18, cy + 182), fill=(240, 160, 70, 255))
+    d.ellipse((cx + 18, cy + 150, cx + 78, cy + 182), fill=(240, 160, 70, 255))
+    # нож в правой ласте
+    kx, ky = cx + 120, cy + 10
+    d.rounded_rectangle((kx - 4, ky - 6, kx + 56, ky + 12), 6, fill=(214, 222, 232, 255))
+    d.polygon([(kx + 56, ky - 6), (kx + 78, ky + 3), (kx + 56, ky + 12)], fill=(228, 236, 246, 255))
+    d.rounded_rectangle((kx - 24, ky - 2, kx - 2, ky + 8), 4, fill=(34, 34, 40, 255))
+    # модель и номер
+    name = (model or "Стандартный")[:24]
+    d.text((34, h - 34), name, font=_nft_font(False, 24),
+           fill=(120, 104, 84, 210), anchor="lb")
+    d.text((w - 34, h - 34), f"#{seed}", font=_nft_font(False, 26),
+           fill=(120, 104, 84, 220), anchor="rb")
+
+    out = io.BytesIO()
+    im.save(out, format="PNG", optimize=True)
+    return out.getvalue()
 
 
 def _nft_ai_card(seed: int, title: str, rarity: str, art: "Image.Image") -> bytes:
@@ -7952,6 +8164,14 @@ def _nft_character_card(seed: int, title: str, photo: str, model: str,
         ai = _ai_art()
         if ai is not None:
             return _nft_ai_card(seed, title, rarity, ai)
+        low = (title or "").lower()
+        if any(k in low for k in ("gta", "vice", "вайс")):
+            return _nft_vice_card(seed, title, rarity, model)
+        if any(k in low for k in ("капибар", "capy", "капик")):
+            return _nft_capy_card(seed, title, rarity, model)
+        if any(k in low for k in ("снег", "нов", "зим", "ёлк", "елк", "холод", "санта", "подар")):
+            return _nft_snow_card(seed, title, rarity, model)
+        return _nft_penguin_card(seed, title, rarity, model)
     w, h = 1280, 720
     accent = NFT_MODEL_ACCENT.get(str(model), NFT_RARITY_COLOR.get(str(rarity), (200, 190, 255)))
     im = _nft_premium_bg(w, h, accent, rarity, seed)
@@ -9121,10 +9341,37 @@ async def warm_nft_emojis():
 MINING_FAN = Path(__file__).with_name("mining_art") / "fan.jpg"
 
 
+_FAN_PNG = {}
+
+
+def _draw_fan() -> bytes:
+    """Кулер, нарисованный кодом — работает без файлов."""
+    size = 640
+    im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.ellipse((6, 6, size - 6, size - 6), fill=(24, 18, 42, 255), outline=(96, 64, 178, 255), width=12)
+    for i in range(9):
+        a0 = i * 40 + 6
+        d.pieslice((74, 74, size - 74, size - 74), a0, a0 + 30, fill=(128, 84, 244, 255))
+        d.pieslice((86, 86, size - 86, size - 86), a0 + 2, a0 + 26, fill=(162, 118, 255, 255))
+    d.ellipse((size // 2 - 96, size // 2 - 96, size // 2 + 96, size // 2 + 96),
+              fill=(16, 11, 30, 255), outline=(200, 74, 107, 255), width=8)
+    d.ellipse((size // 2 - 58, size // 2 - 58, size // 2 + 58, size // 2 + 58),
+              fill=(224, 40, 79, 255))
+    d.ellipse((size // 2 - 30, size // 2 - 40, size // 2 + 4, size // 2 - 4),
+              fill=(255, 160, 180, 200))
+    out = io.BytesIO()
+    im.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
 async def mining_fan_asset(request: web.Request):
-    if not MINING_FAN.is_file():
-        raise web.HTTPNotFound()
-    return web.FileResponse(MINING_FAN, headers={"Cache-Control": "public, max-age=604800"})
+    if MINING_FAN.is_file():
+        return web.FileResponse(MINING_FAN, headers={"Cache-Control": "public, max-age=604800"})
+    if "png" not in _FAN_PNG:
+        _FAN_PNG["png"] = _draw_fan()
+    return web.Response(body=_FAN_PNG["png"], content_type="image/png",
+                        headers={"Cache-Control": "public, max-age=604800"})
 
 
 async def banner_asset(request: web.Request):
@@ -9676,13 +9923,19 @@ def _nft_photo_card(raw: bytes, title: str, rarity: str, seed: int = 0) -> bytes
 
 async def _create_photo_nft(target_uid: int, photo, caption: str) -> Optional[int]:
     """Скачивает фото и создаёт NFT. Возвращает id или None."""
-    parts = [p.strip() for p in (caption or "").split(maxsplit=2)]
-    title = parts[1][:30] if len(parts) > 1 and parts[1].lower() not in RARITY_BASE else "Фото NFT"
+    tokens = [t.strip() for t in (caption or "").split()][1:]
+    custom_id = 0
+    if tokens and tokens[-1].isdigit():
+        custom_id = int(tokens.pop())
+    elif tokens and tokens[0].isdigit():
+        custom_id = int(tokens.pop(0))
     rarity = "rare"
-    for p in parts[1:]:
-        if p.lower() in RARITY_BASE:
-            rarity = p.lower()
+    for t in tokens:
+        if t.lower() in RARITY_BASE:
+            rarity = t.lower()
+            tokens.remove(t)
             break
+    title = (tokens[0][:30] if tokens else "Фото NFT")
     try:
         f = await bot.get_file(photo.file_id)
         buf = await bot.download_file(f.file_path)
@@ -9691,7 +9944,8 @@ async def _create_photo_nft(target_uid: int, photo, caption: str) -> Optional[in
         log.exception("nft photo download")
         return None
     nid = make_nft(target_uid, title, rarity, "photo", "NFT из личного фото",
-                   RARITY_BASE[rarity], model="Призрачный", background="Галактика")
+                   RARITY_BASE[rarity], model="Призрачный", background="Галактика",
+                   nft_id=(custom_id or None))
     try:
         NFT_DIR.mkdir(parents=True, exist_ok=True)
         (NFT_DIR / f"photo_{nid}.png").write_bytes(raw)
