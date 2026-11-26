@@ -3118,11 +3118,20 @@ async def cmd_check_book(message: Message):
 
 
 GIGACHAT_AUTH = os.getenv("GIGACHAT_AUTH", "").strip()
+GIGACHAT_ID = os.getenv("GIGACHAT_CLIENT_ID", "").strip()
+GIGACHAT_SECRET = os.getenv("GIGACHAT_CLIENT_SECRET", "").strip()
 
 
 def giga_auth() -> str:
-    """Ключ из базы (задан командой в боте) или из переменной окружения."""
-    return (kv_get("gigachat:auth") or GIGACHAT_AUTH or "").strip()
+    """Ключ из базы (задан командой в боте) или из переменных окружения."""
+    saved = (kv_get("gigachat:auth") or "").strip()
+    if saved:
+        return saved
+    if GIGACHAT_AUTH:
+        return GIGACHAT_AUTH
+    if GIGACHAT_ID and GIGACHAT_SECRET:
+        return base64.b64encode(f"{GIGACHAT_ID}:{GIGACHAT_SECRET}".encode()).decode()
+    return ""
 
 
 async def ai_answer(prompt: str, system: str = "") -> Optional[str]:
@@ -3179,9 +3188,9 @@ async def cmd_diag(message: Message):
              f"БД: {'✅' if {'archive_coin','mine_pending','mine_last'} <= cols else '❌ нет колонок'}",
              f"NFT-архив: {archive_count()} лотов",
              f"Майнинг: {mine}",
-             f"Арт NFT: {art} шт",
-             f"Кулер: {'✅' if fan else '❌ нет mining_art/fan.jpg'}",
-             f"AI-ключ: {'✅ сохранён' if giga_auth() else '❌ не задан'}"]
+             f"Арт NFT: {art} шт · код-арт: ✅",
+             f"Кулер: {'✅ файл' if fan else '✅ рисуется кодом'}",
+             f"AI-ключ: {'✅ сохранён' if giga_auth() else '❌ не задан (команда «ключ ID SECRET») — на NFT не влияет'}"]
     await message.reply("\n".join(lines))
 
 
@@ -3189,21 +3198,34 @@ async def cmd_diag(message: Message):
 async def cmd_set_giga_key(message: Message):
     if not is_admin(message.from_user.id):
         return
-    parts = message.text.split()
-    if len(parts) < 3:
+    parts = message.text.split(maxsplit=2)
+    vals = [p.strip().strip('"').strip("'") for p in parts[1:]]
+    if vals and vals[0].lower() in ("сброс", "reset", "удалить", "clear"):
+        kv_set("gigachat:auth", "")
+        return await message.reply("🗑 Ключ GigaChat удалён.")
+    if not vals:
         return await message.reply(
             "🔑 <b>Ключ GigaChat</b>\n"
-            "1. В кабинете GigaChat нажми «Получить ключ» — получишь Client Secret.\n"
-            "2. Отправь сюда: <code>ключ CLIENT_ID SECRET</code>\n"
-            "3. Удали это сообщение из чата.")
-    cid, secret = parts[1].strip(), parts[2].strip()
-    token = base64.b64encode(f"{cid}:{secret}".encode()).decode()
+            "Вариант 1: <code>ключ CLIENT_ID SECRET</code>\n"
+            "Вариант 2: <code>ключ AUTH_BASE64</code> (готовая строка Authorization)\n"
+            "Вариант 3: переменные <code>GIGACHAT_CLIENT_ID</code> и <code>GIGACHAT_CLIENT_SECRET</code> на хостинге.\n\n"
+            "Без ключа бот работает: NFT рисуются кодом, AI-ассистент просто отключён.")
+    if len(vals) == 1:
+        token = vals[0]
+        if ":" in token and not token.endswith("="):
+            token = base64.b64encode(token.encode()).decode()
+    else:
+        token = base64.b64encode(f"{vals[0]}:{vals[1]}".encode()).decode()
+    if len(token) < 12:
+        return await message.reply("❌ Ключ слишком короткий. Пришли CLIENT_ID и SECRET.")
     kv_set("gigachat:auth", token)
     try:
         await message.delete()
     except Exception:
         pass
-    await message.reply("✅ Ключ сохранён. Проверь: <code>ассистент привет</code> или <code>.ai привет</code> в инлайне.")
+    ok = await ai_answer("Ответь одним словом: работает", system="Тест соединения.")
+    await message.reply("✅ Ключ сохранён." + (" Соединение с GigaChat работает." if ok else
+                                               " Но проверка не прошла — проверь ID/SECRET и доступ к API."))
 
 
 @dp.message(P("ассистент", "ии", "ai"))
@@ -3961,31 +3983,122 @@ async def cb_db5(cb: CallbackQuery):
 
 
 # ============================ NFT / ПОДАРКИ / СКЛАД ============================
-RARITIES = ["common", "uncommon", "rare", "epic", "legendary"]
-RARITY_EMOJI = {"common": "🟢", "uncommon": "🔵", "rare": "🟣", "epic": "🟠", "legendary": "🔴"}
-RARITY_NAME = {"common": "Обычный", "uncommon": "Необычный", "rare": "Редкий", "epic": "Эпический", "legendary": "Легендарный"}
-RARITY_BASE = {"common": 50_000, "uncommon": 120_000, "rare": 250_000, "epic": 600_000, "legendary": 1_500_000}
+# Базовая модель NFT редкости не имеет. Две редкости открываются только после улучшения.
+RARITIES = ["common", "rare", "epic"]
+UPGRADE_RARITIES = ["rare", "epic"]
+RARITY_EMOJI = {"common": "⚪", "rare": "🟣", "epic": "🟠", "uncommon": "🔵", "legendary": "🟠"}
+RARITY_NAME = {"common": "Без редкости", "rare": "Редкий", "epic": "Эпический",
+               "uncommon": "Редкий", "legendary": "Эпический"}
+RARITY_BASE = {"common": 50_000, "rare": 250_000, "epic": 600_000,
+               "uncommon": 250_000, "legendary": 600_000}
 ROLLIX_PRICE = 250_000_000
 ROLLIX_TOTAL = 500
 OWNER_NFT_ID = 1
 INFINITE_PRICE = -1
 NFT_POOL = {
-    "common": [("Снеговик-неудачник", "⛄"), ("Носок с дыркой", "🧦"), ("Мандаринка на удачу", "🍊"), ("Пельмень-талисман", "🥟"),
-               ("Тапок Деда Мороза", "🥿"), ("Космический кот", "🐱"), ("Пузырчатая плёнка", "🫧")],
-    "uncommon": [("Оливье в вакууме", "🥗"), ("Селёдка под шубой (NFT)", "🐟"), ("Олень Рудольф в отпуске", "🦌"),
-                 ("Кот в гирлянде", "😼"), ("Бенгальский огонёк", "🎇"), ("Пиксельный дракон", "🐉")],
-    "rare": [("Золотой мандарин", "🍊"), ("Снегурочка-хакер", "👩‍💻"), ("Шампанское 00:00", "🍾"), ("Хрустальная ёлка", "🎄"),
-             ("Пингвин-диджей", "🐧"), ("Радужный единорог", "🦄")],
-    "epic": [("Санта-майнер", "🎅"), ("Кибер-снеговик 2077", "🤖"), ("Мамонт под ёлкой", "🦣"), ("Звёздный олень", "✨"),
-             ("Робот-бариста", "☕")],
-    "legendary": [("Дух Нового года", "🎆"), ("Золотой Дед Мороз", "👑"), ("Часы курантов", "🕛"), ("Ёлка-мультивселенная", "🌌"),
-                  ("Северное сияние Prime", "🌠")],
+    "common": [("Снеговик-неудачник", "⛄"), ("Носок с дыркой", "🧦"), ("Мандаринка на удачу", "🍊"),
+               ("Пельмень-талисман", "🥟"), ("Тапок Деда Мороза", "🥿"), ("Космический кот", "🐱"),
+               ("Пузырчатая плёнка", "🫧"), ("Капибара в снегу", "🦫")],
+    "rare": [("Оливье в вакууме", "🥗"), ("Селёдка под шубой (NFT)", "🐟"), ("Олень Рудольф в отпуске", "🦌"),
+             ("Кот в гирлянде", "😼"), ("Бенгальский огонёк", "🎇"), ("Пиксельный дракон", "🐉"),
+             ("Золотой мандарин", "🍊"), ("Снегурочка-хакер", "👩‍💻"), ("Шампанское 00:00", "🍾"),
+             ("Хрустальная ёлка", "🎄"), ("Пингвин-диджей", "🐧"), ("Радужный единорог", "🦄")],
+    "epic": [("Санта-майнер", "🎅"), ("Кибер-снеговик 2077", "🤖"), ("Мамонт под ёлкой", "🦣"),
+             ("Звёздный олень", "✨"), ("Робот-бариста", "☕"), ("Дух Нового года", "🎆"),
+             ("Золотой Дед Мороз", "👑"), ("Часы курантов", "🕛"), ("Ёлка-мультивселенная", "🌌"),
+             ("Северное сияние Prime", "🌠"), ("GTA 6 Vice City", "🌴")],
 }
 MODELS = [("Стандартный", 1.0, 30), ("Зимний", 1.2, 25), ("Снежный", 1.4, 18), ("Золотой", 2.0, 12),
           ("Неоновый", 2.5, 8), ("Призрачный", 3.5, 5), ("Космический", 5.0, 2)]
 BGS = [("Обычный", 1.0, 30), ("Морозный", 1.2, 25), ("Праздничный", 1.5, 18), ("Звёздный", 2.0, 14),
        ("Северное сияние", 3.0, 8), ("Галактика", 4.0, 5)]
 PHOTOS = ["🎄", "🎁", "⛄", "❄️", "🎅", "🤶", "🦌", "🎀", "✨", "🌲", "🔔", "🍊", "🥂", "🧸", "🐧", "🐲", "🦄", "🤖", "🌌", "👑"]
+
+
+def nft_pool(rarity: str) -> list:
+    """Старые редкости из БД сводим к трём актуальным."""
+    key = str(rarity or "common")
+    if key not in NFT_POOL:
+        key = "epic" if key in ("legendary", "epic") else "rare" if key == "uncommon" else "common"
+    return NFT_POOL[key]
+
+
+# Кейсы: тематические наборы. Внутри — базовая модель без редкости;
+# арт и одна из двух редкостей открываются только после улучшения.
+CASES = [
+    {"key": "ny", "name": "Новогодний", "price": 150_000, "icon": "🎄", "tag": "СЕЗОН",
+     "accent": "#8b5cf6",
+     "names": ["Снеговик-неудачник", "Мандаринка на удачу", "Олень Рудольф в отпуске",
+               "Кот в гирлянде", "Хрустальная ёлка", "Дух Нового года"]},
+    {"key": "gta", "name": "GTA 6 Vice", "price": 500_000, "icon": "🌴", "tag": "ЭКСКЛЮЗИВ",
+     "accent": "#ff4fa3",
+     "names": ["GTA 6 Vice City", "Капибара в Vice City", "Пальма на закате",
+               "Неоновый олень", "Угнанный снеговик"]},
+    {"key": "capy", "name": "Капибара", "price": 250_000, "icon": "🐹", "tag": "ХИТ",
+     "accent": "#b98b5e",
+     "names": ["Капибара в снегу", "Капибара-майнер", "Капибара в гирлянде",
+               "Капибара-сантехник", "Капибара-космонавт"]},
+    {"key": "penguin", "name": "Пингвин", "price": 200_000, "icon": "🐧", "tag": "МЕМ",
+     "accent": "#4a9bff",
+     "names": ["Пингвин-диджей", "Пингвин с ножом", "Пингвин-хакер",
+               "Пингвин на льдине", "Пингвин-миллиардер"]},
+    {"key": "space", "name": "Космос", "price": 400_000, "icon": "🌌", "tag": "RARE",
+     "accent": "#a855f7",
+     "names": ["Космический кот", "Звёздный олень", "Ёлка-мультивселенная",
+               "Северное сияние Prime", "Планета Рубин"]},
+    {"key": "gold", "name": "Золотой", "price": 1_000_000, "icon": "👑", "tag": "VIP",
+     "accent": "#ffd76a",
+     "names": ["Золотой мандарин", "Золотой Дед Мороз", "Часы курантов",
+               "Золотая капибара", "Золотой пингвин"]},
+    {"key": "cyber", "name": "Кибер 2077", "price": 750_000, "icon": "🤖", "tag": "NEON",
+     "accent": "#22d3ee",
+     "names": ["Кибер-снеговик 2077", "Робот-бариста", "Снегурочка-хакер",
+               "Пиксельный дракон", "Неоновый мамонт"]},
+    {"key": "cozy", "name": "Уютный", "price": 120_000, "icon": "☕", "tag": "ДОМ",
+     "accent": "#f59e0b",
+     "names": ["Оливье в вакууме", "Пельмень-талисман", "Носок с дыркой",
+               "Тапок Деда Мороза", "Пузырчатая плёнка"]},
+    {"key": "meme", "name": "Мемный", "price": 90_000, "icon": "😼", "tag": "FUN",
+     "accent": "#34d399",
+     "names": ["Селёдка под шубой (NFT)", "Мамонт под ёлкой", "Радужный единорог",
+               "Бенгальский огонёк", "Кот в гирлянде"]},
+    {"key": "premium", "name": "Премиум", "price": 2_000_000, "icon": "💠", "tag": "TOP",
+     "accent": "#e879f9",
+     "names": ["Рубин #1", "GTA 6 Vice City", "Дух Нового года",
+               "Северное сияние Prime", "Капибара-миллиардер"]},
+]
+CASE_BY_KEY = {c["key"]: c for c in CASES}
+
+
+def case_open(uid: int, key: str) -> dict:
+    c = CASE_BY_KEY.get(str(key or ""))
+    if not c:
+        return {"ok": False, "err": "Такого кейса нет"}
+    if not spend(uid, c["price"]):
+        return {"ok": False, "err": f"Нужно {fmt(c['price'])} RCOIN"}
+    name = random.choice(c["names"])
+    model = random.choices(MODELS, weights=[w for _, _, w in MODELS])[0][0]
+    bg = random.choices(BGS, weights=[w for _, _, w in BGS])[0][0]
+    nid = make_nft(uid, name, "common", "blank", f"Из кейса «{c['name']}». Арт откроется после улучшения.",
+                   c["price"] * 2, model=model, background=bg)
+    make_nft_image(nid)
+    n = q("SELECT * FROM nft_items WHERE id=?", (nid,), one=True)
+    return {"ok": True, "id": nid, "name": name, "model": model, "case": c["name"],
+            "url": f"/nft/{nid}?v=1", "balance": get_user(uid)["balance_coin"],
+            "item": nft_public(n)}
+
+
+def nft_public(n: dict, ver: int = 0) -> dict:
+    level = int(n.get("level") or 1)
+    return {"id": n["id"], "name": n["name"], "level": level,
+            "model": n.get("model") or "Стандартный",
+            "background": n.get("background") or "Обычный",
+            "rarity": RARITY_NAME.get(n.get("rarity") or "common", "Без редкости") if level > 1 else "Без редкости",
+            "rarity_key": n.get("rarity") if level > 1 else "common",
+            "value": nft_value(n),
+            "upgrade_cost": nft_upgrade_cost(n),
+            "url": f"/nft/{n['id']}?v={ver or level}",
+            "in_balance": False, "in_profile": False}
 
 
 def _sync_nft_sequence():
@@ -4000,7 +4113,7 @@ def _sync_nft_sequence():
 def make_nft(owner: int, name: str, rarity: str, photo: str = None, desc: str = "", price: int = None,
              model: str = None, background: str = None, nft_id: Optional[int] = None) -> int:
     if photo is None:
-        photo = next((e for n, e in NFT_POOL.get(rarity, []) if n == name), random.choice(PHOTOS))
+        photo = next((e for n, e in nft_pool(rarity) if n == name), random.choice(PHOTOS))
     price = price or RARITY_BASE.get(rarity, 50_000)
     model = model or random.choices(MODELS, weights=[w for _, _, w in MODELS])[0][0]
     background = background or random.choices(BGS, weights=[w for _, _, w in BGS])[0][0]
@@ -4033,7 +4146,7 @@ def ensure_owner_nft():
     try:
         raw = OWNER_NFT_ASSET.read_bytes()
         get_user(OWNER_ID)
-        make_nft(OWNER_ID, "Рубин #1", "legendary", OWNER_NFT_ASSET.name,
+        make_nft(OWNER_ID, "Рубин #1", "epic", OWNER_NFT_ASSET.name,
                  "Алмаз владельца Rubin bot. Единственный экземпляр.", INFINITE_PRICE,
                  model="Призрачный", background="Обычный", nft_id=OWNER_NFT_ID)
         NFT_DIR.mkdir(parents=True, exist_ok=True)
@@ -4068,7 +4181,7 @@ def gift_open(uid: int, gid: int) -> Optional[int]:
         return None
     if x("UPDATE gifts SET used=1, used_by=? WHERE id=? AND used=0 AND owner_id IN (0,?)", (uid, gid, uid))[0] != 1:
         return None
-    name, emoji = random.choice(NFT_POOL[g["rarity"]] if g["rarity"] in NFT_POOL else NFT_POOL["common"])
+    name, emoji = random.choice(nft_pool(g["rarity"]))
     # Сразу красивый AI-арт, без пустой заглушки.
     return make_nft(uid, name, g["rarity"], "✨", "Открыто из коллекционного бокса")
 
@@ -4134,8 +4247,10 @@ def nft_card(n: dict) -> str:
     if int(u.get("profile_nft_id") or 0) == n["id"]:
         pins.append("в профиле")
     pin = ("\n📌 " + " · ".join(pins)) if pins else ""
-    return (f"{nft_emoji(n['id'])} {RARITY_EMOJI.get(n['rarity'], '🟢')} <b>{esc(n['name'])}</b> <code>#{n['id']}</code>\n"
-            (f"✨ Редкость: {RARITY_NAME.get(n['rarity'], '—')}\n" if int(n['level']) > 1 else "")
+    rarity = (f"✨ Редкость: {RARITY_NAME.get(n['rarity'], '—')}\n" if int(n["level"]) > 1
+              else "✨ Редкость: появится после улучшения\n")
+    return (f"{nft_emoji(n['id'])} <b>{esc(n['name'])}</b> <code>#{n['id']}</code>\n"
+            + rarity
             + f"📊 Уровень: {n['level']}\n🎭 Модель: {esc(n['model'])}\n"
             f"🖼 Фон: {esc(n['background'])}\n💰 Стоимость: <b>{nft_price_text(n)}</b>{'' if nft_is_infinite(n) else ' RCOIN'}{sale}\n📝 {esc(n['description'] or '—')}{pin}")
 
@@ -4146,6 +4261,36 @@ def nft_upgrade_cost(n: dict) -> int:
     if "роликс" in str(n.get("name", "")).lower():
         return ROLLIX_PRICE
     return max(20_000, int(RARITY_BASE.get(n["rarity"], 50_000) * 0.25 * n["level"]))
+
+
+def nft_upgrade(uid: int, nid: int) -> Tuple[bool, str, Optional[dict]]:
+    """Улучшение NFT: открывает арт и одну из двух редкостей (редкий/эпический)."""
+    n = q("SELECT * FROM nft_items WHERE id=? AND owner_id=?", (int(nid), uid), one=True)
+    if not n:
+        return False, "NFT не найден", None
+    if nft_is_infinite(n):
+        return False, "NFT владельца улучшать не нужно", None
+    if n["for_sale"]:
+        return False, "Сначала сними NFT с продажи", None
+    cost = nft_upgrade_cost(n)
+    if not spend(uid, cost):
+        return False, f"Нужно {fmt(cost)} RCOIN", None
+    level = int(n["level"]) + 1
+    if int(n["level"]) <= 1 or n["rarity"] not in UPGRADE_RARITIES:
+        rarity = random.choice(UPGRADE_RARITIES)
+    else:
+        rarity = n["rarity"]
+    if "роликс" in str(n["name"]).lower():
+        model, bg = "Космический", "Галактика"
+    else:
+        model = random.choices(MODELS, weights=[w for _, _, w in MODELS])[0][0]
+        bg = random.choices(BGS, weights=[w for _, _, w in BGS])[0][0]
+    n2 = {**n, "model": model, "background": bg, "level": level, "rarity": rarity, "photo": "✨"}
+    val = nft_value(n2)
+    x("UPDATE nft_items SET model=?, background=?, level=?, rarity=?, price=?, photo=? WHERE id=? AND owner_id=?",
+      (model, bg, level, rarity, val, "✨", n["id"], uid))
+    make_nft_image(n["id"])
+    return True, f"NFT улучшен: {RARITY_NAME[rarity]}", q("SELECT * FROM nft_items WHERE id=?", (n["id"],), one=True)
 
 
 def inv_get(uid: int) -> List[dict]:
@@ -4281,21 +4426,11 @@ async def cb_nft(cb: CallbackQuery, state: FSMContext):
     if n["for_sale"] and act != "us":
         return await ans(cb, "Сначала сними NFT с продажи", True)
     if act == "up":
-        cost = nft_upgrade_cost(n)
-        if not spend(uid, cost):
-            return await ans(cb, f"Нужно {fmt(cost)} RCOIN", True)
-        if "роликс" in str(n["name"]).lower():
-            model, bg, photo = "Космический", "Галактика", "🐧"
-        else:
-            model = random.choices(MODELS, weights=[w for _, _, w in MODELS])[0][0]
-            bg = random.choices(BGS, weights=[w for _, _, w in BGS])[0][0]
-            photo = random.choice(PHOTOS)
-        n2 = {**n, "model": model, "background": bg, "level": n["level"] + 1}
-        val = nft_value(n2)
-        x("UPDATE nft_items SET model=?, background=?, level=?, price=?, photo=? WHERE id=?", (model, bg, n2["level"], val, photo, n["id"]))
-        n = q("SELECT * FROM nft_items WHERE id=?", (n["id"],), one=True)
-        await safe_edit(cb, box("⚡ <b>NFT УЛУЧШЕН!</b>", nft_card(n)), kb([btn("Ещё раз", f"nft:v:{nid}")], [btn("К списку", "inv:nfts:0")]))
-        return await ans(cb, "⚡ Улучшено!")
+        ok, msg, n2 = nft_upgrade(uid, int(nid))
+        if not ok:
+            return await ans(cb, msg, True)
+        await safe_edit(cb, box("⚡ <b>NFT УЛУЧШЕН!</b>", nft_card(n2)), kb([btn("Ещё раз", f"nft:v:{nid}")], [btn("К списку", "inv:nfts:0")]))
+        return await ans(cb, "⚡ " + msg)
     if act == "us":
         x("UPDATE nft_items SET for_sale=0, sale_price=0 WHERE id=? AND owner_id=?", (n["id"], uid))
         n = q("SELECT * FROM nft_items WHERE id=?", (n["id"],), one=True)
@@ -4450,7 +4585,7 @@ async def cb_market(cb: CallbackQuery, state: FSMContext):
             rows.append([btn(f"Купить за {fmt(ROLLIX_PRICE)}", "mk:rollix_buy", "donate", style="success")])
         rows.append([btn("Назад", "menu:market", "door")])
         try:
-            raw = png_nft(488, "Роликсы", "🐧", "Космический", "Галактика", "legendary", 1)
+            raw = png_nft(488, "Роликсы", "🐧", "Космический", "Галактика", "epic", 1)
             await cb.message.answer_photo(BufferedInputFile(raw, filename="rollix.png"),
                                           caption=text, reply_markup=kb(*rows))
         except Exception:
@@ -4466,7 +4601,7 @@ async def cb_market(cb: CallbackQuery, state: FSMContext):
             return await ans(cb, f"Нужно {fmt(ROLLIX_PRICE)} RCOIN", True)
         kv_set("rollix:stock", str(stock - 1))
         treasury_add(ROLLIX_PRICE // 10)
-        nid = make_nft(uid, "Роликсы", "legendary", "🐧", "Эксклюзив маркета", ROLLIX_PRICE,
+        nid = make_nft(uid, "Роликсы", "epic", "🐧", "Эксклюзив маркета", ROLLIX_PRICE,
                        model="Космический", background="Галактика")
         n = q("SELECT * FROM nft_items WHERE id=?", (nid,), one=True)
         raw = png_nft(nid, n["name"], n["photo"], n["model"], n["background"], n["rarity"], n["level"])
@@ -5473,10 +5608,10 @@ ADMIN_ACTIONS = {
     "treasury": ("🏦 Доступ к казне (вкл/выкл)", True, []),
     "info": ("ℹ️ Инфо об игроке", True, []),
     "history": ("📜 История игр игрока", True, []),
-    "nft_create": ("🎨 Создать NFT игроку", True, ["Название NFT", "Редкость: common / uncommon / rare / epic / legendary", "Оценка в RCOIN (или 0 — по редкости)", "Описание (или «-»)", "Номер NFT (ID) или 0 — авто", "Модель: Стандартный/Зимний/Снежный/Золотой/Неоновый/Призрачный/Космический или random", "Фон: Обычный/Морозный/Праздничный/Звёздный/Северное сияние/Галактика или random", "Фото-эмодзи (например 🐧) или random"]),
-    "nft_self": ("🎨 Создать NFT себе", False, ["Название NFT", "Редкость: common / uncommon / rare / epic / legendary", "Оценка в RCOIN (или 0 — по редкости)", "Описание (или «-»)", "Номер NFT (ID) или 0 — авто", "Модель: Стандартный/Зимний/Снежный/Золотой/Неоновый/Призрачный/Космический или random", "Фон: Обычный/Морозный/Праздничный/Звёздный/Северное сияние/Галактика или random", "Фото-эмодзи (например 🐧) или random"]),
-    "gift_give": ("💌 Выдать подарок-бокс игроку", True, ["Редкость: common / uncommon / rare / epic / legendary / random"]),
-    "gift_gen": ("🎁 Сгенерировать подарок (код)", False, ["Редкость: common / uncommon / rare / epic / legendary / random"]),
+    "nft_create": ("🎨 Создать NFT игроку", True, ["Название NFT", "Редкость: none / rare / epic", "Оценка в RCOIN (или 0 — по редкости)", "Описание (или «-»)", "Номер NFT (ID) или 0 — авто", "Модель: Стандартный/Зимний/Снежный/Золотой/Неоновый/Призрачный/Космический или random", "Фон: Обычный/Морозный/Праздничный/Звёздный/Северное сияние/Галактика или random", "Фото: пришли фото или «-» — рисовать кодом"]),
+    "nft_self": ("🎨 Создать NFT себе", False, ["Название NFT", "Редкость: none / rare / epic", "Оценка в RCOIN (или 0 — по редкости)", "Описание (или «-»)", "Номер NFT (ID) или 0 — авто", "Модель: Стандартный/Зимний/Снежный/Золотой/Неоновый/Призрачный/Космический или random", "Фон: Обычный/Морозный/Праздничный/Звёздный/Северное сияние/Галактика или random", "Фото: пришли фото или «-» — рисовать кодом"]),
+    "gift_give": ("💌 Выдать подарок-бокс игроку", True, ["Редкость: none / rare / epic / random"]),
+    "gift_gen": ("🎁 Сгенерировать подарок (код)", False, ["Редкость: none / rare / epic / random"]),
     "mailing": ("📨 Рассылка", False, ["Текст рассылки (HTML разрешён)"]),
 }
 
@@ -5577,8 +5712,10 @@ def admin_exec(action: str, tid: Optional[int], a: List[str], by: int) -> str:
         u = get_user(owner)
         nm = uname(u, False)
         rar = a[1].lower()
+        if rar in ("none", "нет", "-", "без"):
+            rar = "common"
         if rar not in RARITY_BASE:
-            return "❌ Неверная редкость."
+            return "❌ Неверная редкость. Можно: none, rare, epic."
         price = parse_amount(a[2]) or RARITY_BASE[rar]
         try:
             want_id = int((a[4] if len(a) > 4 else "0").strip() or 0)
@@ -5591,10 +5728,17 @@ def admin_exec(action: str, tid: Optional[int], a: List[str], by: int) -> str:
         background = (a[6].strip() if len(a) > 6 else "")
         background = background if background in bg_names else None
         photo = (a[7].strip() if len(a) > 7 else "")
-        photo = photo[:8] if photo and photo.lower() not in ("random", "-", "авто") else None
+        is_file = len(photo) > 40
+        photo = None if is_file or not photo or photo.lower() in ("random", "-", "авто") else photo[:8]
         occupied = bool(want_id > 0 and q("SELECT 1 FROM nft_items WHERE id=?", (want_id,), one=True))
         nid = make_nft(owner, a[0][:30], rar, photo, "" if a[3] == "-" else a[3][:200], price,
                        model=model, background=background, nft_id=want_id)
+        if rar in UPGRADE_RARITIES:
+            x("UPDATE nft_items SET level=2 WHERE id=?", (nid,))
+        if is_file:
+            asyncio.get_event_loop().create_task(_attach_nft_photo(nid, a[0][:30], rar, a[7].strip()))
+        else:
+            make_nft_image(nid)
         note = " Номер уже существовал — данные и владелец перезаписаны." if occupied else ""
         whom = "тебе" if action == "nft_self" else nm
         return (f"🎨 NFT выдан {whom}:{note}\n"
@@ -5612,6 +5756,24 @@ def admin_exec(action: str, tid: Optional[int], a: List[str], by: int) -> str:
             return f"💌 Бокс {RARITY_EMOJI[rar]} выдан {nm}. Код: <code>{code}</code>"
         return f"🎁 Подарок создан и лежит на твоём складе:\n{RARITY_EMOJI[rar]} {RARITY_NAME[rar]} · код <code>{code}</code>"
     return f"✅ Готово: {nm} ({tid})"
+
+
+async def _attach_nft_photo(nid: int, title: str, rarity: str, file_id: str):
+    """Фото из Telegram → карточка NFT. Ошибку не роняем: останется код-арт."""
+    try:
+        f = await bot.get_file(file_id)
+        buf = await bot.download_file(f.file_path)
+        data = buf.read() if hasattr(buf, "read") else bytes(buf)
+        NFT_DIR.mkdir(parents=True, exist_ok=True)
+        (NFT_DIR / f"photo_{nid}.png").write_bytes(data)
+        card = _nft_photo_card(data, title, rarity, nid)
+        (NFT_DIR / f"photo_{nid}_card.png").write_bytes(card)
+        kv_set(f"nftimg:{nid}", f"photo_{nid}_card.png")
+        kv_set(f"nftpng:{nid}", base64.b64encode(card).decode("ascii"))
+        x("UPDATE nft_items SET photo='photo' WHERE id=?", (nid,))
+    except Exception:
+        log.exception("_attach_nft_photo %s", nid)
+        make_nft_image(nid)
 
 
 async def _dm(uid: int, text: str):
@@ -5715,7 +5877,13 @@ async def f_adm_a(m: Message, state: FSMContext, d, txt):
     if not is_admin(m.from_user.id):
         return await state.clear()
     title, _, prompts = ADMIN_ACTIONS[d["action"]]
-    answers = list(d.get("answers", [])) + [m.text.strip()]
+    answers = list(d.get("answers", []))
+    if m.photo:
+        answers.append(m.photo[-1].file_id)
+    elif m.document and str(m.document.mime_type or "").startswith("image/"):
+        answers.append(m.document.file_id)
+    elif m.text:
+        answers.append(m.text.strip())
     if len(answers) < len(prompts):
         return await step(m, state, "adm_a", f"{title}\n{prompts[len(answers)]}", answers=answers)
     await adm_finish(m, state, d["action"], d.get("target", 0), answers)
@@ -6028,7 +6196,7 @@ def w_spend(u, bet: int, lo: int = 10) -> Optional[dict]:
 # ---------- арена: квадратная сцена со ставками ----------
 AR: Dict[str, Any] = {}
 AR_HIST: List[dict] = []
-AR_CD, AR_ROLL, AR_SHOW, AR_MAX = 15, 7, 9, 10
+AR_CD, AR_ROLL, AR_SHOW, AR_MAX = 15, 8, 9, 10
 AR_MIN_BET = 1
 ARENA_HEX = ["#ff8a3d", "#3d9bff", "#35d07f", "#b06bff", "#ffd23d", "#ff5c5c", "#2de2e6", "#c98bff", "#8dff6b", "#ff7ab8"]
 ARENA_BLACK = "#111111"
@@ -6090,6 +6258,23 @@ def ar_reset(refund: bool = False):
 ar_reset()
 
 
+def ar_zones(players: dict) -> list:
+    """Кольцо делится на зоны по ставкам: чем больше ставка, тем шире сектор."""
+    total = sum(max(0, int(p.get("bet", 0) or 0)) for p in players.values())
+    n = max(1, len(players))
+    zones = []
+    acc = 0.0
+    for uid, p in players.items():
+        bet = max(0, int(p.get("bet", 0) or 0))
+        share = (bet / total) if total else 1 / n
+        start = acc
+        acc += share
+        zones.append({"id": uid, "name": p.get("name", ""), "color": p.get("color", "#3d9bff"),
+                      "bet": bet, "share": round(share * 100, 1),
+                      "start": round(start * 360, 2), "end": round(min(1.0, acc) * 360, 2)})
+    return zones
+
+
 def ar_tick():
     t = time.time()
     ph = AR["phase"]
@@ -6101,6 +6286,7 @@ def ar_tick():
         weights = [max(1, int(AR["players"][i].get("bet", 0) or 0)) for i in ids]
         AR["winner"] = random.choices(ids, weights=weights, k=1)[0]
         AR["phase"], AR["t_roll"] = "rolling", t
+        AR["zones"] = ar_zones(AR["players"])
     elif ph == "rolling" and t >= AR["t_roll"] + AR_ROLL:
         winner = AR["winner"]
         players = dict(AR["players"])
@@ -6167,6 +6353,8 @@ def ar_state(uid: int) -> dict:
             "cd_left": max(0.0, AR["t_cd"] + AR_CD - t) if ph == "countdown" else 0,
             "roll_total": AR_ROLL, "roll_elapsed": min(AR_ROLL, t - AR["t_roll"]) if ph == "rolling" else (AR_ROLL if ph == "done" else 0),
             "winner_idx": winner_idx, "history": AR_HIST, "max": AR_MAX,
+            "zones": ar_zones(pl) if count else [],
+            "roll_stop": round(AR["t_roll"] + AR_ROLL, 3) if ph == "rolling" else 0,
             "min_bet": AR_MIN_BET, "rake": pool // 10, "prize": pool - pool // 10, "free": pool == 0}
 
 
@@ -6401,496 +6589,1124 @@ def a_mines_cash(u, body):
 
 
 WEBAPP_HTML = r"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no"><title>RUBIN · Игровой центр</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
+<title>RUBIN NFT</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-:root{color-scheme:dark;--bg:#080b10;--panel:#111720;--panel2:#151e29;--line:#263443;--text:#f4f7fb;--muted:#8d9baa;--blue:#2798ff;--green:#27c982;--red:#ff5268;--gold:#ffc45d;--radius:22px}
-*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(900px 500px at 100% -10%,#12304a 0%,transparent 60%),radial-gradient(700px 450px at -20% 40%,#172433 0%,transparent 60%),var(--bg);color:var(--text);min-height:100vh;padding:calc(14px + env(safe-area-inset-top)) 14px calc(100px + env(safe-area-inset-bottom));overflow-x:hidden}.wrap{max-width:760px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.brand{font-size:19px;font-weight:950;letter-spacing:.08em}.brand span{color:var(--blue)}.wallet{background:#111b26;border:1px solid #263b50;padding:9px 13px;border-radius:999px;font-weight:850}.wallet small{color:var(--muted);font-size:10px;margin-right:6px}.hero{background:linear-gradient(135deg,#142638,#101720 65%);border:1px solid #2b4054;border-radius:28px;padding:20px;margin-bottom:14px;position:relative;overflow:hidden}.hero:after{content:"";position:absolute;width:190px;height:190px;right:-65px;top:-85px;border-radius:50%;background:#178cf2;filter:blur(75px);opacity:.28}.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#91a7bb;font-weight:800}.balance{font-size:clamp(27px,7vw,38px);font-weight:950;margin:7px 0 4px;letter-spacing:-1px}.balance small{font-size:15px;color:#8dbde7}.subline{color:var(--muted);font-size:12px}.copy{margin-top:12px;border:1px dashed #52677b;background:#0c141d;color:#c7d8e8;padding:9px 12px;border-radius:12px;width:100%;text-align:left;font:600 13px ui-monospace,monospace}.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin:12px 0}.stat{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:13px}.stat span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.stat b{font-size:16px}.panel{background:linear-gradient(155deg,#141d27,#0f151d);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin:12px 0;box-shadow:0 12px 32px #0003}.panel h2{font-size:16px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}.muted{color:var(--muted);font-size:12px;line-height:1.5}.nav{position:fixed;z-index:10;bottom:calc(10px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(720px,calc(100% - 24px));display:grid;grid-template-columns:repeat(6,1fr);gap:5px;padding:7px;background:#111923ed;border:1px solid #304153;border-radius:22px;backdrop-filter:blur(18px);box-shadow:0 12px 40px #0009}.nav button{border:0;background:transparent;color:#8191a1;padding:10px 3px;border-radius:15px;font-size:10px;font-weight:800}.nav button i{display:block;font-style:normal;font-size:18px;margin-bottom:4px}.nav button.active{background:#173a59;color:#eaf6ff;box-shadow:inset 0 0 0 1px #2d77b2}.page{display:none}.page.active{display:block;animation:fade .22s ease}@keyframes fade{from{opacity:.3;transform:translateY(5px)}to{opacity:1;transform:none}}.actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.action{border:1px solid #304255;background:#172431;color:#eaf4ff;padding:12px 6px;border-radius:15px;font-size:12px;font-weight:800}.action:active,.btn:active{transform:scale(.98)}.btn{width:100%;border:0;border-radius:15px;padding:14px 16px;font-weight:900;font-size:14px;color:white;background:linear-gradient(135deg,#1687ed,#2864d9);margin-top:9px}.btn.green{background:linear-gradient(135deg,#21c981,#149c72);color:#061b13}.btn.red{background:linear-gradient(135deg,#ff536b,#cf294a)}.btn.ghost{background:#1a2632;border:1px solid #35485b;color:#dce8f4}.row{display:flex;gap:9px;align-items:center}.row>*{min-width:0;flex:1}input{width:100%;padding:13px;border-radius:13px;border:1px solid #34495e;background:#0a1119;color:white;font-size:15px;font-weight:800;outline:none}input:focus{border-color:var(--blue)}.profile-head{display:flex;align-items:center;gap:13px;margin:4px 0 12px}.profile-photo{width:58px;height:58px;border-radius:50%;object-fit:cover;border:2px solid #4b91c9;background:#22384b}.profile-photo.fallback{display:grid;place-items:center;color:#fff;font-weight:900;font-size:22px}.color-picks{display:flex;gap:9px;flex-wrap:wrap;margin:10px 0}.color-pick{width:30px;height:30px;border-radius:50%;border:2px solid #ffffff33;cursor:pointer}.color-pick.selected{outline:2px solid white;outline-offset:3px}.snowman-score{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #253747}.players{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.player{display:flex;align-items:center;gap:9px;background:#0c141d;border:1px solid #263849;border-radius:14px;padding:10px}.avatar{width:35px;height:35px;border-radius:50%;display:grid;place-items:center;font-weight:900;color:#07111a;flex:none}.player b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.player small{display:block;color:var(--muted);font-size:10px;margin-top:2px}.arena{display:grid;place-items:center;min-height:250px;background:radial-gradient(circle at 50% 50%,#1b3448,#0b121b 70%);border:1px solid #2a4155;border-radius:22px;overflow:hidden}.arena canvas{width:min(100%,340px);height:auto}.status{text-align:center;font-size:18px;font-weight:900;margin:12px 0 4px}.progress{height:7px;background:#243241;border-radius:20px;overflow:hidden;margin-top:12px}.progress span{height:100%;display:block;width:0;background:linear-gradient(90deg,#259aff,#55d4ff);transition:width .25s}.chart{width:100%;height:190px;display:block;background:#0b131c;border-radius:16px}.price{font-size:28px;font-weight:950}.up{color:var(--green)}.down{color:var(--red)}.trade-buttons{display:grid;grid-template-columns:1fr 1fr;gap:9px}.trade-buttons .btn{margin-top:0}.gridcards{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}.tile{border:1px solid #2b3b4b;border-radius:17px;background:#101923;padding:14px;min-height:105px}.tile .ico{font-size:25px;margin-bottom:9px}.tile b{display:block;font-size:13px}.tile small{color:var(--muted);font-size:11px}.badge{display:inline-flex;align-items:center;padding:5px 9px;border:1px solid #31516a;background:#142b3e;border-radius:999px;color:#b9ddfa;font-size:10px;font-weight:900;margin:3px}.nft{border:1px solid #33475a;background:#0b131c;border-radius:16px;padding:10px}.nft img{width:100%;aspect-ratio:3 / 2;object-fit:cover;border-radius:12px;background:#182432}.nft b{display:block;font-size:12px;margin-top:8px}.toast{position:fixed;left:50%;bottom:95px;transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#1b2b3a;border:1px solid #42617b;padding:11px 16px;border-radius:13px;font-size:13px;font-weight:800;transition:.2s;z-index:20;max-width:90%;text-align:center}.toast.show{opacity:1;transform:translate(-50%,0)}.hide{display:none!important}@media(min-width:600px){.stats{grid-template-columns:repeat(4,1fr)}.gridcards{grid-template-columns:repeat(3,1fr)}}
-
-/* RUBIN custom icon system: hand-drawn inline SVG, no emoji-font dependence */
-.glyph{width:25px;height:25px;display:inline-grid;place-items:center;flex:0 0 auto;vertical-align:middle;color:var(--glyph,#8fc8ff)}
-.glyph svg{width:100%;height:100%;display:block;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
-.tile{position:relative;overflow:hidden;min-height:118px;padding:15px;background:linear-gradient(145deg,#151f2b 0%,#0d141d 72%);border-color:#293b4d;box-shadow:inset 0 1px 0 #ffffff09;transition:transform .16s,border-color .16s,background .16s;cursor:pointer}
-.tile:before{content:"";position:absolute;inset:0 auto 0 0;width:2px;background:var(--tile-accent,#398fd0);opacity:.8}
-.tile:active{transform:translateY(1px) scale(.985);border-color:#52718d}
-.tile .ico{width:43px;height:43px;display:grid;place-items:center;margin:0 0 12px;border-radius:13px;background:linear-gradient(145deg,#1c3042,#111c28);border:1px solid #344b60;color:var(--tile-accent,#83c7ff);box-shadow:0 5px 15px #0004}
-.tile .ico .glyph{width:25px;height:25px}
-.tile b{font-size:13px;letter-spacing:.01em}.tile small{display:block;margin-top:5px;line-height:1.35}
-.btn,.action{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:9px;overflow:hidden;cursor:pointer;letter-spacing:.01em;transition:filter .15s,transform .15s,border-color .15s}
-.btn{border:1px solid #ffffff17;box-shadow:inset 0 1px 0 #ffffff24,0 6px 16px #0003;background:linear-gradient(135deg,#258bd2,#1756a4)}
-.btn.green{background:linear-gradient(135deg,#25bd82,#117e61);border-color:#57d7a255;box-shadow:inset 0 1px 0 #ffffff30,0 6px 16px #0003}
-.btn.red{background:linear-gradient(135deg,#e64e65,#a92743)}
-.btn.ghost{background:linear-gradient(145deg,#1c2a38,#121b25);border-color:#344a5e;box-shadow:inset 0 1px 0 #ffffff0c}
-.action{border-radius:13px;background:linear-gradient(145deg,#1b2b3b,#111c27);border-color:#354b60;box-shadow:inset 0 1px 0 #ffffff0c}
-.nav{border-radius:18px;background:#0d151fee;border-color:#2b3d4f}.nav button{border-radius:12px;transition:background .15s,color .15s}.nav button i{width:23px;height:23px;margin:0 auto 5px;display:grid;place-items:center}.nav button.active{background:linear-gradient(145deg,#1a3b55,#142b40);box-shadow:inset 0 0 0 1px #3a7199}
-.panel h2 .glyph{width:21px;height:21px;margin-right:7px;color:#8dc8f5}
-.action:focus-visible,.btn:focus-visible,.tile:focus-visible{outline:2px solid #79bfff;outline-offset:3px}
-.nft-actions{display:flex;gap:6px;margin-top:7px}
-.btn.mini{padding:7px 8px;font-size:10px;border-radius:10px;margin:0;flex:1}
-.ce{width:1.15em;height:1.15em;object-fit:contain;vertical-align:-.18em;margin:0 1px;display:inline-block}
-.arena-panel{padding:14px}
-.arena-top{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:10px;gap:10px}
-.arena-bank{font-size:clamp(22px,6vw,30px);font-weight:950;letter-spacing:-.5px;color:#eaf6ff;line-height:1.1}
-.arena-bank small{font-size:12px;color:#7fb6e0;font-weight:800}
-.arena-count{text-align:right;color:#8fb7d4;font-size:11px;font-weight:800}
-.arena-count b{display:block;font-size:18px;color:#fff}
-.arena-square{position:relative;width:100%;aspect-ratio:1;border-radius:24px;overflow:hidden;border:1px solid #2c4258;background:#0b121a;box-shadow:inset 0 0 60px #0008,0 16px 40px #0005;isolation:isolate;touch-action:manipulation}
-.arena-sectors{position:absolute;inset:-1px;transition:background .35s}
-.arena-square:before{content:"";position:absolute;inset:0;background-image:linear-gradient(#ffffff0b 1px,transparent 1px),linear-gradient(90deg,#ffffff0b 1px,transparent 1px);background-size:12.5% 12.5%;z-index:2;pointer-events:none}
-.arena-square:after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 50% 45%,transparent 30%,#00000055 78%,#00000088 100%);z-index:3;pointer-events:none}
-.arena-players{position:absolute;inset:0;z-index:4}
-.arena-player{position:absolute;transform:translate(-50%,-50%);width:36%;text-align:center;color:#fff;text-shadow:0 2px 12px #000b;transition:transform .25s}
-.arena-player .ap-ava{width:clamp(54px,16vw,76px);aspect-ratio:1;border-radius:50%;margin:0 auto 8px;padding:3px;background:linear-gradient(135deg,var(--c),#ffffff66);box-shadow:0 0 0 1px #ffffff2e,0 12px 28px #0008}
-.arena-player .ap-ava>span{display:grid;place-items:center;width:100%;height:100%;border-radius:50%;background:#101a24;font-size:24px;font-weight:950;overflow:hidden;color:#dff2ff}
-.arena-player img{width:100%;height:100%;object-fit:cover;border-radius:50%}
-.arena-player b{display:block;font-size:12px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.arena-player small{display:block;font-size:9.5px;color:#d7ecff;opacity:.9;margin-top:3px;font-weight:800}
-.arena-player.you b:after{content:" · ты";color:#7dffbf;font-size:9px;font-weight:900}
-.arena-player.win .ap-ava{animation:winpulse .9s ease-in-out infinite alternate;box-shadow:0 0 0 3px #fff,0 0 42px var(--c)}
-@keyframes winpulse{to{transform:scale(1.08)}}
-.arena-ball{position:absolute;left:50%;top:50%;width:clamp(22px,7vw,34px);height:clamp(22px,7vw,34px);border-radius:50%;z-index:6;transform:translate(-50%,-50%);background:radial-gradient(circle at 34% 28%,#fff,#d7ecff 30%,#67b9ff 65%,#1f6ca8);box-shadow:0 0 18px #8fd4ff,0 8px 24px #000b;will-change:left,top;pointer-events:none;opacity:0;transition:opacity .25s}
-.arena-ball.live{opacity:1}
-.arena-ball:after{content:"";position:absolute;inset:-7px;border-radius:50%;border:1px solid #ffffff55;animation:ballpulse 1.4s ease-in-out infinite}
-@keyframes ballpulse{0%,100%{transform:scale(.9);opacity:.5}50%{transform:scale(1.15);opacity:.15}}
-.arena-ball.win{filter:brightness(1.3);box-shadow:0 0 28px #fff,0 0 60px #8fd4ff}
-.arena-ball:before{content:"";position:absolute;left:60%;top:26%;width:24%;height:24%;border-radius:50%;background:#fff;opacity:.8;filter:blur(.3px)}
-.ball-trail{position:absolute;width:16px;height:16px;border-radius:50%;background:radial-gradient(circle,#c9efff,#2f86c9);opacity:0;transform:translate(-50%,-50%);z-index:5;pointer-events:none;filter:blur(.8px)}
-.bounce-ring{position:absolute;width:10px;height:10px;border:2px solid #9fe0ff;border-radius:50%;transform:translate(-50%,-50%);z-index:7;pointer-events:none;animation:ring .65s ease-out forwards}
-@keyframes ring{to{width:76px;height:76px;opacity:0;border-width:1px}}
-.arena-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;font-weight:950;font-size:11px;letter-spacing:.18em;color:#ffffff80;text-shadow:0 2px 10px #000;pointer-events:none;margin-top:28px}
-.color-picks{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0 0}
-.color-pick{width:26px;height:26px;border-radius:50%;border:2px solid #ffffff33;padding:0;background:var(--c);box-shadow:0 3px 10px #0006;transition:.15s}
-.color-pick.selected{outline:2px solid #fff;outline-offset:3px;transform:scale(1.08)}
-.color-pick:disabled{opacity:.28;filter:grayscale(.4)}
-.bet-row{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
-.chip{flex:1;min-width:62px;padding:10px 6px;border-radius:12px;border:1px solid #33495e;background:#121d28;color:#cfe4f6;font-weight:850;font-size:12px;transition:.15s}
-.hero{isolation:isolate}
-.hero-art{position:absolute;right:-16px;top:-12px;width:46%;max-width:240px;opacity:.42;filter:saturate(1.15) drop-shadow(0 14px 30px #000);-webkit-mask-image:linear-gradient(90deg,transparent,#000 45%);mask-image:linear-gradient(90deg,transparent,#000 45%);pointer-events:none;position:absolute;z-index:0}
-.hero>*{position:relative;z-index:1}
-.hero .hero-art{position:absolute;z-index:0}
-body{background-size:140% 140%,120% 120%,auto;animation:bgmove 24s ease-in-out infinite alternate}
-@keyframes bgmove{to{background-position:100% 100%,0% 80%,0 0}}
-.panel{backdrop-filter:blur(14px)}
-.tile:hover{transform:translateY(-2px);border-color:#4b7fa5;background:linear-gradient(145deg,#182535,#0f1721)}
-.btn:hover{filter:brightness(1.08)}
-.chip.on{background:linear-gradient(145deg,#1d6ea8,#154d79);border-color:#5cb3e8;color:#fff;box-shadow:0 0 0 1px #5cb3e855,0 6px 16px #0005}
-.chip:disabled{opacity:.45}
-.betbar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:10px}
-.betbar .muted{font-size:11px}
-.bet-input{width:100%;margin-top:8px;padding:12px 14px;border-radius:12px;border:1px solid #33495e;background:#0a1119;color:#fff;font-size:16px;font-weight:850;outline:none}
-.bet-input:focus{border-color:#5cb3e8;box-shadow:0 0 0 2px #5cb3e833}
-.arena-square.many .arena-player{width:27%}
-.arena-square.many .ap-ava{width:clamp(38px,11vw,56px)}
-.arena-square.many .arena-player b{font-size:10.5px}
-.arena-square.many .arena-player small{font-size:8px}
-.arena-square.dense .arena-player{width:23%}
-.arena-square.dense .ap-ava{width:clamp(30px,8vw,44px)}
-.arena-square.dense .arena-player b{font-size:9px}
-.arena-square.dense .arena-player small{font-size:7px}
-.gift-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}
-.gift-card{display:flex;flex-direction:column;gap:5px;padding:6px;border:1px solid #2b4054;border-radius:14px;background:#0f1923}
-.gift-card img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:10px;background:#182432}
-.gift-card b{font-size:10px;text-align:center;color:#cfe4f6;line-height:1.2}
-.gift-card .btn{padding:6px 4px!important;font-size:10px!important;min-height:0!important}
-.theme-row{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
-.theme-chip{flex:1;min-width:62px;padding:10px 6px;border-radius:12px;border:1px solid #33495e;background:#121d28;color:#cfe4f6;font-weight:850;font-size:12px;transition:.15s}
-.theme-chip.on{background:linear-gradient(145deg,#1d6ea8,#154d79);border-color:#5cb3e8;color:#fff;box-shadow:0 0 0 2px #5cb3e855}
-body.theme-blue{--bg:#06121f;--panel:#0e2233;--panel2:#102a3f;--line:#24425a;--blue:#38a9ff;background:radial-gradient(900px 500px at 100% -10%,#0d3550 0%,transparent 60%),radial-gradient(600px 420px at -10% 20%,#08263d 0%,transparent 55%),var(--bg)}
-body.theme-purple{--bg:#100a1c;--panel:#1b1229;--panel2:#241735;--line:#3b2a55;--blue:#b06bff;background:radial-gradient(900px 500px at 100% -10%,#32175a 0%,transparent 60%),radial-gradient(600px 420px at -10% 20%,#220f3d 0%,transparent 55%),var(--bg)}
-body.theme-green{--bg:#07140f;--panel:#0f211a;--panel2:#132a21;--line:#234a39;--blue:#35d07f;background:radial-gradient(900px 500px at 100% -10%,#0f4a32 0%,transparent 60%),radial-gradient(600px 420px at -10% 20%,#0a3423 0%,transparent 55%),var(--bg)}
-body.wall-banner{background-image:linear-gradient(#000000a8,#000000d8),url('/banner');background-size:cover;background-position:center}
-body.wall-plain{background:var(--bg)}
-
-
-/* ---- RUBIN 2026: стекло, майнинг, апгрейдер ---- */
-.btn,.action,.tile{backdrop-filter:blur(18px) saturate(1.25);-webkit-backdrop-filter:blur(18px) saturate(1.25)}
-.btn{background:linear-gradient(160deg,#2f9cf0e6,#155bb8e6);border:1px solid #ffffff33;box-shadow:inset 0 1px 0 #ffffff4d,inset 0 -1px 0 #00000033,0 10px 26px #0006}
-.btn.green{background:linear-gradient(160deg,#2ed695e6,#0f8a63e6)}
-.btn.red{background:linear-gradient(160deg,#ff6b80e6,#b82440e6)}
-.btn.ghost{background:linear-gradient(160deg,#ffffff16,#ffffff08);border-color:#ffffff26}
-.mine-disc{width:168px;height:168px;border-radius:50%;display:grid;place-items:center;position:relative;margin:6px auto 10px;background:conic-gradient(from 0deg,#123,#2a4d6e,#123,#2a4d6e,#123);box-shadow:inset 0 0 26px #000a,0 14px 34px #0008;animation:spin 6s linear infinite}
-.mine-disc:after{content:"";position:absolute;inset:12px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#1c2c3d,#0a1119 70%);box-shadow:inset 0 0 18px #000}
-.mine-disc .ruby{position:relative;z-index:2;width:62px;height:62px;border-radius:14px;background:linear-gradient(150deg,#ff8fa3,#ff2d55 45%,#8e0d2b);box-shadow:0 0 26px #ff2d5599,inset 0 2px 6px #fff6,inset 0 -4px 10px #4a001188;transform:rotate(45deg)}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#000;--line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.14);
+  --gl:rgba(13,14,24,.72);--gl2:rgba(255,255,255,.045);--gl3:rgba(255,255,255,.075);
+  --t1:#fff;--t2:#a2a3b5;--t3:#6c6d80;--bl:#3d7bff;--bl2:#1f4fd8;--vio:#8b6cf6;--gold:#ffd870;
+  --r:24px;--nav:calc(86px + env(safe-area-inset-bottom));
+}
+html,body{height:100%}
+body{font-family:Inter,"SF Pro Text",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#000;color:var(--t1);
+  -webkit-font-smoothing:antialiased;overflow-x:hidden;padding:calc(6px + env(safe-area-inset-top)) 10px calc(var(--nav) + 16px)}
+body:before{content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;background:
+  radial-gradient(540px 320px at 78% -6%,rgba(61,123,255,.30),transparent 68%),
+  radial-gradient(460px 300px at 8% 12%,rgba(139,108,246,.22),transparent 70%),
+  radial-gradient(520px 380px at 50% 104%,rgba(31,79,216,.20),transparent 72%),#000}
+body:after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.5;
+  background-image:linear-gradient(rgba(255,255,255,.028) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.028) 1px,transparent 1px);
+  background-size:52px 52px;mask-image:radial-gradient(circle at 50% 12%,#000 0,transparent 76%);-webkit-mask-image:radial-gradient(circle at 50% 12%,#000 0,transparent 76%)}
+.wrap{max-width:820px;margin:auto}
+svg.ic{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;display:block}
+svg.ic.sm{width:16px;height:16px}svg.ic.xs{width:13px;height:13px}svg.ic.lg{width:26px;height:26px}
+/* шапка */
+.top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:4px 2px 14px}
+.me{display:flex;align-items:center;gap:10px;min-width:0}
+.ava{width:42px;height:42px;border-radius:50%;object-fit:cover;background:linear-gradient(150deg,#2a2f4a,#0c0d16);
+  border:1.5px solid rgba(255,255,255,.22);box-shadow:0 6px 18px #000a;flex:none;display:grid;place-items:center;font-weight:900;font-size:15px;color:#cfd3e8}
+.me b{display:block;font-size:13.5px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34vw}
+.me small{display:flex;align-items:center;gap:4px;color:var(--t2);font-size:10px;font-weight:700;margin-top:2px}
+.toppill{display:flex;align-items:center;gap:7px;padding:8px 12px;border-radius:999px;background:var(--gl2);
+  border:1px solid var(--line);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);font-weight:850;font-size:12.5px}
+/* стекло */
+.glass{background:var(--gl);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;
+  backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);
+  box-shadow:0 16px 44px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.08)}
+.glass.hi{background:linear-gradient(160deg,rgba(30,34,54,.78),rgba(9,10,18,.82))}
+.pad{padding:14px}
+.page{display:none}.page.active{display:block;animation:in .22s ease}
+@keyframes in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+.rowh{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.rowh h2{font-size:15px;font-weight:850;letter-spacing:-.1px}
+.muted{color:var(--t2);font-size:12px;line-height:1.5}
+.tiny{color:var(--t3);font-size:10.5px;line-height:1.45}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:5px 9px;border-radius:999px;font-size:10px;font-weight:800;
+  border:1px solid var(--line2);background:var(--gl2);color:#d7d9ea}
+.pill.bl{color:#9fc0ff;border-color:rgba(61,123,255,.35);background:rgba(61,123,255,.12)}
+.pill.gold{color:#ffe6a3;border-color:rgba(255,216,112,.3);background:rgba(255,216,112,.1)}
+/* баланс-панель */
+.balance{padding:16px 15px 14px;border-radius:26px;position:relative;overflow:hidden}
+.balance:before{content:"";position:absolute;right:-60px;top:-70px;width:220px;height:220px;border-radius:50%;
+  background:radial-gradient(circle,rgba(61,123,255,.5),transparent 70%);filter:blur(10px)}
+.balance .lbl{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:#9aa8c9;font-weight:800}
+.sum{display:flex;align-items:baseline;gap:7px;margin:4px 0 12px;position:relative}
+.sum b{font-size:clamp(30px,9vw,38px);font-weight:900;letter-spacing:-1.4px}
+.sum span{font-size:12px;color:#9aa8c9;font-weight:700}
+.bacts{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;position:relative}
+.bact{border:1px solid var(--line2);border-radius:16px;background:rgba(255,255,255,.06);color:#e7e9f5;
+  padding:10px 3px;font:800 10px inherit;display:grid;gap:6px;place-items:center;cursor:pointer;transition:.15s}
+.bact:active{transform:scale(.97);background:rgba(61,123,255,.18)}
+.bact .ic{color:#a9c4ff;width:19px;height:19px}
+/* кейсы */
+.cases{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+.case{position:relative;isolation:isolate;border-radius:20px;padding:12px;border:1px solid var(--line);
+  background:linear-gradient(160deg,rgba(255,255,255,.07),rgba(255,255,255,.02));overflow:hidden;cursor:pointer}
+.case:before{content:"";position:absolute;z-index:-1;right:-40px;top:-50px;width:150px;height:150px;border-radius:50%;filter:blur(30px);opacity:.5;background:var(--c,#7d6bd4)}
+.case:active{transform:scale(.985)}
+.case .tagname{position:absolute;top:10px;right:10px;font-size:8px;letter-spacing:.12em;color:#cfd4ea;background:rgba(0,0,0,.35);
+  border:1px solid var(--line2);border-radius:999px;padding:3px 6px;font-weight:800}
+.case .art{width:56px;height:56px;border-radius:16px;display:grid;place-items:center;color:#fff;
+  background:radial-gradient(circle at 35% 25%,rgba(255,255,255,.28),rgba(255,255,255,.06));border:1px solid var(--line2);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.22)}
+.case .art .ic{width:28px;height:28px;stroke-width:1.6}
+.case b{display:block;font-size:13px;margin-top:10px}
+.case .pr{display:flex;align-items:center;gap:5px;margin-top:5px;color:#bcc8ee;font-size:11px;font-weight:800}
+.case .op{width:100%;margin-top:9px;border:1px solid rgba(255,255,255,.16);border-radius:12px;padding:9px;
+  background:linear-gradient(160deg,rgba(61,123,255,.85),rgba(31,79,216,.9));color:#fff;font:800 12px inherit}
+.case .op:active{filter:brightness(1.2)}
+/* nft */
+.nftgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+.nft{border-radius:17px;overflow:hidden;border:1px solid var(--line);background:rgba(8,9,15,.7);cursor:pointer}
+.nft .im{position:relative;aspect-ratio:16/10;background:#07080d}
+.nft img{width:100%;height:100%;object-fit:cover;display:block}
+.nft .n{position:absolute;right:7px;top:7px;font-size:10px;font-weight:850;padding:3px 7px;border-radius:999px;
+  background:rgba(0,0,0,.55);border:1px solid var(--line2);backdrop-filter:blur(6px)}
+.nft .lv{position:absolute;left:7px;top:7px;font-size:8.5px;font-weight:900;padding:3px 7px;border-radius:999px;
+  background:linear-gradient(150deg,#8f7bff,#3b2ea8);box-shadow:0 4px 12px rgba(80,60,220,.45)}
+.nft .b{padding:8px 9px 10px}
+.nft .nm{font-size:11px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nft .mt{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:4px;font-size:9px;color:var(--t2)}
+.nft .rr{font-size:8.5px;font-weight:800;color:#9aa0b8;margin-top:5px;letter-spacing:.04em;text-transform:uppercase}
+.nft .rr.rare{color:#c4a9ff}.nft .rr.epic{color:#ffc27a}
+/* майнинг */
+.fan{position:relative;width:min(62vw,236px);aspect-ratio:1;margin:14px auto 4px;border-radius:50%;display:grid;place-items:center;
+  animation:spin 7s linear infinite;background:conic-gradient(from 0deg,#0b1020,#2a4fd0,#7b8cff,#16307f,#0b1020);
+  box-shadow:0 0 0 9px rgba(61,123,255,.13),0 0 0 11px rgba(255,255,255,.05),0 26px 64px rgba(31,79,216,.45)}
+.fan:before{content:"";position:absolute;inset:13px;border-radius:50%;
+  background:repeating-conic-gradient(from 0deg,rgba(255,255,255,.22) 0 6deg,transparent 6deg 36deg);
+  mask:radial-gradient(circle,transparent 0 31%,#000 32%);-webkit-mask:radial-gradient(circle,transparent 0 31%,#000 32%)}
+.fan:after{content:"";position:absolute;inset:35%;border-radius:50%;
+  background:radial-gradient(circle at 34% 28%,#dfe7ff,#3d7bff 48%,#10265f);box-shadow:0 0 26px rgba(120,160,255,.8),inset 0 2px 8px rgba(255,255,255,.55)}
+.fan .ic{position:relative;z-index:2;width:26px;height:26px;color:#fff;filter:drop-shadow(0 2px 6px rgba(0,0,0,.5))}
 @keyframes spin{to{transform:rotate(360deg)}}
-.upg-wheel{width:210px;height:210px;border-radius:50%;position:relative;display:grid;place-items:center;margin:14px auto 6px;background:conic-gradient(#35d07f 0 calc(var(--ch,30) * 1%),#26313c 0 100%);box-shadow:inset 0 0 0 10px #0c1219,inset 0 0 0 12px #31465a,0 16px 40px #0008;transition:transform 3.2s cubic-bezier(.12,.72,.1,1)}
-.upg-wheel.spin{transform:none}
-.upg-wheel:after{content:"";position:absolute;inset:34px;border-radius:50%;background:radial-gradient(circle at 40% 30%,#16212c,#0a1017 75%);box-shadow:inset 0 0 18px #000}
-.upg-chance{position:relative;z-index:2;font-size:34px;font-weight:950;letter-spacing:-1px;color:#eaf6ff}
-.upg-pointer{position:absolute;top:-12px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:13px solid transparent;border-right:13px solid transparent;border-top:22px solid #ffd23d;z-index:3;filter:drop-shadow(0 4px 8px #000a)}
-.upg-pick .nft{cursor:pointer}
-.upg-pick .nft.on{border-color:#35d07f;box-shadow:0 0 0 1px #35d07f66,0 10px 24px #0006}
-.confetti{position:fixed;inset:0;pointer-events:none;z-index:60;overflow:hidden}
-.confetti i{position:absolute;width:9px;height:15px;border-radius:2px;animation:fall linear forwards}
-@keyframes fall{to{transform:translateY(112vh) rotate(720deg);opacity:.9}}
-.arena-square.finish{transform:scale(1.28);transition:transform 1.2s cubic-bezier(.18,.72,.15,1);box-shadow:0 0 0 2px #ffd23d55,0 24px 70px #000}
-.arena-win{position:absolute;left:50%;top:7%;transform:translate(-50%,-8px);z-index:9;padding:9px 18px;border-radius:999px;background:#0b0b0dcc;border:1px solid #ffd23d77;color:#ffe9a8;font-weight:900;font-size:13px;opacity:0;transition:.35s;white-space:nowrap;backdrop-filter:blur(12px)}
-.arena-win.show{opacity:1;transform:translate(-50%,0)}
+.srv{display:flex;align-items:center;gap:10px;padding:10px;border-radius:15px;border:1px solid var(--line);background:rgba(255,255,255,.035);margin-top:8px}
+.srv .icw{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;background:rgba(61,123,255,.16);color:#a9c4ff;flex:none}
+.srv b{display:block;font-size:12px}.srv small{display:block;color:var(--t2);font-size:9.5px;margin-top:2px}
+.srv .buy{border:0;border-radius:11px;padding:8px 11px;background:linear-gradient(160deg,#3d7bff,#1f4fd8);color:#fff;font:800 11px inherit}
+.srv.owned{border-color:rgba(90,220,160,.28);background:rgba(90,220,160,.06)}
+.srv.owned .icw{background:rgba(90,220,160,.16);color:#7ff0bd}
 
-/* ================= RUBIN SKIN: тёмный интерфейс как в TonCry ================= */
-body:has(#mining.active) .hero,body:has(#mining.active) .stats,
-body:has(#archive.active) .hero,body:has(#archive.active) .stats{display:none}
-body{background:#000!important;color:#f5f5f7;padding-bottom:calc(104px + env(safe-area-inset-bottom))}
-body:before{content:"";position:fixed;inset:0;z-index:-1;background:radial-gradient(600px 320px at 50% -80px,#1a1030 0%,#000 70%)}
-.hero,.panel,.stat,.tile,.nft{background:#141416!important;border:1px solid #212126!important;box-shadow:none!important;border-radius:26px!important}
-.hero:after{display:none}
-.hero-art{opacity:.18}
-.eyebrow{color:#8a8a92;letter-spacing:.02em;text-transform:none;font-size:13px;font-weight:600}
-.balance,.arena-bank,.price,.tc-amount{letter-spacing:-1.4px}
-.subline,.muted{color:#8a8a92}
-.stats{gap:10px}
-.stat span{color:#8a8a92}
-body{--acc1:#4a94ff;--acc2:#1d54c9;--acc3:#2f7cf6}
-body.acc-ruby{--acc1:#ff6b8a;--acc2:#b3133b;--acc3:#e0284f}
-body.acc-ice{--acc1:#7fdcff;--acc2:#1f6fa8;--acc3:#3fa9e0}
-body.acc-emerald{--acc1:#4ce39a;--acc2:#12855c;--acc3:#1fb477}
-body.acc-gold{--acc1:#ffd76a;--acc2:#b97d10;--acc3:#e0a52c}
-.btn{border-radius:20px!important;background:linear-gradient(165deg,var(--acc1) 0%,var(--acc3) 45%,var(--acc2) 100%)!important;border:1px solid #ffffff40!important;box-shadow:inset 0 1px 0 #ffffff66,inset 0 -1px 0 #001b4d66,0 10px 26px #1a4fc040!important;backdrop-filter:blur(20px) saturate(1.45);-webkit-backdrop-filter:blur(20px) saturate(1.45);color:#fff;font-weight:800;letter-spacing:.01em}
-.btn.green{background:linear-gradient(165deg,var(--acc1) 0%,var(--acc3) 45%,var(--acc2) 100%)!important;color:#fff!important}
-.btn.red{background:linear-gradient(165deg,#ff7d8c 0%,#e5484d 55%,#a41f2b 100%)!important}
-.btn.ghost{background:linear-gradient(165deg,#26262c 0%,#191a1f 100%)!important;color:#e6e6ec!important;border:1px solid #ffffff1a!important;box-shadow:inset 0 1px 0 #ffffff1f,0 8px 20px #00000040!important}
-.btn:active,.action:active,.tc-btn:active{transform:scale(.975)}
-.action{background:linear-gradient(165deg,#26262c,#191a1f)!important;border:1px solid #ffffff17!important;border-radius:18px!important;color:#e8e8ee;box-shadow:inset 0 1px 0 #ffffff1a;min-width:0;overflow:hidden;white-space:nowrap;font-size:11.5px;padding:12px 4px;gap:6px}
-.hero .actions{gap:7px}
-.action .glyph{width:17px;height:17px}
-input{background:#0f0f12!important;border:1px solid #2b2b31!important;border-radius:16px!important}
-.chip{background:#1c1c20;border:1px solid #2b2b31;border-radius:14px}
-.chip.on{background:#2f7cf6;border-color:#2f7cf6;color:#fff}
-.nav{background:#0b0b0dee!important;border:1px solid #2a2a30!important;border-radius:32px!important;padding:10px 8px!important;box-shadow:0 18px 50px #000000b0,inset 0 1px 0 #ffffff12!important;backdrop-filter:blur(26px) saturate(1.4)!important;-webkit-backdrop-filter:blur(26px) saturate(1.4)!important}
-.nav button{color:#71717a;font-size:9.5px;font-weight:700;border-radius:22px;padding:8px 2px}
-.nav button i{width:23px;height:23px;margin-bottom:4px}
-.nav button.active{background:linear-gradient(165deg,color-mix(in srgb,var(--acc3) 26%,#0d0d0f),#141a26)!important;color:var(--acc1)!important;box-shadow:inset 0 0 0 1px #3f6fbf55,0 6px 16px #00000055!important}
-.nav button.active .glyph{filter:drop-shadow(0 0 8px #6aa8ff88)}
-.toast{background:#1b1b1f;border:1px solid #2b2b31;border-radius:16px}
-.gridcards .tile{background:#141416!important}
-.tile .ico{background:#1c1c20;border:0;color:#6aa8ff}
-.gift-card img,.nft img{border-radius:18px}
-/* ---- майнинг ---- */
-.tc-card{background:#141416;border:1px solid #212126;border-radius:28px;padding:18px;margin-bottom:12px}
-.tc-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
-.tc-head-r{display:flex;align-items:center;gap:8px}
-.tc-label{color:#9a9aa3;font-size:13px;font-weight:600}
-.tc-bal{font-size:30px;font-weight:900;letter-spacing:-1.2px;display:flex;gap:7px;align-items:baseline;margin-top:2px}
-.tc-bal span{font-size:14px;color:#9a9aa3;font-weight:700}
-.tc-chip{background:#232327;color:#d4d4da;border-radius:999px;padding:9px 15px;font-size:12px;font-weight:700;white-space:nowrap}
-.tc-help{width:36px;height:36px;border-radius:50%;background:#232327;color:#9a9aa3;display:grid;place-items:center;font-weight:800}
-.tc-actions{display:grid;grid-template-columns:1.1fr 1fr 1fr;gap:10px;margin-top:16px}
-.tc-btn{border:0;border-radius:999px;padding:13px 8px;background:#232327;color:#4a9bff;font-weight:800;font-size:13.5px;cursor:pointer;white-space:nowrap}
-.tc-btn.primary{background:linear-gradient(165deg,var(--acc1),var(--acc2));color:#fff}
-.tc-btn.dark{background:#16233b;color:#6aa8ff}
-.tc-turbine-wrap{position:relative;display:grid;place-items:center;margin:18px 0 2px}
-.fan-wrap{position:relative;width:min(86vw,320px);aspect-ratio:1;border-radius:50%;overflow:hidden;box-shadow:0 30px 80px #6b3de877,0 0 0 1px #ffffff1a}
-.fan-img{width:100%;height:100%;object-fit:cover;display:block;animation:fanspin 8s linear infinite;filter:saturate(1.12) brightness(1.06)}
-.fan-core{position:absolute;inset:0;margin:auto;width:33%;height:33%;border-radius:50%;display:grid;place-items:center;font-weight:900;font-size:26px;color:#fff;background:radial-gradient(circle at 36% 28%,#ff9db4,#e0284f 55%,#7d0b27);box-shadow:0 0 34px #e0284f99,inset 0 2px 10px #ffffff66;border:2px solid #ffd0da66}
-.fan-core:after{content:"";position:absolute;inset:-8px;border-radius:50%;border:1px solid #ffffff22}
-.turbine{width:min(86vw,332px);height:auto;filter:drop-shadow(0 34px 90px #6b3de877)}
-.tc-btn.glass{background:linear-gradient(165deg,#ffffff1a,#ffffff08)!important;border:1px solid #ffffff1f!important;color:#5aa2ff!important;box-shadow:inset 0 1px 0 #ffffff26,0 8px 20px #00000040!important;backdrop-filter:blur(18px) saturate(1.4);-webkit-backdrop-filter:blur(18px) saturate(1.4)}
-.fan{animation:fanspin 9s linear infinite;transform-origin:110px 110px}
-@keyframes fanspin{to{transform:rotate(360deg)}}
-.tc-dot{position:absolute;top:2px;left:50%;transform:translateX(-50%);width:11px;height:11px;border-radius:50%;background:#e46bff;box-shadow:0 0 18px #e46bff;z-index:3}
-.tc-amount{text-align:center;font-size:clamp(28px,8.4vw,42px);font-weight:950;margin-top:12px;line-height:1.1}
-.tc-amount span{font-size:14px;color:#8a8a92;letter-spacing:0;font-weight:700}
-.tc-meta{text-align:center;color:#8a8a92;font-size:13px;margin-top:7px}
-.tc-meta2{text-align:center;color:#6f6f78;font-size:12px;margin-top:4px}
-.tc-two{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:18px 0 2px}
-.tc-two .tc-btn{padding:16px 8px;font-size:15px;display:flex;align-items:center;justify-content:center;gap:7px}
-.srv{display:flex;align-items:center;gap:12px;background:#141416;border:1px solid #212126;border-radius:20px;padding:13px;margin-bottom:9px}
-.srv .srv-ic{width:42px;height:42px;border-radius:14px;background:#1d1d23;display:grid;place-items:center;color:#8b5cf6;flex:none}
-.srv b{display:block;font-size:13px}
-.srv small{color:#8a8a92;font-size:11px}
-.srv .srv-buy{margin-left:auto;border:0;border-radius:999px;background:#2f7cf6;color:#fff;font-weight:800;padding:10px 14px;font-size:12px;cursor:pointer}
-.srv.owned{border-color:#2b4a6e}
-/* ---- апгрейдер ---- */
-.upg-wheel{width:232px;height:232px;border-radius:50%;position:relative;display:grid;place-items:center;margin:16px auto 12px;background:conic-gradient(#35d07f 0 calc(var(--ch,0) * 1%),#232327 0 100%);box-shadow:inset 0 0 0 10px #0b0b0d,inset 0 0 0 12px #2e2e35,0 18px 44px #000a;transition:transform 3.2s cubic-bezier(.12,.72,.1,1)}
-.upg-wheel.spin{transform:none}
-.upg-wheel:after{content:"";position:absolute;inset:34px;border-radius:50%;background:radial-gradient(circle at 40% 30%,#17171b,#0a0a0c 75%);box-shadow:inset 0 0 18px #000}
-.upg-chance{position:relative;z-index:2;font-size:34px;font-weight:950;letter-spacing:-1px;color:#fff}
-.upg-pointer{position:absolute;top:-12px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:13px solid transparent;border-right:13px solid transparent;border-top:22px solid #ffd23d;z-index:3;filter:drop-shadow(0 4px 8px #000a)}
-.upg-stake{text-align:center;color:#8a8a92;font-size:12px;min-height:18px;margin:30px 0 10px}
-.upg-pick .nft{cursor:pointer;position:relative;background:#0f0f12!important}
-.upg-pick .nft.on{border-color:#35d07f!important;box-shadow:0 0 0 1px #35d07f88!important}
-.upg-pick .nft.on:after{content:"✓";position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:50%;background:#35d07f;color:#08150f;font-weight:900;display:grid;place-items:center;font-size:13px}
-.arch-price{color:#8a8a92;font-size:10px;margin-top:3px}
-.upg2{padding:14px 12px 16px}
-.udial{position:relative;width:238px;height:238px;margin:8px auto 0;border-radius:50%;background:conic-gradient(from 0deg,#35d07f 0 calc(var(--ch,0) * 3.6deg),#2a3040 0),radial-gradient(circle at 50% 45%,#1b2030,#0d1017 72%);box-shadow:inset 0 0 0 10px #262b35,inset 0 0 0 12px #3a4150,inset 0 0 40px #000a,0 16px 40px #0006}
-.udial:before{content:"";position:absolute;inset:-9px;border-radius:50%;border:2px dashed #3d4453;opacity:.55}
-.udial-inner{position:absolute;inset:24px;border-radius:50%;display:grid;place-items:center;background:radial-gradient(circle at 50% 40%,#151a26,#0c0f16 75%);box-shadow:inset 0 0 0 1px #ffffff10}
-.uplus{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;font-size:34px;font-weight:300;color:#cfd6e6;border:1px solid #3a4150;background:#141a24;margin-bottom:26px}
-.uhint{position:absolute;bottom:34px;font-size:15px;color:#b9c2d4;font-weight:700}
-.uchance{text-align:center;color:#c9d2e3;font-size:15px;font-weight:700;margin:26px 0 12px}
-.uchance b{color:#fff;font-size:17px;margin-left:6px}
-.upick-row{display:grid;grid-template-columns:1fr 34px 1fr;gap:8px;align-items:center}
-.upick{display:flex;align-items:center;gap:10px;background:#161b26;border:1px solid #2b3242;border-radius:18px;padding:12px 10px;cursor:pointer;min-height:64px}
-.upick:active{transform:scale(.985)}
-.upick-plus{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:#1e2534;border:1px solid #38404f;color:#cfd6e6;font-size:20px;flex:none}
-.upick-txt b{display:block;font-size:13px;color:#eef2f8}
-.upick-txt small{display:block;font-size:10.5px;color:#8a93a6;line-height:1.25}
-.uarrow{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:#1e2534;border:1px solid #38404f;color:#cfd6e6;font-size:16px}
-.umult{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0 0}
-.uchip{border:1px solid #2b3242;background:#141a24;color:#cfd6e6;border-radius:16px;padding:12px 6px;font-weight:800;font-size:14px}
-.uchip.on{background:linear-gradient(165deg,var(--acc1),var(--acc2));border-color:transparent;color:#fff}
-.ubet{margin-top:10px}
-.usum{text-align:center;color:#8a93a6;font-size:12.5px;margin:14px 0 12px}
-.ubtn{width:100%;border:0;border-radius:22px;padding:16px;background:#141a24;border:1px solid #2b3242;color:#9aa4b8;font-weight:800;font-size:17px;display:grid;place-items:center;gap:4px}
-.ubtn.ready{background:linear-gradient(165deg,var(--acc1),var(--acc3) 45%,var(--acc2));color:#fff;border-color:transparent;box-shadow:0 12px 30px #0006}
-.ubtn span{font-size:11.5px;font-weight:600;opacity:.85}
-.picker{position:fixed;inset:0;z-index:70;background:#000000b8;backdrop-filter:blur(6px);display:flex;align-items:flex-end;justify-content:center;padding:12px}
-.picker-box{width:min(720px,100%);max-height:76vh;overflow:auto;background:#121620;border:1px solid #2b3242;border-radius:26px;padding:14px}
-.picker-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:16px}
-.picker-x{border:0;background:#1e2534;color:#cfd6e6;width:34px;height:34px;border-radius:50%;font-size:16px}
+/* ---- колесо шанса ---- */
+.dial .sec{opacity:.55;transition:opacity .3s}
+.dial .sec.on{opacity:1}
+.dial .rot{transform-origin:120px 120px;transform:rotate(0deg);transition:transform 4.2s cubic-bezier(.12,.78,.06,1)}
+.dial .rot.zero{transition:none}
+.dial .needle{position:absolute;left:50%;top:-10px;bottom:auto;transform:translateX(-50%) rotate(180deg);color:var(--gold);
+  filter:drop-shadow(0 4px 12px rgba(255,216,112,.7));z-index:4}
+.dial .needle .ic{width:26px;height:26px;fill:var(--gold);stroke:none}
+.dial.spin .in{animation:dialPulse .6s ease-in-out infinite}
+@keyframes dialPulse{50%{box-shadow:inset 0 0 0 1px rgba(255,255,255,.18),0 0 34px rgba(91,141,255,.45)}}
 
-#coinMultRow .chip{min-width:0;flex:1;padding:10px 4px}
-.upg-tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;background:#0f0f12;border:1px solid #232327;border-radius:999px;padding:5px;margin:12px 0}
-.upg-tab{border:0;border-radius:999px;padding:11px;background:transparent;color:#8a8a92;font-weight:800;font-size:14px}
-.upg-tab.on{background:linear-gradient(165deg,var(--acc1),var(--acc3) 45%,var(--acc2));color:#fff;box-shadow:inset 0 1px 0 #ffffff40}
-.upg-orbit{position:absolute;inset:0;z-index:4;pointer-events:none;transform:rotate(0deg);transition:transform 3.2s cubic-bezier(.12,.72,.1,1)}
-.upg-arrow{position:absolute;left:50%;bottom:-18px;width:0;height:0;margin-left:-14px;border-left:14px solid transparent;border-right:14px solid transparent;border-bottom:28px solid #ffd76a;filter:drop-shadow(0 0 14px #ffb42e)}
-</style></head><body><main class="wrap">
-<header class="top"><div class="brand">RUBIN<span>·</span>BOT</div><div class="wallet"><small>RCOIN</small><span id="topBal">—</span></div></header>
-<section class="hero"><img class="hero-art" id="heroArt" src="/banner" alt="" onerror="this.remove()"><div class="eyebrow">ТВОЙ ИГРОВОЙ СЧЁТ</div><div class="balance" id="heroBal">— <small>RCOIN</small></div><div class="subline">Нажми на моно-строку ниже, чтобы скопировать баланс</div><button class="copy" id="copyBal" onclick="copyBalance()">·····················</button><div class="actions"><button class="action" onclick="sendBotAction('bonus')">🎁 Бонус</button><button class="action" onclick="sendBotAction('daily')">📅 Дейлик</button><button class="action" onclick="go('career')">💼 Работа</button></div></section>
-<div class="stats"><div class="stat"><span>🎮 Сыграно игр</span><b id="games">—</b></div><div class="stat"><span>🏅 Ранг</span><b id="rank">—</b></div><div class="stat"><span>⚔️ Победы в дуэлях</span><b id="wins">—</b></div><div class="stat"><span>📉 Проиграно RCOIN</span><b id="lost">—</b></div></div>
-<section id="home" class="page active"><div class="panel"><div class="profile-head"><img id="profilePhoto" class="profile-photo" src="" alt="Аватар"><div><h2 id="playerName">Игрок</h2><div class="muted" id="profileRank">Профиль RCOIN</div></div></div><div id="badges"></div><p class="muted" style="margin-top:10px">Твои достижения и статус отображаются здесь. Управление галочками — команда «Галочки» в боте.</p></div><div class="panel"><h2>Тема и обои</h2><div class="theme-row" id="themeRow"><button class="theme-chip" data-theme="dark" onclick="setTheme('dark')">Тёмная</button><button class="theme-chip" data-theme="blue" onclick="setTheme('blue')">Синяя</button><button class="theme-chip" data-theme="purple" onclick="setTheme('purple')">Фиолет</button><button class="theme-chip" data-theme="green" onclick="setTheme('green')">Зелёная</button></div><div class="bet-row" id="wallRow"><button class="chip" data-wall="gradient" onclick="setWall('gradient')">Градиент</button><button class="chip" data-wall="banner" onclick="setWall('banner')">Баннер</button><button class="chip" data-wall="plain" onclick="setWall('plain')">Минимум</button></div><div class="eyebrow" style="margin-top:14px">Акцент</div><div class="bet-row" id="accRow"><button class="chip" data-acc="" onclick="setAccent('')">Сапфир</button><button class="chip" data-acc="ruby" onclick="setAccent('ruby')">Рубин</button><button class="chip" data-acc="ice" onclick="setAccent('ice')">Лёд</button><button class="chip" data-acc="emerald" onclick="setAccent('emerald')">Изумруд</button><button class="chip" data-acc="gold" onclick="setAccent('gold')">Золото</button></div></div><div class="gridcards"><div class="tile" onclick="go('arena')"><div class="ico">🎯</div><b>Арена</b><small>Соревнование до 10 игроков</small></div><div class="tile" onclick="go('career')"><div class="ico">💻</div><b>IT-карьера</b><small>Задания и опыт</small></div><div class="tile" onclick="go('trade')"><div class="ico">📈</div><b>Трейдинг</b><small>Курс и портфель</small></div><div class="tile" onclick="go('events')"><div class="ico">🎄</div><b>Ивенты</b><small>Сезонные активности</small></div><div class="tile" onclick="go('nft')"><div class="ico">🖼️</div><b>NFT-коллекция</b><small>Твои цифровые предметы</small></div><div class="tile" onclick="go('archive')"><div class="ico">◍</div><b>Апгрейдер</b><small>Круг шанса и NFT-архив</small></div><div class="tile" onclick="go('mining')"><div class="ico">⛏</div><b>Майнинг</b><small>Серверы и пассивный доход</small></div><div class="tile" onclick="toast('Команды: /зп · /работа · /трейдинг · Галочки')"><div class="ico">📚</div><b>Команды</b><small>Все возможности бота</small></div></div></section>
-<section id="arena" class="page"><div class="panel arena-panel"><div class="arena-top"><div><div class="eyebrow">БАНК</div><div class="arena-bank" id="arenaBank">0 <small>RCOIN</small></div></div><div class="arena-count"><b id="arenaCount">0/10</b>игроков</div></div><div class="arena-square" id="arenaSquare"><div class="arena-sectors" id="arenaSectors"></div><div class="arena-players" id="arenaPlayersBox"></div><div class="arena-center" id="arenaCenter">ARENA</div><div class="arena-win" id="arenaWin"></div><div class="arena-ball" id="arenaBall"></div></div><div class="status" id="arenaStatus">Подключаем арену…</div><p class="muted" id="arenaHint" style="text-align:center">Любая ставка от 1 RCOIN. Победитель забирает банк минус 10%.</p><div class="betbar"><span class="muted">Твоя ставка</span><span class="muted" id="arenaYourBet">—</span></div><input id="arenaBetInput" class="bet-input" type="number" min="1" step="1" value="10000" inputmode="numeric" oninput="setArenaBet(Number(this.value))"><div class="bet-row" id="betRow"><button class="chip on" data-bet="10000" onclick="setArenaBet(10000,1)">10к</button><button class="chip" data-bet="100000" onclick="setArenaBet(100000,1)">100к</button><button class="chip" data-bet="1000000" onclick="setArenaBet(1000000,1)">1кк</button></div><div class="betbar"><span class="muted">Твой цвет</span><span class="muted" id="arenaYourColor">—</span></div><div class="color-picks" id="colorPicks"><button class="color-pick selected" data-color="#ff8a3d" style="--c:#ff8a3d" onclick="setArenaColor('#ff8a3d')"></button><button class="color-pick" data-color="#3d9bff" style="--c:#3d9bff" onclick="setArenaColor('#3d9bff')"></button><button class="color-pick" data-color="#35d07f" style="--c:#35d07f" onclick="setArenaColor('#35d07f')"></button><button class="color-pick" data-color="#b06bff" style="--c:#b06bff" onclick="setArenaColor('#b06bff')"></button><button class="color-pick" data-color="#ffd23d" style="--c:#ffd23d" onclick="setArenaColor('#ffd23d')"></button><button class="color-pick" data-color="#ff5c5c" style="--c:#ff5c5c" onclick="setArenaColor('#ff5c5c')"></button><button class="color-pick" data-color="#2de2e6" style="--c:#2de2e6" onclick="setArenaColor('#2de2e6')"></button><button class="color-pick" data-color="#c98bff" style="--c:#c98bff" onclick="setArenaColor('#c98bff')"></button><button class="color-pick" data-color="#8dff6b" style="--c:#8dff6b" onclick="setArenaColor('#8dff6b')"></button><button class="color-pick" data-color="#ff7ab8" style="--c:#ff7ab8" onclick="setArenaColor('#ff7ab8')"></button><button class="color-pick" data-color="#111111" style="--c:#111111" title="Premium" onclick="setArenaColor('#111111')"></button></div><button class="btn" id="joinBtn" onclick="arenaJoin()">Войти в лобби</button><button class="btn ghost hide" id="leaveBtn" onclick="arenaLeave()">Покинуть лобби</button><button class="btn green hide" id="addBetBtn" onclick="arenaAdd()">Добавить к ставке</button></div><div class="panel"><h2>Участники</h2><div class="players" id="players"><p class="muted">Пока никого нет.</p></div></div><div class="panel"><h2>Последние победители</h2><div id="arenaHistory" class="muted">Пока нет завершённых раундов.</div></div><div class="panel"><h2>Подарки в арене</h2><p class="muted">Выбери NFT-фото для аватара в арене.</p><div class="gift-grid" id="arenaGifts"><p class="muted">Загрузка…</p></div><button class="btn ghost" onclick="setArenaGift('')">Сбросить аватар</button></div><div class="panel"><h2>Как это работает</h2><p class="muted">Собери до 10 игроков. Когда в лобби два и более участника, начинается отсчёт 15 секунд. Шарик катится по полю и останавливается на победителе: шанс пропорционален ставке. Победитель забирает банк, 10% уходит в казну. Любая ставка от 1 RCOIN.</p></div></section>
-<section id="career" class="page"><div class="panel"><h2>💻 IT-карьера <span class="badge" id="jobStage">Стажёр</span></h2><div class="stats"><div class="stat"><span>Уровень</span><b id="jobLevel">1</b></div><div class="stat"><span>Опыт</span><b id="jobXp">0 XP</b></div><div class="stat"><span>Заработано</span><b id="jobCoins">0</b></div><div class="stat"><span>Заданий</span><b id="jobTasks">0</b></div></div><p class="muted" id="jobCooldown">Выполняй задания, повышай уровень и открывай новые должности.</p><button class="btn green" id="taskBtn" onclick="doTask()">🚀 Получить IT-задание</button></div><div class="panel"><h2>💼 Зарплата за активность</h2><p class="muted">Пиши сообщения в групповых чатах. Команда /зп покажет начисление и позволит забрать ежедневную зарплату.</p><button class="btn ghost" onclick="toast('Открой чат с ботом и отправь /зп')">Как получить зарплату</button></div></section>
-<section id="trade" class="page"><div class="panel"><h2>📈 RCOIN MARKET <span class="badge">LIVE</span></h2><div class="row"><div><div class="muted">Текущий курс v-RCOIN</div><div class="price" id="price">—</div></div><div style="text-align:right"><div class="muted">Изменение</div><b id="change">—</b></div></div><canvas id="chart" class="chart" width="640" height="190"></canvas><p class="muted" style="margin-top:8px">Внутриигровой симулятор курса. Это не реальные деньги и не финансовый инструмент.</p></div><div class="panel"><h2>💼 Портфель</h2><div class="stats"><div class="stat"><span>v-RCOIN</span><b id="holding">0</b></div><div class="stat"><span>Стоимость</span><b id="value">0</b></div><div class="stat"><span>Вложено</span><b id="invested">0</b></div><div class="stat"><span>Результат</span><b id="profit">0</b></div></div></div><div class="panel"><h2>Обмен</h2><input id="amount" type="number" min="1000" step="1000" value="100000" placeholder="Сумма RCOIN"><div class="trade-buttons" style="margin-top:10px"><button class="btn green" onclick="buy()">🟢 Купить</button><button class="btn red" onclick="sell()">🔴 Продать всё</button></div></div></section>
-<section id="events" class="page"><div class="panel"><h2>⛄ СНЕЖНЫЙ МАРАФОН <span class="badge">DAILY TOP 3</span></h2><div class="stats"><div class="stat"><span>Снежки</span><b id="snowballs">0</b></div><div class="stat"><span>Снеговики сегодня</span><b id="snowmen">0</b></div></div><p class="muted">Собирай снежки каждые 20 секунд. Из 20 снежков можно слепить снеговика. Топ-3 дня получают случайную награду из казны от 1 до 10 млрд RCOIN, если средств достаточно.</p><div class="row"><button class="btn" onclick="snowCollect()">❄️ Собрать снежки</button><button class="btn green" onclick="snowBuild()">☃️ Слепить</button></div><div class="panel"><h2>🏆 Рейтинг дня</h2><div id="snowTop" class="muted">Загрузка рейтинга…</div></div></div><div class="panel"><h2>🎄 СЕЗОННЫЕ ИВЕНТЫ</h2><p class="muted">Собирай коллекционные предметы, выполняй задания и открывай награды. Новогодние эмодзи доступны в сообщениях бота при поддержке Telegram Premium Emoji.</p><div class="gridcards" style="margin-top:12px"><div class="tile"><div class="ico">❄️</div><b>Снежный марафон</b><small>Ежедневные задания</small></div><div class="tile"><div class="ico">🎅</div><b>Помощь Санте</b><small>Сезонная цепочка</small></div><div class="tile"><div class="ico">🐻‍❄️</div><b>Полярная коллекция</b><small>Собери предметы</small></div><div class="tile"><div class="ico">🎁</div><b>NFT-чеканка</b><small>Создай предмет в коллекцию</small></div></div><button class="btn" onclick="toast('Открой в боте команду «ивенты» для полного списка заданий')">Открыть задания в боте</button></div></section>
-<section id="nft" class="page"><div class="panel"><h2>🖼️ NFT-коллекция <span class="muted" id="nftCount">0 предметов</span></h2><p class="muted">Твои сгенерированные цифровые предметы и коллекционные изображения.</p><div class="gridcards" id="nftGrid" style="margin-top:12px"><p class="muted">Загружаем коллекцию…</p></div><label id="photoBtn" class="btn ghost hide" style="display:flex;align-items:center;justify-content:center;cursor:pointer">📷 NFT из фото<input type="file" accept="image/*" style="display:none" onchange="nftPhoto(this)"></label><button class="btn" onclick="mintNft()">✨ Случайный NFT · 10 000 RCOIN</button></div></section>
-<section id="mining" class="page">
-<div class="tc-card"><div class="tc-head"><div><div class="tc-label">Баланс</div><div class="tc-bal"><b id="mineBal">0</b> <span>RCOIN</span></div></div><div class="tc-head-r"><span class="tc-chip" id="mineServers">0 серверов</span><span class="tc-help" onclick="toast('Серверы дают доход 30 дней. Забери добычу кнопкой «Снять».')">?</span></div></div>
-<div class="tc-actions"><button class="tc-btn glass" onclick="mineScroll()">Купить</button><button class="tc-btn glass" onclick="toast('Награда копится сама — жми «Снять»')">Награды</button><button class="tc-btn glass" onclick="mineCheck()">Проверить</button></div></div>
-<div class="tc-turbine-wrap"><div class="tc-dot"></div><div class="fan-wrap"><img class="fan-img" src="/fan" alt="fan"><span class="fan-core">R</span></div></div>
-<div class="tc-amount"><b id="minePending">0</b> <span>RCOIN</span></div>
-<div class="tc-meta"><span id="mineRate">0</span> RCOIN/сутки · комиссия 15%</div>
-<div class="tc-meta2" id="mineEta">≈ 0 в час · полный сбор через —</div>
-<div class="tc-two"><button class="tc-btn primary" onclick="mineCollect()">⤓ Снять</button><button class="tc-btn dark" onclick="mineScroll()">◉ Мои серверы</button></div>
-<div class="tc-card" id="mineServersBox" style="margin-top:14px"><div class="tc-label" style="margin-bottom:10px">Серверы</div><div id="mineShop"><p class="muted">Загрузка…</p></div></div>
-</section>
-<section id="archive" class="page">
-<div class="panel upg2">
-<div class="upg-tabs"><button class="upg-tab on" id="tabGifts" onclick="upgTab('gifts')">Подарки</button><button class="upg-tab" id="tabCoin" onclick="upgTab('coin')">RCOIN</button></div>
-<div class="udial" id="upgWheel"><div class="udial-inner"><div class="uplus" id="uplus">+</div><div class="uhint" id="dialHint">Выберите цель</div></div><div class="upg-orbit" id="upgNeedle"><span class="upg-arrow"></span></div></div>
-<div class="uchance">Шанс улучшения <b id="upgChance">0%</b></div>
-<div class="upick-row"><div class="upick" onclick="openPicker('mine')"><div class="upick-plus">+</div><div class="upick-txt"><b>Выбрать</b><small>подарки или RCOIN</small></div></div><div class="uarrow">→</div><div class="upick" onclick="openPicker('target')"><div class="upick-plus">+</div><div class="upick-txt"><b>Выбрать</b><small>из всех подарков</small></div></div></div>
-<div class="umult" id="multRow"><button class="uchip" data-m="2" onclick="setCoinMult(2)">×2</button><button class="uchip" data-m="4" onclick="setCoinMult(4)">×4</button><button class="uchip" data-m="8" onclick="setCoinMult(8)">×8</button></div>
-<input id="coinBet" class="ubet hide" type="number" min="10000" step="10000" value="1000000" inputmode="numeric" oninput="coinPreview()">
-<div class="usum" id="upgStake">Добавьте подарок или сумму с баланса</div>
-<button class="ubtn" id="upgBtn" onclick="upgSpin()">Улучшить<span id="upgBtnHint">выберите подарок</span></button>
-</div>
-<div class="panel"><h2>🎁 NFT-архив <span class="muted" id="archCount">0 NFT</span></h2><p class="muted">Подарки для апгрейдера. Пополнить: передай NFT боту @rubinarxiv или нажми «В архив» в коллекции.</p><div class="gridcards" id="archGrid"><p class="muted">Загрузка…</p></div></div>
-<div class="picker hide" id="picker"><div class="picker-box"><div class="picker-head"><b id="pickerTitle">Выберите</b><button class="picker-x" onclick="closePicker()">✕</button></div><div class="gridcards" id="upgPick"></div></div></div>
-</section>
-</main><nav class="nav"><button class="active" data-page="home" onclick="go('home')"><i>⌂</i>Главная</button><button data-page="arena" onclick="go('arena')"><i>◉</i>Арена</button><button data-page="career" onclick="go('career')"><i>⌘</i>Работа</button><button data-page="trade" onclick="go('trade')"><i>↗</i>Трейдинг</button><button data-page="mining" onclick="go('mining')"><i>⛏</i>Майнинг</button><button data-page="archive" onclick="go('archive')"><i>◍</i>Апгрейд</button></nav><div class="toast" id="toast"></div>
+/* апгрейдер */
+.livebar{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:800;color:#9fc0ff;margin:0 2px 9px;letter-spacing:.06em}
+.dot{width:6px;height:6px;border-radius:50%;background:#3d7bff;box-shadow:0 0 10px #3d7bff;animation:pulse 1.6s infinite}
+@keyframes pulse{50%{opacity:.35}}
+.chips{display:flex;gap:6px;overflow-x:auto;padding:1px 1px 10px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.uchip{flex:none;display:flex;align-items:center;gap:5px;padding:7px 11px;border-radius:999px;font-size:11px;font-weight:800;
+  border:1px solid var(--line2);background:var(--gl3);color:#dfe3f2;white-space:nowrap}
+.uchip .ic{width:14px;height:14px;color:var(--gold)}
+.upg{padding:14px 12px 16px}
+.dial{position:relative;width:min(74vw,268px);aspect-ratio:1;margin:2px auto 0}
+.dial svg{width:100%;height:100%;transform:rotate(-90deg);overflow:visible}
+.dial .bg{fill:none;stroke:rgba(255,255,255,.07);stroke-width:12}
+.dial .fg{fill:none;stroke:url(#gg);stroke-width:12;stroke-linecap:round;transition:stroke-dasharray .38s ease}
+.dial .tt{fill:none;stroke:rgba(255,255,255,.16);stroke-width:1.6}
+.dial .in{position:absolute;inset:23%;border-radius:50%;display:grid;place-items:center;text-align:center;
+  background:radial-gradient(circle at 50% 34%,rgba(34,40,64,.95),rgba(6,7,12,.98) 74%);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.09),inset 0 0 30px #000}
+.dial .in .plus{width:46px;height:46px;border-radius:50%;border:1px solid rgba(255,255,255,.28);display:grid;place-items:center;color:#e9ecfa;margin:0 auto}
+.dial .in .hint{font-size:12.5px;color:#c7cce0;font-weight:700;margin-top:9px;padding:0 10px}
+.dial .needle{position:absolute;left:50%;bottom:-3px;transform:translateX(-50%);color:var(--gold);filter:drop-shadow(0 0 9px rgba(255,216,112,.75))}
+.dial .needle .ic{width:22px;height:22px;fill:var(--gold);stroke:none}
+.chrow{text-align:center;margin:12px 0 12px}
+.chrow .cap{font-size:12px;color:var(--t2);font-weight:700}
+.chrow .val{font-size:24px;font-weight:900;letter-spacing:-.6px;margin-left:8px}
+.chrow .val.zero{color:var(--t3)}
+.slots{display:grid;grid-template-columns:1fr 24px 1fr;gap:6px;align-items:center}
+.slot{display:flex;align-items:center;gap:9px;padding:11px 10px;border-radius:16px;border:1px solid var(--line2);
+  background:rgba(255,255,255,.04);min-height:60px;cursor:pointer;overflow:hidden}
+.slot:active{background:rgba(61,123,255,.12)}
+.slot .pl{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(255,255,255,.2);color:#dfe3f2;flex:none}
+.slot .tx{min-width:0}
+.slot .cap{font-size:9.5px;color:var(--t3);font-weight:700;margin-bottom:2px}
+.slot .ttl{font-size:12.5px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.slot .sub{font-size:9.5px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.slot img.thumb{width:44px;height:28px;border-radius:7px;object-fit:cover;flex:none;border:1px solid var(--line2)}
+.arrow{display:grid;place-items:center;color:var(--t3)}
+.mults{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px}
+.mult{border:1px solid var(--line2);background:var(--gl3);color:#dfe3f2;border-radius:13px;padding:10px 2px;
+  font:850 12px inherit;display:flex;align-items:center;justify-content:center;gap:4px}
+.mult .ic{width:12px;height:12px;color:var(--gold)}
+.mult.on{background:linear-gradient(160deg,#4a86ff,#1f4fd8);border-color:transparent;color:#fff}
+.mult.on .ic{color:#fff}
+.iconsrow{display:flex;align-items:center;gap:6px;margin-top:8px}
+.ibtn{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line2);background:var(--gl3);color:#cfd5ea}
+.ibtn.on{background:rgba(61,123,255,.22);border-color:rgba(61,123,255,.45);color:#bcd3ff}
+.ibtn .ic{width:17px;height:17px}
+.allbtn{margin-left:auto;display:flex;align-items:center;gap:5px;border:0;background:transparent;color:var(--gold);font:800 12px inherit}
+.allbtn .ic{width:15px;height:15px}
+.sliderrow{display:flex;align-items:center;gap:8px;margin-top:10px}
+.sliderrow .amt{flex:none;display:flex;align-items:center;gap:5px;padding:6px 10px;border-radius:999px;border:1px solid var(--line2);
+  background:rgba(255,216,112,.1);color:#ffe6a3;font:800 11px inherit}
+input[type=range]{-webkit-appearance:none;appearance:none;flex:1;height:6px;border-radius:99px;background:rgba(255,255,255,.1);outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#e9edfb;border:2px solid #3d7bff;box-shadow:0 2px 8px #000a}
+input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#e9edfb;border:2px solid #3d7bff}
+.sumline{display:flex;align-items:center;justify-content:center;gap:6px;margin:12px 0 9px;font-size:12px;color:#cdd3e7;min-height:18px;text-align:center}
+.upgbtn{width:100%;border-radius:20px;padding:13px 14px;border:1px solid rgba(255,255,255,.15);color:#fff;cursor:pointer;
+  background:linear-gradient(160deg,rgba(80,96,190,.55),rgba(24,30,64,.7));display:grid;gap:3px;place-items:center;font-weight:900;font-size:15px}
+.upgbtn .sub{font-size:10.5px;font-weight:700;color:#b9c0da}
+.upgbtn.ready{background:linear-gradient(160deg,#4a86ff,#1f4fd8);box-shadow:0 14px 30px rgba(31,79,216,.42),inset 0 1px 0 rgba(255,255,255,.35)}
+.upgbtn.ready .sub{color:#dbe6ff}
+.upgbtn:disabled{cursor:default}
+.upgbtn .ttl{display:flex;align-items:center;gap:7px}
+
+/* ---- арена: кольцо зон и шарик ---- */
+.arena-wrap{position:relative;width:min(94vw,430px);aspect-ratio:1;margin:10px auto 4px}
+.arena-wrap svg{width:100%;height:100%;overflow:visible}
+.arena-wrap .zone{transition:opacity .3s}
+.arena-wrap .lbl{fill:#0b0d16;font-weight:800;font-size:11px;font-family:inherit}
+.arena-core{position:absolute;inset:31%;border-radius:50%;display:grid;place-items:center;text-align:center;
+  background:radial-gradient(circle at 50% 34%,rgba(30,36,58,.96),rgba(5,6,11,.99) 76%);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.09),inset 0 0 34px #000,0 18px 44px rgba(0,0,0,.55)}
+.arena-core b{display:block;font-size:clamp(22px,7vw,34px);font-weight:900;letter-spacing:-1px}
+.arena-core small{display:block;font-size:10px;letter-spacing:.16em;color:#9aa8c9;font-weight:800;margin-top:4px}
+.arena-core .cd{font-size:clamp(30px,9vw,44px);color:#fff}
+.apList{display:grid;gap:7px;margin-top:10px}
+.ap{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:14px;border:1px solid var(--line);
+  background:rgba(255,255,255,.035)}
+.ap.me{border-color:rgba(91,141,255,.45);background:rgba(61,123,255,.1)}
+.ap .dot{width:11px;height:11px;border-radius:50%;flex:none;box-shadow:0 0 12px currentColor}
+.ap .nm{flex:1;min-width:0;font-size:12.5px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ap .bet{font-size:11px;color:#cfd6ea;font-weight:800}
+.ap .pc{font-size:10.5px;color:#9fc0ff;font-weight:800;min-width:44px;text-align:right}
+.ap.win{border-color:rgba(255,216,112,.6);background:rgba(255,216,112,.12);box-shadow:0 0 22px rgba(255,216,112,.25)}
+.abet{margin-top:10px}
+.btnrow2{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:7px}
+.btnrow2 button{border:1px solid var(--line2);background:var(--gl3);color:#dfe3f2;border-radius:12px;padding:9px 4px;font:800 11.5px inherit}
+.btnrow2 button.on{background:linear-gradient(160deg,#4a86ff,#1f4fd8);color:#fff;border-color:transparent}
+/* ---- темы ---- */
+.themes{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
+.th{width:44px;height:44px;border-radius:14px;border:1px solid var(--line2);position:relative;overflow:hidden}
+.th.on{outline:2px solid #6f9bff;outline-offset:2px}
+.th i{position:absolute;inset:0;font-style:normal;display:grid;place-items:center;font-size:18px;color:#fff}
+.wall-upload{display:flex;align-items:center;gap:8px;margin-top:8px}
+
+/* профиль */
+.pstats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.pstat{padding:11px 12px;border-radius:16px;border:1px solid var(--line);background:rgba(255,255,255,.035)}
+.pstat span{display:block;color:var(--t2);font-size:10px;margin-bottom:3px}
+.pstat b{font-size:14.5px}
+.btn{width:100%;border:1px solid rgba(255,255,255,.14);border-radius:16px;padding:12px 14px;font:850 13px inherit;color:#fff;
+  background:linear-gradient(160deg,#4a86ff,#1f4fd8);box-shadow:0 10px 24px rgba(31,79,216,.3);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px}
+.btn:active{transform:scale(.985)}
+.btn.ghost{background:var(--gl3);border-color:var(--line2);box-shadow:none;color:#dfe3f2}
+.btn.green{background:linear-gradient(160deg,#35d69b,#0f7d59)}
+.btn.red{background:linear-gradient(160deg,#ff7286,#b81d3c)}
+.btn:disabled{opacity:.45}
+.btn.sm{padding:9px 11px;font-size:11.5px;width:auto;border-radius:12px}
+.row{display:flex;gap:8px}.row>*{min-width:0;flex:1}
+/* навигация */
+.nav{position:fixed;z-index:40;left:50%;transform:translateX(-50%);bottom:calc(9px + env(safe-area-inset-bottom));
+  width:min(540px,calc(100% - 16px));display:grid;grid-template-columns:repeat(6,1fr);gap:2px;padding:6px;border-radius:27px;
+  background:rgba(9,10,16,.82);border:1px solid rgba(255,255,255,.1);
+  backdrop-filter:blur(26px) saturate(1.5);-webkit-backdrop-filter:blur(26px) saturate(1.5);
+  box-shadow:0 18px 50px rgba(0,0,0,.75),inset 0 1px 0 rgba(255,255,255,.09)}
+.nav button{border:0;background:transparent;color:#6b6e83;font:800 8.5px/1.1 inherit;padding:8px 1px;border-radius:20px;
+  display:grid;gap:4px;place-items:center;cursor:pointer;transition:.15s}
+.nav button .ic{width:20px;height:20px}
+.nav button.active{color:#fff;background:linear-gradient(160deg,rgba(61,123,255,.42),rgba(20,26,54,.85));
+  box-shadow:inset 0 0 0 1px rgba(122,166,255,.4),0 8px 20px rgba(31,79,216,.3)}
+/* оверлеи */
+.modal{position:fixed;inset:0;z-index:60;display:none;align-items:flex-end;justify-content:center;background:rgba(2,3,6,.7);
+  backdrop-filter:blur(8px);padding:9px}
+.modal.show{display:flex}
+.sheet{width:min(720px,100%);max-height:86vh;overflow:auto;border-radius:26px;padding:14px;
+  background:linear-gradient(170deg,#151827,#08090f);border:1px solid rgba(255,255,255,.13);box-shadow:0 -20px 60px #000c;
+  animation:up .22s ease}
+@keyframes up{from{transform:translateY(22px);opacity:.4}to{transform:none;opacity:1}}
+.shead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.shead h3{font-size:15px;display:flex;align-items:center;gap:7px}
+.xb{width:32px;height:32px;border-radius:50%;border:1px solid var(--line2);background:var(--gl3);color:#cfd5ea;display:grid;place-items:center}
+.pgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}
+.pitem{border:1px solid var(--line);background:rgba(255,255,255,.04);border-radius:13px;padding:7px;cursor:pointer}
+.pitem img{width:100%;aspect-ratio:16/10;object-fit:cover;border-radius:9px;background:#07080d}
+.pitem b{display:block;font-size:10px;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pitem small{display:block;color:var(--t2);font-size:8.5px;margin-top:2px}
+.pitem.on{border-color:#6f9bff;box-shadow:0 0 0 1px rgba(111,155,255,.55)}
+.result{position:fixed;inset:0;z-index:70;display:none;place-items:center;padding:16px;background:rgba(2,3,6,.78);backdrop-filter:blur(10px)}
+.result.show{display:grid}
+.result .card{width:min(420px,100%);padding:18px;text-align:center;border-radius:24px;
+  background:linear-gradient(170deg,#181c2c,#08090f);border:1px solid rgba(255,255,255,.14)}
+.result img{width:100%;border-radius:16px;margin:9px 0;border:1px solid var(--line)}
+.empty{text-align:center;padding:22px 12px;color:var(--t2);font-size:12px}
+.hide{display:none!important}
+.toast{position:fixed;left:50%;bottom:calc(var(--nav) + 8px);transform:translate(-50%,12px);opacity:0;pointer-events:none;
+  background:#1b2036;border:1px solid rgba(122,166,255,.35);padding:10px 15px;border-radius:13px;font-size:12px;font-weight:800;
+  transition:.2s;z-index:90;max-width:90%;text-align:center}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.confetti{position:fixed;inset:0;pointer-events:none;z-index:95;overflow:hidden}
+.confetti i{position:absolute;width:7px;height:12px;border-radius:2px;animation:fall linear forwards}
+@keyframes fall{to{transform:translateY(110vh) rotate(700deg);opacity:.9}}
+label{display:block;color:var(--t2);font-size:10.5px;font-weight:700;margin:10px 0 5px}
+input,select{width:100%;padding:12px 13px;border-radius:14px;border:1px solid var(--line2);background:#05060a;color:#fff;
+  font:800 14px inherit;outline:none;appearance:none}
+input:focus,select:focus{border-color:rgba(61,123,255,.6);box-shadow:0 0 0 3px rgba(61,123,255,.14)}
+@media(min-width:620px){.cases{grid-template-columns:repeat(3,1fr)}.nftgrid{grid-template-columns:repeat(3,1fr)}
+ .pstats{grid-template-columns:repeat(4,1fr)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10.5 9-7 9 7V20a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></symbol>
+<symbol id="i-gift" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M5 12v8a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-8M12 8v13"/><path d="M12 8S10.5 3 8 3a2.5 2.5 0 0 0 0 5zc2 0 4-5 6.5-5a2.5 2.5 0 0 1 0 5z"/></symbol>
+<symbol id="i-cards" viewBox="0 0 24 24"><rect x="3" y="6" width="12" height="15" rx="2"/><path d="M7 3h10a2 2 0 0 1 2 2v11"/><path d="M6 11h6M6 15h6"/></symbol>
+<symbol id="i-pick" viewBox="0 0 24 24"><path d="M15 4a5.5 5.5 0 0 1-5.5 5.5H6L3 21l22-3-11.5-11.5A5.5 5.5 0 0 1 9 9"/><path d="M15 4a5.5 5.5 0 0 1 5.5 5.5"/><path d="M8.5 15.5 11 18"/></symbol>
+<symbol id="i-swap" viewBox="0 0 24 24"><circle cx="8" cy="8" r="3.2"/><circle cx="16" cy="16" r="3.2"/><path d="M11.5 11.5 6 17M12.5 12.5 18 7" opacity=".55"/></symbol>
+<symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></symbol>
+<symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v9M9.8 9.6h4.4M9.8 14.4h4.4"/></symbol>
+<symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.2 14.5 9l6.3.5-4.8 4.1 1.5 6.2-5.5-3.4-5.5 3.4 1.5-6.2L3.2 9.5 9.5 9z"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h13M13 7l5 5-5 5"/></symbol>
+<symbol id="i-arrowall" viewBox="0 0 24 24"><path d="M4 12h15M14 7l5 5-5 5"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V6M6.5 11 12 5.5 17.5 11"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="M8 14l4-4 4 4"/></symbol>
+<symbol id="i-drop" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M4 20h16"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2.4"/><path d="M8.5 10V7.5a3.5 3.5 0 0 1 7 0V10"/></symbol>
+<symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2.5 5 13h6l-1 8.5L19 11h-6z"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v6c0 4.2 3 7.4 7 9 4-1.6 7-4.8 7-9V6z"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.6v.6"/></symbol>
+<symbol id="i-life" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.4"/><path d="M12 3v5.6M12 15.4V21M3 12h5.6M15.4 12H21"/></symbol>
+<symbol id="i-crown" viewBox="0 0 24 24"><path d="M3 8.5 6.5 17h11L21 8.5l-5 3.2L12 5l-4 6.7z"/></symbol>
+<symbol id="i-tree" viewBox="0 0 24 24"><path d="M12 3 6 11h3l-3 5h12l-3-5h3zM12 16v5"/></symbol>
+<symbol id="i-pinguin" viewBox="0 0 24 24"><ellipse cx="12" cy="13" rx="6.5" ry="8"/><ellipse cx="12" cy="14.5" rx="3.6" ry="5.4" opacity=".45"/><path d="M10.6 8.5v.2M13.4 8.5v.2M11.2 11h1.6"/></symbol>
+<symbol id="i-capy" viewBox="0 0 24 24"><path d="M4 20v-6a7 7 0 0 1 12.5-4.3l2 2.3a2.2 2.2 0 0 1-1.7 3.7H11"/><path d="M9 9.5v.2M7 3.5 8.5 6"/></symbol>
+<symbol id="i-palm" viewBox="0 0 24 24"><path d="M11 21c0-6 1-10 4-13"/><path d="M15 8c2-2 4.5-2 5.5-.5M15 8c-1-2.6-3.4-3.6-5-2.6M15 8c.6-2.6-.6-4.6-2.4-4.8M15 8c2.6-.8 3.6-3 2.6-4.4"/><path d="M4 21h13"/></symbol>
+<symbol id="i-planet" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.6"/><ellipse cx="12" cy="12" rx="10" ry="3.6" transform="rotate(-22 12 12)"/></symbol>
+<symbol id="i-neon" viewBox="0 0 24 24"><rect x="3.5" y="6" width="17" height="12" rx="3"/><path d="M7.5 12h2l1.5-3 2 6 1.5-3h2"/></symbol>
+<symbol id="i-cup" viewBox="0 0 24 24"><path d="M5 8h9v7a4.5 4.5 0 0 1-9 0z"/><path d="M14 9.5h2.5a2.5 2.5 0 0 1 0 5H14"/><path d="M6 21h9"/></symbol>
+<symbol id="i-cat" viewBox="0 0 24 24"><path d="M5 9 4 4l4 2.5M19 9l1-5-4 2.5"/><path d="M4.5 11a7.5 7.5 0 0 1 15 0v3.5a4 4 0 0 1-4 4h-7a4 4 0 0 1-4-4z"/><path d="M9 12v.2M15 12v.2M12 15v.2"/></symbol>
+<symbol id="i-diamond" viewBox="0 0 24 24"><path d="M12 3 21 9.5 12 21 3 9.5z"/><path d="M3 9.5h18M12 3v18" opacity=".4"/></symbol>
+<symbol id="i-mine" viewBox="0 0 24 24"><path d="M4 20 14 10"/><path d="M12 12c2.5-4 6-6 9-6-1 3-3 6.5-7 9z"/></symbol>
+<symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.2M7 16.5h.2"/></symbol>
+<symbol id="i-support" viewBox="0 0 24 24"><path d="M4 13a8 8 0 0 1 16 0"/><rect x="2.5" y="13" width="4" height="6" rx="2"/><rect x="17.5" y="13" width="4" height="6" rx="2"/><path d="M20 19a4 4 0 0 1-4 3h-2"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5 7.4 7.4M16.6 16.6l1.9 1.9M18.5 5.5l-1.9 1.9M7.4 16.6l-1.9 1.9"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 18.5A2.5 2.5 0 0 1 6.5 16H20"/></symbol>
+<symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m4 18 5-5 3.5 3.5L16 13l4 4"/></symbol>
+<symbol id="i-medal" viewBox="0 0 24 24"><circle cx="12" cy="15" r="5.5"/><path d="M8.5 10 6 3h4l2 5 2-5h4l-2.5 7"/></symbol>
+</defs></svg>
+
+<main class="wrap">
+  <header class="top">
+    <div class="me">
+      <div class="ava" id="avaBox">?</div>
+      <div><b id="hName">Игрок</b><small id="hRank"><svg class="ic xs"><use href="#i-medal"/></svg><span>Новичок</span></small></div>
+    </div>
+    <div class="toppill"><svg class="ic sm" style="color:#ffd870"><use href="#i-coin"/></svg><span id="topBal">—</span></div>
+  </header>
+
+  <section id="home" class="page active">
+    <div class="glass hi balance">
+      <div class="lbl">Общий баланс</div>
+      <div class="sum"><b id="heroBal">—</b><span>RCOIN</span></div>
+      <div class="bacts">
+        <button class="bact" onclick="go('cases')"><svg class="ic"><use href="#i-gift"/></svg>Кейсы</button>
+        <button class="bact" onclick="go('nft')"><svg class="ic"><use href="#i-cards"/></svg>NFT</button>
+        <button class="bact" onclick="go('arena')"><svg class="ic"><use href="#i-trophy"/></svg>Арена</button><button class="bact" onclick="go('mining')"><svg class="ic"><use href="#i-mine"/></svg>Майнинг</button>
+        <button class="bact" onclick="go('upgrade')"><svg class="ic"><use href="#i-swap"/></svg>Апгрейд</button>
+      </div>
+    </div>
+    <div class="pstats">
+      <div class="glass pstat"><span>Сыграно</span><b id="stGames">—</b></div>
+      <div class="glass pstat"><span>Победы</span><b id="stWins">—</b></div>
+      <div class="glass pstat"><span>Ранг</span><b id="stRank">—</b></div>
+      <div class="glass pstat"><span>Проиграно</span><b id="stLost">—</b></div>
+    </div>
+    <div class="glass pad" style="margin-top:10px">
+      <div class="rowh"><h2>Как это работает</h2><span class="pill bl">3 шага</span></div>
+      <p class="muted">1. Открой кейс — придёт модель с личным номером.</p>
+      <p class="muted">2. Улучши — откроются уникальный фон, модель и редкость.</p>
+      <p class="muted">3. Ставь NFT в апгрейдере или отправляй в архив.</p>
+    </div>
+  </section>
+
+  <section id="cases" class="page">
+    <div class="glass pad">
+      <div class="rowh"><h2>Кейсы</h2><span class="pill" id="caseCount">0</span></div>
+      <p class="muted" style="margin-bottom:10px">Базовые модели с номером. Фон, модель и редкость — после улучшения.</p>
+      <div class="cases" id="caseGrid"><div class="empty">Загрузка…</div></div>
+    </div>
+  </section>
+
+  <section id="nft" class="page">
+    <div class="glass pad">
+      <div class="rowh"><h2>Коллекция</h2><span class="pill" id="nftCount">0</span></div>
+      <div class="row" style="margin-bottom:10px">
+        <button class="btn green" onclick="mintNft()"><svg class="ic sm"><use href="#i-spark"/></svg>Создать · 10 000</button>
+        <button class="btn ghost hide" id="adminCreateBtn" onclick="openAdminCreate()"><svg class="ic sm"><use href="#i-plus"/></svg>Кастом</button>
+      </div>
+      <div class="nftgrid" id="nftGrid"><div class="empty">Загрузка…</div></div>
+    </div>
+  </section>
+
+  <section id="mining" class="page">
+    <div class="glass hi pad" style="text-align:center">
+      <div class="pill bl" style="margin-bottom:8px">RUBIN MINING</div>
+      <div class="sum" style="justify-content:center;margin:2px 0 2px"><b id="minePending">0</b><span>RCOIN</span></div>
+      <div class="muted" id="mineRate">0 RCOIN/сутки</div>
+      <div class="fan"><svg class="ic"><use href="#i-mine"/></svg></div>
+      <div class="muted" id="mineEta">—</div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn green" onclick="mineCollect()"><svg class="ic sm"><use href="#i-drop"/></svg>Снять</button>
+        <button class="btn ghost" onclick="mineScroll()"><svg class="ic sm"><use href="#i-server"/></svg>Серверы</button>
+      </div>
+    </div>
+    <div class="glass pad" style="margin-top:10px" id="mineServersBox">
+      <div class="rowh"><h2>Серверы</h2><span class="pill" id="mineServers">0</span></div>
+      <div id="mineShop"><div class="empty">Загрузка…</div></div>
+    </div>
+  </section>
+
+    <section id="arena" class="page">
+    <div class="livebar"><span class="dot"></span>ARENA · круговые скачки</div>
+    <div class="glass pad">
+      <div class="arena-wrap">
+        <svg viewBox="0 0 400 400">
+          <circle cx="200" cy="200" r="150" fill="none" stroke="rgba(255,255,255,.06)" stroke-width="46"/>
+          <g id="zoneRing"></g>
+          <circle cx="200" cy="200" r="128" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="1"/>
+          <circle cx="200" cy="200" r="172" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="1"/>
+          <g id="ballG"><circle id="arenaBall" cx="200" cy="56" r="11" fill="#fff" stroke="rgba(0,0,0,.35)" stroke-width="2"/>
+            <circle id="arenaBallGlow" cx="200" cy="56" r="20" fill="#fff" opacity=".18"/></g>
+        </svg>
+        <div class="arena-core"><div><b id="arenaBank">0</b><small>БАНК RCOIN</small><div id="arenaState" class="tiny" style="margin-top:6px">—</div></div></div>
+      </div>
+      <div class="apList" id="apList"><div class="empty">Пока никого нет — пригласи друга</div></div>
+      <div class="tiny" id="apHint" style="margin-top:8px">Ставка в пул, зона на кольце = твой шанс. Через 15 секунд после второго игрока шарик пойдёт по кольцу.</div>
+      <div class="betbar abet">
+        <input id="arenaBetInput" type="number" min="1" step="1" value="10000" inputmode="numeric">
+        <div class="btnrow2">
+          <button data-b="10000" onclick="abPreset(10000,this)">10к</button>
+          <button data-b="100000" onclick="abPreset(100000,this)">100к</button>
+          <button data-b="1000000" onclick="abPreset(1000000,this)">1кк</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:9px">
+        <button class="btn" id="arenaJoinBtn" onclick="arenaJoin()"><svg class="ic sm"><use href="#i-plus"/></svg>Войти в лобби</button>
+        <button class="btn ghost hide" id="arenaLeaveBtn" onclick="arenaLeave()">Выйти</button>
+      </div>
+    </div>
+    <div class="glass pad" style="margin-top:10px">
+      <div class="rowh"><h2>История</h2><span class="pill">последние</span></div>
+      <div id="arenaHist" class="tiny">Пока нет завершённых раундов</div>
+    </div>
+  </section>
+
+<section id="upgrade" class="page">
+    <div class="livebar"><span class="dot"></span>LIVE</div>
+    <div class="chips" id="chips"></div>
+    <div class="glass upg">
+      <div class="dial" id="dialBox">
+        <svg viewBox="0 0 240 240">
+          <defs><linearGradient id="gg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5b8dff"/><stop offset="1" stop-color="#8b6cf6"/></linearGradient>
+          <radialGradient id="core" cx="50%" cy="36%" r="70%"><stop offset="0" stop-color="#222a44"/><stop offset="1" stop-color="#06070c"/></radialGradient></defs>
+          <circle class="bg" cx="120" cy="120" r="100"/>
+          <g class="rot" id="rot">
+            <path class="sec on" id="secWin" d="" fill="url(#gg)"/>
+            <circle class="tt" cx="120" cy="120" r="112" stroke-dasharray="1 11"/>
+          </g>
+          <circle cx="120" cy="120" r="78" fill="url(#core)"/>
+          <circle cx="120" cy="120" r="78" fill="none" stroke="rgba(255,255,255,.09)"/>
+        </svg>
+        <div class="in">
+          <div>
+            <div class="plus" id="dialPlus"><svg class="ic"><use href="#i-plus"/></svg></div>
+            <div class="hint" id="dialHint">Выберите цель</div>
+          </div>
+        </div>
+        <div class="needle"><svg class="ic"><use href="#i-chev"/></svg></div>
+      </div>
+      <div class="chrow"><span class="cap">Шанс улучшения</span><span class="val zero" id="chanceText">0 %</span></div>
+      <div class="slots">
+        <div class="slot" onclick="ePicker('mine',event)">
+          <div class="pl"><svg class="ic sm"><use href="#i-plus"/></svg></div>
+          <div class="tx"><div class="cap">Ваш подарок</div><div class="ttl" id="slotFrom">Выбрать</div><div class="sub" id="slotFromSub">подарки или NFT</div></div>
+        </div>
+        <div class="arrow"><svg class="ic sm"><use href="#i-arrow"/></svg></div>
+        <div class="slot" onclick="ePicker('target',event)">
+          <div class="pl"><svg class="ic sm"><use href="#i-plus"/></svg></div>
+          <div class="tx"><div class="cap">Хочу получить</div><div class="ttl" id="slotTo">Выбрать</div><div class="sub" id="slotToSub">из всех подарков</div></div>
+        </div>
+      </div>
+      <div class="mults" id="multRow">
+        <button class="mult" data-m="coin" onclick="eMode('coin',event)"><svg class="ic"><use href="#i-coin"/></svg></button>
+      </div>
+      <div class="iconsrow">
+        <button class="ibtn" id="modeNft" onclick="eMode('nft',event)"><svg class="ic"><use href="#i-cards"/></svg></button>
+        <button class="ibtn" id="modeCoins" onclick="eMode('coins',event)"><svg class="ic"><use href="#i-coin"/></svg></button>
+        <button class="ibtn" id="modeSuit" onclick="eMode('suit',event)"><svg class="ic"><use href="#i-crown"/></svg></button>
+        <button class="allbtn" onclick="eAll()">Все<svg class="ic"><use href="#i-arrowall"/></svg></button>
+      </div>
+      <div class="sliderrow hide" id="sliderRow">
+        <span class="amt"><svg class="ic xs"><use href="#i-star"/></svg><span id="sliderAmt">0</span></span>
+        <input type="range" id="betSlider" min="0" max="1000" value="0" oninput="eSlide()">
+      </div>
+      <div class="sumline" id="sumLine">Добавьте подарок или сумму с баланса</div>
+      <button class="upgbtn" id="upgBtn" disabled onclick="eSpin()">
+        <span class="ttl"><svg class="ic sm"><use href="#i-chev"/></svg>Улучшить</span>
+        <span class="sub" id="upgSub">выберите подарок</span>
+      </button>
+      <p class="tiny" style="text-align:center;margin-top:9px">RCOIN списываются в момент прокрутки. При ошибке деньги возвращаются.</p>
+    </div>
+    <div class="pstats">
+      <div class="glass pstat"><span>Пул выплат</span><b id="pool">0</b></div>
+      <div class="glass pstat"><span>NFT в архиве</span><b id="archCount">0</b></div>
+    </div>
+    <div class="glass pad" style="margin-top:10px">
+      <div class="rowh"><h2>Лоты архива</h2><span class="pill">можно выиграть</span></div>
+      <div class="pgrid" id="lots"><div class="empty">Загрузка…</div></div>
+    </div>
+  </section>
+
+  <section id="profile" class="page">
+      <div class="glass pad" style="margin-top:10px">
+        <div class="rowh"><h2>Тема и обои</h2><span class="pill bl">свои</span></div>
+        <div class="themes" id="themeRow"></div>
+        <div class="wall-upload">
+          <label class="btn ghost sm" style="margin:0;cursor:pointer"><svg class="ic sm"><use href="#i-image"/></svg>Свои обои
+            <input id="wallFile" type="file" accept="image/*" style="display:none" onchange="wallUpload(this)"></label>
+          <button class="btn ghost sm" onclick="wallReset()">Сбросить</button>
+        </div>
+        <p class="tiny" style="margin-top:7px">Обои хранятся только на этом устройстве.</p>
+      </div>
+
+    <div class="glass hi pad">
+      <div class="row" style="gap:11px;align-items:center">
+        <div class="ava" id="pAva" style="width:58px;height:58px;font-size:20px">?</div>
+        <div style="flex:1"><h2 id="pName" style="font-size:16px">Игрок</h2><div class="muted" id="pRank">Новичок</div></div>
+      </div>
+      <div class="pstats">
+        <div class="glass pstat"><span>Баланс</span><b id="pBal">0</b></div>
+        <div class="glass pstat"><span>RBP</span><b id="pRbp">0</b></div>
+      </div>
+      <a class="btn ghost" style="margin-top:10px;text-decoration:none" href="https://t.me/RubinHelpSBbot" target="_blank" rel="noopener"><svg class="ic sm"><use href="#i-support"/></svg>Поддержка @RubinHelpSBbot</a>
+      <button class="btn ghost hide" id="adminProfileBtn" style="margin-top:8px" onclick="openAdminCreate()"><svg class="ic sm"><use href="#i-gear"/></svg>Кастомный NFT</button>
+    </div>
+    <div class="glass pad" style="margin-top:10px">
+      <div class="rowh"><h2>Правила</h2><span class="pill">честно</span></div>
+      <p class="muted">Базовые модели без редкости. Улучшение открывает уникальный фон, модель и одну из двух редкостей. RCOIN — игровая валюта без реальной стоимости.</p>
+    </div>
+  </section>
+</main>
+
+<nav class="nav">
+  <button class="active" data-page="home" onclick="go('home')"><svg class="ic"><use href="#i-home"/></svg>Главная</button>
+  <button data-page="cases" onclick="go('cases')"><svg class="ic"><use href="#i-gift"/></svg>Кейсы</button>
+  <button data-page="nft" onclick="go('nft')"><svg class="ic"><use href="#i-cards"/></svg>NFT</button>
+  <button data-page="mining" onclick="go('mining')"><svg class="ic"><use href="#i-mine"/></svg>Майнинг</button>
+  <button data-page="upgrade" onclick="go('upgrade')"><svg class="ic"><use href="#i-swap"/></svg>Апгрейд</button>
+  <button data-page="profile" onclick="go('profile')"><svg class="ic"><use href="#i-user"/></svg>Профиль</button>
+</nav>
+
+<div class="toast" id="toast"></div>
+<div class="modal" id="modal" onclick="if(event.target===this)closeModal()"><div class="sheet" id="sheet"></div></div>
+<div class="result" id="result"><div class="card" id="resultCard"></div></div>
+
 <script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { try { tg.ready(); tg.expand(); tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000'); } catch(e){} }
+const INIT = tg ? tg.initData : '';
+const TU = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) || {};
+const $ = id => document.getElementById(id);
+const fmt = n => Math.floor(Number(n)||0).toLocaleString('ru-RU').replace(/,/g,' ');
+const num = v => Math.max(0, Math.floor(Number(v)||0));
+const safe = s => String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const icon = (n, cls) => '<svg class="ic '+(cls||'')+'"><use href="#i-'+n+'"/></svg>';
+const ARA = { state:null, timer:null, lastPhase:'', stage:null, cdTimer:null, cdEnd:0 };
+let ME=null, CASES=[], NFTS=[], mineTimer=null, mineBase=0, mineRate=0, mineTs=0;
 
-// Original RUBIN line icons, drawn as compact SVG paths.
-const ICONS={
- arena:'<path d="M12 2.8 14.5 9l6.7.5-5.1 4.3 1.6 6.5L12 16.7l-5.7 3.6 1.6-6.5-5.1-4.3L9.5 9 12 2.8Z"/><circle cx="12" cy="12" r="9.5" opacity=".35"/>',
- career:'<rect x="3" y="7" width="18" height="13" rx="2.5"/><path d="M8 7V5.5A1.5 1.5 0 0 1 9.5 4h5A1.5 1.5 0 0 1 16 5.5V7M3 12h18M10 12v2h4v-2"/>',
- market:'<path d="M3 18.5 8.5 13l3.2 2.8L20.5 6"/><path d="M14.5 6h6v6"/><path d="M3 21h18" opacity=".5"/>',
- events:'<path d="M12 2.8v18.4M4 7.2l16 9.6M4 16.8l16-9.6M7.2 4l9.6 16M16.8 4 7.2 20"/><circle cx="12" cy="12" r="3.2"/>',
- nft:'<path d="M4 5.5 12 2l8 3.5v13L12 22l-8-3.5v-13Z"/><path d="m4.5 6 7.5 3.3L19.5 6M12 9.5V21"/><path d="m8 12 2 2 4-4"/>',
- commands:'<path d="m8 6-5 6 5 6M16 6l5 6-5 6M14 4l-4 16"/>',
- bonus:'<path d="M12 21s-8-4.5-8-11a4.5 4.5 0 0 1 8-2.8A4.5 4.5 0 0 1 20 10c0 6.5-8 11-8 11Z"/><path d="M12 7v8M8.5 11h7"/>',
- daily:'<rect x="3" y="5" width="18" height="16" rx="2.5"/><path d="M7 3v4M17 3v4M3 9h18M8 13h3M8 17h6"/>',
- snow:'<path d="M12 2v20M3.3 7l17.4 10M3.3 17 20.7 7M8 4l4 3 4-3M8 20l4-3 4 3"/>',
- trophy:'<path d="M7 4h10v5a5 5 0 0 1-10 0V4ZM7 6H4v2a4 4 0 0 0 4 4M17 6h3v2a4 4 0 0 1-4 4M12 14v4M8 21h8M9 18h6"/>',
- home:'<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z"/>',
- work:'<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12h18M10 12v2h4v-2"/>',
- wheel:'<circle cx="12" cy="12" r="9.5"/><circle cx="12" cy="12" r="2.6"/><path d="M12 2.5v6.9M20.2 7.2l-6 3.5M20.2 16.8l-6-3.5M12 21.5v-6.9M3.8 16.8l6-3.5M3.8 7.2l6 3.5"/>',
- cube:'<path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7L12 2.6Z"/><path d="M3.9 7.2 12 11.7l8.1-4.5M12 11.7v9.5"/>',
- bolt:'<path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z"/>',
- bag:'<path d="M4.5 8h15l-1.2 12.5H5.7L4.5 8Z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/>'
-};
-function glyph(name){return '<span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24">'+(ICONS[name]||ICONS.arena)+'</svg></span>'}
-function applyCustomIcons(){
- const tiles=[['arena','arena'],['career','career'],['trade','market'],['events','events'],['nft','nft'],['commands','commands']];
- document.querySelectorAll('.tile .ico').forEach((el,i)=>{if(tiles[i])el.innerHTML=glyph(tiles[i][1])});
- const nav=['home','arena','work','market','wheel','cube'];document.querySelectorAll('.nav button i').forEach((el,i)=>{if(nav[i])el.innerHTML=glyph(nav[i])});
- document.querySelectorAll('.stat span').forEach(el=>{const t=el.textContent.trim();let k=t.includes('Сыграно')?'arena':t.includes('Ранг')?'trophy':t.includes('Победы')?'trophy':t.includes('Проиграно')?'market':null;if(k)el.innerHTML=glyph(k)+' '+t.replace(/^[^ ]+\s*/, '')});
- document.querySelectorAll('.panel h2').forEach(el=>{if(el.querySelector('.glyph'))return;const t=el.textContent;let k=t.includes('ARENA')?'arena':t.includes('IT-карьера')?'career':t.includes('MARKET')?'market':t.includes('СНЕЖНЫЙ')||t.includes('СЕЗОННЫЕ')?'snow':t.includes('NFT')?'nft':t.includes('Рейтинг')?'trophy':null;if(k){const first=el.firstChild;if(first&&first.nodeType===3)first.textContent=first.textContent.replace(/^\s*[^\s]+\s*/, '');el.insertAdjacentHTML('afterbegin',glyph(k))}});
- document.querySelectorAll('.btn').forEach(el=>{if(el.querySelector('.glyph'))return;const t=el.textContent;let k=t.includes('задание')?'career':t.includes('снежки')?'snow':t.includes('Слепить')?'events':t.includes('NFT')?'nft':t.includes('куп')?'market':t.includes('прод')?'market':null;if(k)el.insertAdjacentHTML('afterbegin',glyph(k))});
- document.querySelectorAll('.action').forEach((el,i)=>{const names=['bonus','daily','career'];if(names[i])el.insertAdjacentHTML('afterbegin',glyph(names[i]))});
+async function api(path, body={}) {
+  try {
+    const r = await fetch('/api/'+path, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({init:INIT, photo_url:TU.photo_url||'', ...body})});
+    if (r.status === 413) return {ok:false, err:'Файл слишком большой'};
+    const t = await r.text();
+    try { return JSON.parse(t); } catch(e) { return {ok:false, err:'Ошибка сервера ('+r.status+')'}; }
+  } catch(e) { return {ok:false, err:'Нет соединения с сервером'}; }
+}
+function toast(t){ const e=$('toast'); e.textContent=t; e.classList.add('show'); clearTimeout(toast.t); toast.t=setTimeout(()=>e.classList.remove('show'),2600); }
+function haptic(){ try{ tg.HapticFeedback.impactOccurred('light'); }catch(e){} }
+function setBal(v){ if(v==null) return; const s=fmt(v);
+  $('topBal').textContent=s; $('heroBal').textContent=s; $('pBal').textContent=s; if(ME) ME.balance=v;
+  if($('upgrade').classList.contains('active')) eSlide(); }
+function go(p){
+  document.querySelectorAll('.page').forEach(e=>e.classList.toggle('active', e.id===p));
+  document.querySelectorAll('.nav button').forEach(e=>e.classList.toggle('active', e.dataset.page===p));
+  window.scrollTo({top:0,behavior:'smooth'});
+  if(p==='cases') loadCases();
+  if(p==='nft') loadNfts();
+  if(p==='mining') loadMining();
+  if(p==='upgrade'){ if(!NFTS.length) loadNfts(); loadArchive(); }
+  if(p==='arena') arenaStart();
+}
+async function boot(){
+  const j = await api('me');
+  if(!j.ok){ toast(j.err||'Открой приложение через бота'); return; }
+  ME = j; setBal(j.balance);
+  const nm = j.name||'Игрок';
+  $('hName').textContent=nm; $('pName').textContent=nm;
+  $('hRank').innerHTML = icon('medal','xs')+'<span>'+safe(j.rank||'Новичок')+'</span>';
+  $('pRank').textContent=j.rank||'Новичок';
+  $('stGames').textContent=fmt(j.games); $('stWins').textContent=fmt(j.wins);
+  $('stRank').textContent=j.rank||'—'; $('stLost').textContent=fmt(j.lost);
+  $('pRbp').textContent=fmt(j.rbp);
+  const src=j.nft_profile_url||j.photo_url||'';
+  ['avaBox','pAva'].forEach(id=>{ const el=$(id);
+    if(src){ el.innerHTML='<img src="'+safe(src)+'" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover">'; }
+    else el.textContent=(nm||'?').slice(0,1).toUpperCase(); });
+  if(j.is_admin){ ['adminCreateBtn','adminProfileBtn'].forEach(id=>$(id)&&$(id).classList.remove('hide')); }
+  loadCases();
+}
+/* кейсы */
+const CASE_ICON = {ny:'tree', gta:'palm', capy:'capy', penguin:'pinguin', space:'planet',
+  gold:'crown', cyber:'neon', cozy:'cup', meme:'cat', premium:'diamond'};
+async function loadCases(){
+  if(CASES.length) return renderCases();
+  const j = await api('cases_state');
+  if(!j.ok) return;
+  CASES = j.cases||[]; if(j.balance!=null) setBal(j.balance); renderCases();
+}
+function renderCases(){
+  $('caseCount').textContent = CASES.length;
+  const g=$('caseGrid');
+  if(!CASES.length){ g.innerHTML='<div class="empty">Нет кейсов</div>'; return; }
+  g.innerHTML = CASES.map(c=>'<div class="case" style="--c:'+safe(c.accent)+'">'
+    +'<span class="tagname">'+safe(c.tag)+'</span>'
+    +'<div class="art">'+icon(CASE_ICON[c.key]||'gift')+'</div>'
+    +'<b>'+safe(c.name)+'</b>'
+    +'<div class="pr">'+icon('coin','xs')+fmt(c.price)+' RCOIN</div>'
+    +'<button class="op" onclick="openCase(\''+c.key+'\')">Открыть</button></div>').join('');
+}
+async function openCase(key){
+  const c = CASES.find(x=>x.key===key); if(!c) return;
+  showSheet('<div style="text-align:center;padding:16px"><div style="display:grid;place-items:center;height:70px;color:#bcd3ff">'
+    +icon(CASE_ICON[c.key]||'gift','lg')+'</div><h3 style="margin-top:8px">'+safe(c.name)+'</h3>'
+    +'<p class="muted" style="margin-top:5px">Открываем…</p></div>');
+  const j = await api('case_open', {key});
+  if(!j.ok){ closeModal(); return toast(j.err||'Не удалось'); }
+  if(j.balance!=null) setBal(j.balance);
+  haptic(); confetti(70);
+  showSheet('<div style="text-align:center"><div class="pill bl">'+safe(j.case)+'</div>'
+    +'<img src="'+safe(j.url)+'" alt="" style="width:100%;border-radius:16px;margin:9px 0;border:1px solid var(--line)">'
+    +'<h3>'+safe(j.name)+' <span class="pill">#'+j.id+'</span></h3>'
+    +'<p class="muted" style="margin-top:5px">Модель: '+safe(j.model)+' · фон и редкость откроются после улучшения</p>'
+    +'<button class="btn" style="margin-top:11px" onclick="closeModal();go(\'nft\')">'+icon('cards','sm')+'В коллекцию</button>'
+    +'<button class="btn ghost" style="margin-top:7px" onclick="closeModal();go(\'upgrade\')">'+icon('swap','sm')+'К апгрейду</button></div>');
+  NFTS=[]; loadNfts();
+}
+/* nft */
+async function loadNfts(){
+  const j = await api('nft_state');
+  if(!j.ok) return;
+  NFTS = j.items||[]; if(j.balance!=null) setBal(j.balance);
+  $('nftCount').textContent = NFTS.length;
+  const g=$('nftGrid');
+  if(!NFTS.length){ g.innerHTML='<div class="empty" style="grid-column:1/-1">Пусто. Открой кейс или создай NFT.</div>'; return; }
+  g.innerHTML = NFTS.map(n=>'<div class="nft" onclick="openNft('+n.id+')"><div class="im">'
+    +'<img src="'+safe(n.url)+'" alt="" loading="lazy"><span class="n">#'+n.id+'</span>'
+    +(n.level>1?'<span class="lv">LVL '+n.level+'</span>':'')
+    +'</div><div class="b"><div class="nm">'+safe(n.name)+'</div>'
+    +'<div class="mt"><span>'+safe(n.model)+'</span><span>'+fmt(n.value)+'</span></div>'
+    +'<div class="rr '+(n.rarity_key==='epic'?'epic':n.rarity_key==='rare'?'rare':'')+'">'+safe(n.rarity)+'</div></div></div>').join('');
+  if($('upgrade').classList.contains('active')) eRender();
+}
+const findNft = id => NFTS.find(x=>x.id===id);
+async function mintNft(){
+  const j = await api('nft_mint');
+  if(!j.ok) return toast(j.err||'Не удалось');
+  toast(j.msg||'NFT создан'); NFTS=[]; loadNfts();
+}
+async function openNft(id){
+  let n = findNft(id); if(!n){ await loadNfts(); n = findNft(id); }
+  if(!n) return toast('NFT не найден');
+  showSheet('<div><div class="shead"><h3>'+safe(n.name)+' <span class="pill">#'+n.id+'</span></h3>'
+    +'<button class="xb" onclick="closeModal()">'+icon('x','sm')+'</button></div>'
+    +'<img src="'+safe(n.url)+'" alt="" style="width:100%;border-radius:16px;border:1px solid var(--line);background:#07080d">'
+    +'<div class="pstats"><div class="pstat"><span>Модель</span><b>'+safe(n.model)+'</b></div>'
+    +'<div class="pstat"><span>Редкость</span><b>'+safe(n.rarity)+'</b></div>'
+    +'<div class="pstat"><span>Уровень</span><b>'+n.level+'</b></div>'
+    +'<div class="pstat"><span>Оценка</span><b>'+fmt(n.value)+'</b></div></div>'
+    +'<button class="btn green" style="margin-top:11px" onclick="upgradeNft('+n.id+')">'+icon('bolt','sm')+'Улучшить · '+fmt(n.upgrade_cost)+'</button>'
+    +'<div class="row" style="margin-top:7px"><button class="btn ghost" onclick="pinNft('+n.id+',\'profile\')">'+icon('user','sm')+'В профиль</button>'
+    +'<button class="btn ghost" onclick="pinNft('+n.id+',\'balance\')">'+icon('coin','sm')+'В баланс</button></div>'
+    +'<button class="btn red" style="margin-top:7px" onclick="archiveNft('+n.id+')">'+icon('lock','sm')+'В NFT-архив</button></div>');
+}
+async function upgradeNft(id){
+  const b = document.querySelector('#sheet .btn.green');
+  if(b){ b.disabled=true; b.textContent='Улучшаем…'; }
+  const j = await api('nft_upgrade', {id});
+  if(!j.ok){ toast(j.err||'Не удалось'); if(b){b.disabled=false;b.innerHTML=icon('bolt','sm')+'Улучшить';} return; }
+  if(j.balance!=null) setBal(j.balance);
+  NFTS=[]; await loadNfts();
+  const it=j.item;
+  showSheet('<div style="text-align:center"><div class="pill bl">УЛУЧШЕНИЕ</div>'
+    +'<img src="'+safe(it.url)+'" alt="" style="width:100%;border-radius:16px;margin:9px 0;border:1px solid var(--line)">'
+    +'<h3>'+safe(it.name)+' <span class="pill">#'+it.id+'</span></h3>'
+    +'<p class="muted" style="margin-top:5px">'+safe(it.rarity)+' · '+safe(it.model)+' · уровень '+it.level+'</p>'
+    +'<button class="btn" style="margin-top:11px" onclick="closeModal()">Готово</button></div>');
+  haptic(); confetti(90); toast('Редкость: '+it.rarity);
+}
+async function pinNft(id,target){ const j=await api('nft_set',{id,target}); if(!j.ok) return toast(j.err||'Ошибка'); toast(j.msg||'Готово'); NFTS=[]; loadNfts(); boot(); }
+async function archiveNft(id){ const j=await api('nft_to_archive',{id}); if(!j.ok) return toast(j.err||'Ошибка'); toast('NFT в архиве'); closeModal(); NFTS=[]; loadNfts(); }
+/* админ */
+function openAdminCreate(){
+  showSheet('<div><div class="shead"><h3>Кастомный NFT</h3><button class="xb" onclick="closeModal()">'+icon('x','sm')+'</button></div>'
+    +'<label>Название</label><input id="acName" maxlength="30" placeholder="Капибара босс">'
+    +'<label>Личный номер (0 — авто)</label><input id="acNum" type="number" min="0" value="0" inputmode="numeric">'
+    +'<label>Редкость</label><select id="acRar"><option value="none">Без редкости (арт после улучшения)</option><option value="rare">Редкий</option><option value="epic">Эпический</option></select>'
+    +'<label>Модель</label><select id="acModel"><option value="">Случайная</option><option>Стандартный</option><option>Зимний</option><option>Снежный</option><option>Золотой</option><option>Неоновый</option><option>Призрачный</option><option>Космический</option></select>'
+    +'<label>Фото (необязательно)</label><input id="acFile" type="file" accept="image/*">'
+    +'<button class="btn" style="margin-top:11px" onclick="adminCreate()">Создать</button>'
+    +'<p class="tiny" style="margin-top:7px">Номер должен быть свободен. Фото до 8 МБ.</p></div>');
+}
+async function adminCreate(){
+  const name=$('acName').value.trim(); if(!name) return toast('Введи название');
+  const rar=$('acRar').value, body={name, number:num($('acNum').value), model:$('acModel').value};
+  const f=$('acFile').files && $('acFile').files[0];
+  if(f){
+    if(f.size>8*1024*1024) return toast('Фото до 8 МБ');
+    body.rarity = rar==='none' ? 'rare' : rar;
+    body.image = await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.onerror=()=>r('');fr.readAsDataURL(f);});
+  } else body.rarity = rar;
+  const j=await api('admin_nft_create', body);
+  if(!j.ok) return toast(j.err||'Не удалось');
+  toast(j.msg||'Создан'); closeModal(); NFTS=[]; loadNfts();
+}
+/* майнинг */
+async function loadMining(){
+  const j=await api('mining_state'); if(!j.ok) return toast(j.err||'Недоступно');
+  mineBase=num(j.pending); mineRate=num(j.rate); mineTs=Date.now();
+  if(mineTimer) clearInterval(mineTimer);
+  mineTimer=setInterval(mineTick,1000); mineTick();
+  $('mineRate').textContent=fmt(j.rate)+' RCOIN/сутки';
+  const owned=(j.servers||[]).filter(s=>s.owned);
+  $('mineServers').textContent=owned.length+' серверов';
+  const perHour=Math.floor(j.rate/24);
+  const left=j.rate>0?Math.max(0,Math.ceil(((j.cap||j.rate*30)-j.pending)/j.rate*24)):0;
+  $('mineEta').textContent='≈ '+fmt(perHour)+' в час · полный сбор через '+(j.rate>0?left+' ч':'—');
+  const box=$('mineShop'); box.innerHTML='';
+  (j.servers||[]).forEach(s=>{
+    const d=document.createElement('div'); d.className='srv'+(s.owned?' owned':'');
+    d.innerHTML='<div class="icw">'+icon('server')+'</div><div style="flex:1"><b>'+safe(s.name)+'</b><small>'+fmt(s.per_day)+'/сутки'+(s.owned?' · '+Math.ceil(s.left/86400)+' дн.':'')+'</small></div>';
+    if(!s.owned){ const b=document.createElement('button'); b.className='buy'; b.textContent=fmt(s.cost); b.onclick=()=>mineBuy(s.tier); d.append(b); }
+    box.append(d);
+  });
+}
+function mineTick(){ $('minePending').textContent = fmt(Math.floor(mineBase + mineRate*((Date.now()-mineTs)/1000)/86400)); }
+function mineScroll(){ $('mineServersBox').scrollIntoView({behavior:'smooth',block:'center'}); }
+async function mineBuy(tier){ const j=await api('mining_buy',{tier}); if(!j.ok) return toast(j.err||'Не куплено'); if(j.balance!=null) setBal(j.balance); toast(j.msg||'Куплено'); loadMining(); }
+async function mineCollect(){ const j=await api('mining_collect'); if(!j.ok) return toast(j.err||'Пусто'); if(j.balance!=null) setBal(j.balance); toast(j.msg+(j.archived?' · '+fmt(j.archived)+' в архив':'')); haptic(); loadMining(); }
+/* апгрейдер */
+const E = { mode:'nft', sel:[], target:'', mult:2, bet:0 };
+const TARGET_LABEL = {'':'из всех подарков','rare':'только Редкий','epic':'только Эпический','suit':'любой лот'};
+function eMode(m, ev){
+  if(ev) ev.preventDefault();
+  E.mode = m;
+  $('modeNft').classList.toggle('on', m==='nft');
+  $('modeCoins').classList.toggle('on', m==='coins');
+  $('modeSuit').classList.toggle('on', m==='suit');
+  $('sliderRow').classList.toggle('hide', m!=='nft');
+  eRender();
+}
+function eMults(){
+  const row=$('multRow');
+  const vals = E.mode==='nft' ? [['coin','Добавить RCOIN'],['2','×2'],['4','×4'],['8','×8']] : [['2','Добавить RCOIN'],['4','×4'],['8','×8'],['suit','Лоты']];
+  row.innerHTML = vals.map(([v,label])=>{
+    const on = (v==='coin'&&E.bet>0) || (v===String(E.mult)&&v!=='coin'&&v!=='suit') || (v==='suit'&&E.target==='suit');
+    const ic = (v==='coin'||v==='suit') ? icon('coin','xs') : '';
+    return '<button class="mult '+(on?'on':'')+'" data-m="'+v+'">'+ic+label+'</button>';
+  }).join('');
+  row.querySelectorAll('button').forEach(b=>b.onclick=(ev)=>{
+    ev.preventDefault(); const v=b.dataset.m;
+    if(v==='coin'){ E.bet = E.bet>0 ? 0 : Math.max(10000, num((ME&&ME.balance)||0)/10); }
+    else if(v==='suit'){ E.target = E.target==='suit' ? '' : 'suit'; }
+    else if(v==='2'||v==='4'||v==='8'){ if(E.mode==='nft'||E.mode==='coins') E.mult=Number(v); }
+    eRender();
+  });
+}
+function eChance(){
+  const table=(AR&&AR.chance)||{};
+  const ranks={common:0,rare:1,epic:2,uncommon:1,legendary:2};
+  let ch=0;
+  const items = NFTS.filter(n=>E.sel.includes(n.id));
+  if(!items.length) return 0;
+  const best=items.reduce((a,b)=>(ranks[b.rarity_key]||0)>(ranks[a.rarity_key]||0)?b:a, items[0]);
+  ch=(table[best.rarity_key]||30)+5*(items.length-1);
+  if(E.bet>0) ch += Math.min(10, Math.floor(E.bet/100_000_000));
+  if(E.mult>1 && E.mode==='coins') ch -= 3;
+  return Math.max(1, Math.min(88, ch));
+}
+function eRender(){
+  eMults();
+  const ch = eChance();
+  $('chanceText').textContent = ch+' %';
+  ePaintSector(ch);
+  $('chanceText').classList.toggle('zero', ch<=0);
+  $('dialHint').textContent = E.sel.length ? (E.target?(TARGET_LABEL[E.target]||'Цель'):'Выберите цель') : 'Выберите цель';
+  const first = E.sel.length ? findNft(E.sel[0]) : null;
+  if(first){
+    $('slotFrom').textContent = '#'+first.id+' '+first.name;
+    $('slotFromSub').textContent = E.sel.length>1 ? ('ещё '+(E.sel.length-1)+' NFT') : (first.rarity||'');
+    $('dialPlus').innerHTML = '<img src="'+safe(first.url)+'" alt="" style="width:46px;height:46px;border-radius:12px;object-fit:cover">';
+  } else {
+    $('slotFrom').textContent='Выбрать'; $('slotFromSub').textContent = E.mode==='nft' ? 'подарки или NFT' : 'NFT для ставки';
+    $('dialPlus').innerHTML = icon('plus');
+  }
+  $('slotTo').textContent = E.target ? (E.target==='rare'?'Редкий':E.target==='epic'?'Эпический':E.target==='suit'?'Любой лот':'Любая') : 'Выбрать';
+  $('slotToSub').textContent = E.mode==='coins' ? 'RCOIN по множителю' : (TARGET_LABEL[E.target]||'из всех подарков');
+  const per = Math.max(10000, num(((ME&&ME.balance)||0)*0.25));
+  $('betSlider').max = String(Math.max(1000, Math.round(per)));
+  $('betSlider').value = String(Math.min(per, E.bet));
+  $('sliderAmt').textContent = fmt(E.bet);
+  let ready=false, sub='выберите подарок', line='Добавьте подарок или сумму с баланса';
+  if(E.sel.length && E.mode==='nft'){
+    const gain = E.mult>1 ? ' · ×'+E.mult+' к редкости' : '';
+    line = 'Ставка: '+E.sel.map(i=>'#'+i).join(' · ')+' → '+($('slotTo').textContent)+gain+(E.bet?' + '+fmt(E.bet)+' RCOIN':'');
+    sub = 'шанс '+ch+' %'; ready = ch>0;
+  } else if(E.sel.length && E.mode==='coins'){
+    line = 'Монеты из '+E.sel.map(i=>'#'+i).join(' · ')+' → '+fmt(eCoins())+' RCOIN';
+    sub = 'шанс '+ch+' %'; ready = ch>0;
+  } else if(E.sel.length && E.mode==='suit'){
+    line = 'Ставка: '+E.sel.map(i=>'#'+i).join(' · ')+' → '+(E.target==='suit'?'лот архива':$('slotTo').textContent);
+    sub = 'шанс '+ch+' %'; ready = ch>0;
+  }
+  $('sumLine').textContent = line;
+  $('upgSub').textContent = sub;
+  const b=$('upgBtn'); b.disabled=!ready; b.classList.toggle('ready', ready);
+}
+function eCoins(){
+  const items = NFTS.filter(n=>E.sel.includes(n.id));
+  const stake = items.reduce((s,n)=>s+(Number(n.value)||0),0) + E.bet;
+  return Math.round(stake*1.6);
+}
+function eSlide(){
+  E.bet = num($('betSlider').value);
+  if(E.bet>0 && E.bet<10000) E.bet = 10000;
+  eRender();
+}
+function eAll(){
+  E.sel = NFTS.slice(0,5).map(n=>n.id);
+  eRender();
+}
+function ePicker(kind, ev){
+  if(ev) ev.preventDefault();
+  let html='<div class="shead"><h3>'+(kind==='mine'?'Ваш подарок':'Хочу получить')+'</h3><button class="xb" onclick="closeModal()">'+icon('x','sm')+'</button></div>';
+  if(kind==='target'){
+    html+='<div class="pgrid">'+[['','Любая','из архива'],['rare','Редкий','после улучшения'],['epic','Эпический','после улучшения'],['suit','Любой лот','конкретный архив']]
+      .map(([k,t,s])=>'<div class="pitem '+(E.target===k?'on':'')+'" onclick="eSetTarget(\''+k+'\')"><b>'+t+'</b><small>'+s+'</small></div>').join('')+'</div>';
+    const lots=(AR&&AR.gifts)||[];
+    if(lots.length){
+      html+='<div class="pgrid" style="margin-top:8px">'+lots.slice(0,8).map(x=>'<div class="pitem '+(E.target==='a:'+x.id?'on':'')+'" onclick="eSetTarget(\'a:'+x.id+'\')">'
+        +'<img src="'+safe(x.url)+'" alt=""><b>'+safe(x.name)+'</b><small>'+safe(x.rarity)+(x.price?' · '+fmt(x.price):'')+'</small></div>').join('')+'</div>';
+    }
+  } else {
+    if(!NFTS.length) html+='<div class="empty">Нет NFT. Открой кейс или создай NFT.</div>';
+    else html+='<div class="pgrid">'+NFTS.map(n=>'<div class="pitem '+(E.sel.includes(n.id)?'on':'')+'" onclick="ePick('+n.id+',this)">'
+      +'<img src="'+safe(n.url)+'" alt=""><b>#'+n.id+' '+safe(n.name)+'</b><small>'+safe(n.model)+' · '+fmt(n.value)+'</small></div>').join('')+'</div>';
+  }
+  showSheet(html);
+}
+function eSetTarget(v){ E.target=v; closeModal(); eRender(); }
+function ePick(id, el){
+  const i=E.sel.indexOf(id);
+  if(i>=0) E.sel.splice(i,1);
+  else { if(E.sel.length>=5) return toast('Максимум 5 NFT'); E.sel.push(id); }
+  el.classList.toggle('on'); eRender();
+}
+async 
+/* колесо: сектор победы = шанс, стрелка останавливается в секторе при победе */
+function eSector(ch){
+  const a = Math.max(2.5, ch * 3.6);
+  const end = -90 + a;                 // от -90° по часовой стрелке
+  const big = a > 180 ? 1 : 0;
+  const x0 = 120, y0 = 120, R = 100;
+  const p0 = [x0, y0 - R], p1 = [x0 + R * Math.cos(end * Math.PI / 180), y0 + R * Math.sin(end * Math.PI / 180)];
+  return {d: 'M'+x0+' '+y0+' L'+p0[0]+' '+p0[1]+' A'+R+' '+R+' 0 '+big+' 1 '+p1[0].toFixed(2)+' '+p1[1].toFixed(2)+' Z', span: a};
+}
+function ePaintSector(ch){
+  const s = eSector(ch);
+  $('secWin').setAttribute('d', ch > 0 ? s.d : '');
+  $('secWin').classList.toggle('on', ch > 0);
+}
+function eAnimate(ch){
+  return new Promise(res => {
+    const rot = $('rot'), box = $('dialBox');
+    if(!ch){ res(false); return; }
+    const span = eSector(ch).span;
+    // случайная точка внутри сектора, но не у самой кромки
+    for(let tries = 0; tries < 12; tries++){
+      const off = span * (0.18 + Math.random() * 0.64);
+      const target = -off;                      // угол стрелки в координатах колеса
+      const turns = 3 + Math.floor(Math.random() * 2);
+      rot.classList.remove('zero');
+      rot.style.transform = 'rotate('+(turns * 360 + target)+'deg)';
+      box.classList.add('spin');
+      setTimeout(() => {
+        box.classList.remove('spin');
+        const landed = true;
+        res(landed);
+      }, 4300);
+      return;
+    }
+    res(true);
+  });
 }
 
-const tg=window.Telegram&&Telegram.WebApp;if(tg){try{tg.ready();tg.expand();tg.setHeaderColor('#080b10');tg.setBackgroundColor('#080b10')}catch(e){}}
-const INIT=tg?tg.initData:"",TU=tg?.initDataUnsafe?.user||{},$=id=>document.getElementById(id),fmt=n=>Math.floor(Number(n)||0).toLocaleString('en-US').replace(/,/g,"'");let ME=null,AS=null,AT=0,TS=null,tradeTimer=null,arenaTimer=null,arenaColor='#ff8a3d',arenaAvatar='';
-async function api(p,b={}){try{const r=await fetch('/api/'+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init:INIT,photo_url:TU.photo_url||'',display_name:[TU.first_name,TU.last_name].filter(Boolean).join(' '),...b})});
- if(r.status===413)return{ok:false,err:'Фото слишком большое — сожми или выбери меньше 6 МБ'};
- const t=await r.text();try{return JSON.parse(t)}catch(e){return{ok:false,err:'Сервер вернул ошибку ('+r.status+')'}}}catch(e){return{ok:false,err:'Нет соединения с сервером'}}}
-function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.remove('show'),2600)}function haptic(){try{tg.HapticFeedback.impactOccurred('light')}catch(e){}}
-function go(p){document.querySelectorAll('.page').forEach(e=>e.classList.toggle('active',e.id===p));document.querySelectorAll('.nav button').forEach(e=>e.classList.toggle('active',e.dataset.page===p));if(p==='arena'){startArena();loadArenaGifts()}if(p==='trade')startTrade();if(p==='career')loadCareer();if(p==='nft')loadNft();if(p==='events')loadSnowman();if(p==='mining')loadMining();if(p==='archive')loadArchive()}
-function setBalance(v){const x=fmt(v);$('topBal').textContent=x;$('heroBal').innerHTML=x+' <small>RCOIN</small>';$('copyBal').textContent=x}
-function applyAdminUi(){const b=$('photoBtn');if(b)b.classList.toggle('hide',!(ME&&ME.is_admin))}
-async function copyBalance(){const value=ME?Number(ME.balance||0).toLocaleString('en-US').replace(/,/g,"'"):'0';try{await navigator.clipboard.writeText(value);toast('Баланс '+value+' скопирован')}catch(e){toast('Баланс: '+value)}}
-function sendBotAction(action){if(!tg||typeof tg.sendData!=='function'){toast('Открой приложение через кнопку бота в Telegram');return}try{tg.sendData(action)}catch(e){toast('Не удалось передать действие боту')}}
-async function loadMe(){if(!INIT){applyAdminUi();$('arenaStatus').textContent='Открой веб-приложение через меню бота в Telegram';return}const j=await api('me');if(!j.ok)return toast(j.err||'Не удалось загрузить профиль');ME=j;applyAdminUi();setBalance(j.balance);$('playerName').textContent=j.name||'Игрок';$('profileRank').textContent=j.rank||'Новичок';const ph=$('profilePhoto');const pv=j.nft_profile_url||j.photo_url||TU.photo_url||'';if(pv){ph.src=pv;ph.style.display='block'}else{ph.style.display='none'}const ha=$('heroArt');if(ha&&j.nft_balance_url)ha.src=j.nft_balance_url;$('games').textContent=fmt(j.games);$('rank').textContent=j.rank||'Новичок';$('wins').textContent=fmt(j.wins);$('lost').textContent=fmt(j.lost);$('badges').innerHTML=(j.badges||[]).map(x=>typeof x==='string'?'<span class="badge">'+safe(x)+'</span>':'<span class="badge">'+(x.emoji_id?'<img class="ce" src="/emoji/'+x.emoji_id+'.webp" alt="" onerror="this.remove()"> ':'')+safe(x.title||x.role||'')+'</span>').join('')||'<span class="muted">Пока нет выбранных галочек</span>'}
-function safe(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-/* Custom emoji for web app */
-const CE_IDS={games:'5841551282321497604',dice:'5312533460324199794',roulette:'6228608791529656524',fortune:'5434093331292377553',mines:'5370692462882857093',crash:'5283080528818360566',basket:'5384327463629233871',darts:'5310278924616356636',blackjack:'5285420684699260907',sun:'5391270767889497941',hunt:'5370553185683394181',spin:'5915833712368424979',football:'5413474404485061402',pyramid:'5224257782013769471',miner:'5370692462882857093',hi_lo:'5926783847453692661',ttt:'5222158908805632010',door:'5259067694396474462',profile:'5202216593966244027',balance:'5197491391206281629',bank:'5881948563591666817',diamond:'5438496463044752972',star:'5438496463044752972',lock:'5305621469134857194',nft:'5262517101578443800',referral:'5942877472163892475',check:'5810189259327413739',treasury:'5798678875823153004',win:'5305747221996177787',lose:'5305474786400690766',settings:'5258096772776991776',admin:'6129805886383723340',donate:'5438496463044752972',ad:'5213391561999526028',market:'5278702045883292456',question:'5436113877181941026',item_1:'5332717942599618048',item_2:'5404752966584394198',item_3:'5280924618444514633',item_4:'5368488358681000659',item_5:'5398024200235529935',item_6:'5449449325434266744',item_7:'5201924046563852634',item_8:'5199959030306456092',item_9:'5316599316884766402',black:'5789386473560088107',blue:'5810189259327413739',rubin:'5341454906807034418',moder:'5766894601709296405',support:'5888937609253623352',tester:'5888937609253623352',ny:'5954111328493771983',dev:'5251635454041675257'};
-const CE_CHARS={'🎮':'games','🎲':'dice','🎰':'spin','🎡':'fortune','💣':'mines','🚀':'crash','🏀':'basket','🎯':'darts','🃏':'blackjack','☀':'sun','🏹':'hunt','⚽':'football','🔺':'pyramid','⛏':'miner','🎴':'hi_lo','❌':'ttt','🚪':'door','👤':'profile','💰':'balance','💸':'balance','🏦':'bank','💎':'diamond','⭐':'star','🔒':'lock','🖼':'nft','👥':'referral','✅':'check','🏛':'treasury','🏆':'win','💔':'lose','⚙':'settings','👑':'admin','🎁':'donate','📢':'ad','🛒':'market','❔':'question','❄':'item_1','🍬':'item_2','🧦':'item_3','🧤':'item_4','🍪':'item_5','🔔':'item_7','🧊':'item_8','☕':'item_9','☑':'black','✔':'blue','💠':'rubin','🛡':'moder','🎧':'support','🧪':'tester','🎄':'ny','👨':'dev'};
-const CE_SEQ=[['👨‍💻','dev'],['☑️','black'],['✔️','blue'],['❄️','item_1'],['☀️','sun'],['⚙️','settings'],['🎄','ny']];
-const CE_SEQ_RE=new RegExp(CE_SEQ.map(x=>x[0]).join('|'),'g');
-const CE_RE=/[\u{1F000}-\u{1FAFF}\u2600-\u27BF\u{2B00}-\u{2BFF}\u2300-\u23FF\uFE0F\u200D\u20E3]/gu;
-const CE_HAS=new RegExp('(?:'+CE_SEQ.map(x=>x[0]).join('|')+')|'+CE_RE.source,'u');
-function ceImg(k){const id=CE_IDS[k];if(!id)return '';return '<img class="ce" src="/emoji/'+id+'.webp" alt="" loading="lazy" onerror="this.remove()">'}
-function ceText(t){let s=t.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));s=s.replace(CE_SEQ_RE,m=>{const row=CE_SEQ.find(x=>x[0]===m);return row?ceImg(row[1]):''});s=s.replace(CE_RE,m=>{const k=CE_CHARS[m]||CE_CHARS[m.replace(/\uFE0F/g,'')];return k?ceImg(k):''});return s}
-function premiumize(root){const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{acceptNode:n=>{const p=n.parentElement;if(!p||p.closest('script,style,textarea,input,select,canvas,.ce'))return NodeFilter.FILTER_REJECT;return NodeFilter.FILTER_ACCEPT}});const a=[];while(w.nextNode())a.push(w.currentNode);a.forEach(n=>{const t=n.nodeValue;if(!t||!CE_HAS.test(t))return;const h=ceText(t);if(h!==t){const s=document.createElement('span');s.innerHTML=h;n.replaceWith(s)}})}
-let _ceT=false;const _ceObs=new MutationObserver(()=>{if(_ceT)return;_ceT=true;requestAnimationFrame(()=>{_ceT=false;premiumize(document.body)})});
-/* Square arena with stakes */
-let arenaBet=10000, BX=50, BY=50, BVX=0, BVY=0, BANG=0, BSTATE='', _bt=0, BTRAIL=[], BLAND=null, BT=[];
-function apAngle(i,n){return 90+(i+0.5)*360/Math.max(n,1)}
-function arenaSectors(){if(!AS)return;const n=AS.players.length;const el=$('arenaSectors');if(!n){el.style.background='conic-gradient(from 90deg,#1a2836 0 100%)';return}const total=AS.players.reduce((s,p)=>s+Math.max(0,Number(p.bet)||0),0)||n;let acc=0;const parts=[];AS.players.forEach(p=>{const w=(Math.max(0,Number(p.bet)||0)||1)/total*100;const a=acc;acc+=w;parts.push(p.color+' '+a+'% '+acc+'%')});el.style.background='conic-gradient(from 90deg,'+parts.join(',')+')'}
-function initBallTrails(){const sq=$('arenaSquare');if(!sq||BT.length)return;for(let i=0;i<8;i++){const d=document.createElement('div');d.className='ball-trail';sq.append(d);BT.push(d)}}
-function setBall(x,y){const b=$('arenaBall');if(!b)return;b.style.left=x+'%';b.style.top=y+'%';b.style.transform='translate(-50%,-50%) rotate('+BANG+'deg)'}
-function trailTick(){if(!BT.length)return;BTRAIL.unshift({x:BX,y:BY});if(BTRAIL.length>10)BTRAIL.pop();BT.forEach((el,i)=>{const p=BTRAIL[i];if(!p){el.style.opacity=0;return}const k=1-i/BT.length;el.style.left=p.x+'%';el.style.top=p.y+'%';el.style.opacity=(k*.45).toFixed(2);el.style.transform='translate(-50%,-50%) scale('+(0.35+k*.8)+')'})}
-function bounceRing(x,y){const sq=$('arenaSquare');if(!sq)return;const d=document.createElement('div');d.className='bounce-ring';d.style.left=x+'%';d.style.top=y+'%';sq.append(d);setTimeout(()=>d.remove(),650)}
-function hideTrails(){BT.forEach(e=>e.style.opacity=0)}
-function renderBall(dt){const b=$('arenaBall');if(!b||!AS)return;const ph=AS.phase;
-if(ph==='rolling'){
- if(BSTATE!=='rolling'){BSTATE='rolling';BX=50;BY=50;const a=Math.random()*Math.PI*2;const sp=.72+Math.random()*.28;BVX=Math.cos(a)*sp;BVY=Math.sin(a)*sp;BANG=0;BLAND=null;BTRAIL=[];b.classList.remove('win');b.classList.add('live');b.style.transition='none';bounceRing(50,50)}
- const steps=Math.max(1,Math.ceil(Math.hypot(BVX,BVY)*dt/16/1.4));
- for(let s=0;s<steps;s++){
-  BX+=BVX*dt/16/steps;BY+=BVY*dt/16/steps;const R=5.5;
-  if(BX<R){BX=R;BVX=Math.abs(BVX)*(.9+Math.random()*.15);BVY+=(Math.random()-.5)*.3;bounceRing(BX,BY)}
-  if(BX>100-R){BX=100-R;BVX=-Math.abs(BVX)*(.9+Math.random()*.15);BVY+=(Math.random()-.5)*.3;bounceRing(BX,BY)}
-  if(BY<R){BY=R;BVY=Math.abs(BVY)*(.9+Math.random()*.15);BVX+=(Math.random()-.5)*.3;bounceRing(BX,BY)}
-  if(BY>100-R){BY=100-R;BVY=-Math.abs(BVY)*(.9+Math.random()*.15);BVX+=(Math.random()-.5)*.3;bounceRing(BX,BY)}
- }
- if(Math.random()<.035){BVX+=(Math.random()-.5)*.22;BVY+=(Math.random()-.5)*.22}
- const sp=Math.hypot(BVX,BVY);if(sp>1.35){BVX*=1.35/sp;BVY*=1.35/sp}
- BANG+=sp*dt*.4;setBall(BX,BY);trailTick();
-}else if(ph==='done'&&AS.winner_idx>=0){
- if(BSTATE!=='done'){
-  BSTATE='done';const a=apAngle(AS.winner_idx,AS.players.length),rad=AS.players.length===1?0:30;
-  const tx=50+Math.cos(a*Math.PI/180)*rad,ty=50+Math.sin(a*Math.PI/180)*rad;
-  const dx=tx-BX,dy=ty-BY,dist=Math.hypot(dx,dy);
-  const mx=BX+dx*.5-dy*.16,my=BY+dy*.5+dx*.16;
-  const dur=Math.max(2400,Math.min(3800,1100+dist*70));
-  BLAND={t0:performance.now(),dur:dur,from:{x:BX,y:BY},ctrl:{x:mx,y:my},to:{x:tx,y:ty}};
-  b.classList.remove('win');b.classList.add('live');b.style.transition='none';
- }
- if(BLAND){const k=Math.min(1,(performance.now()-BLAND.t0)/BLAND.dur);const e=1-Math.pow(1-k,2.7);const u=1-e;BX=u*u*BLAND.from.x+2*u*e*BLAND.ctrl.x+e*e*BLAND.to.x;BY=u*u*BLAND.from.y+2*u*e*BLAND.ctrl.y+e*e*BLAND.to.y;BANG+=dt*(1-k)*0.55;setBall(BX,BY);trailTick();if(k>=1){const ex=BLAND.to.x,ey=BLAND.to.y;BLAND=null;BX=ex;BY=ey;setBall(BX,BY);b.classList.add('win');bounceRing(BX,BY);const sq=$('arenaSquare');if(sq){sq.style.transformOrigin=ex+'% '+ey+'%';sq.classList.add('finish')}}}
-}else{
- if(BSTATE!==ph){BSTATE=ph;BLAND=null;BTRAIL=[];b.classList.remove('win');b.classList.remove('live');b.style.transition='left .45s ease,top .45s ease';hideTrails();const sq=$('arenaSquare');if(sq){sq.classList.remove('finish');sq.style.transformOrigin='50% 50%'};const wn=$('arenaWin');if(wn)wn.classList.remove('show')}
- const t=performance.now()/1000;const rad=ph==='countdown'?9:0;BX=50+Math.cos(t*1.5)*rad;BY=50+Math.sin(t*1.5)*rad;BANG+=dt*.02;setBall(BX,BY);
-}}
-function ballLoop(t){const dt=Math.min(50,t-_bt||16);_bt=t;renderBall(dt);requestAnimationFrame(ballLoop)}requestAnimationFrame(ballLoop);
-function renderArena(){if(!AS)return;const n=AS.players.length,ph=AS.phase;const left=Math.max(0,AS.cd_left-(performance.now()-AT)/1000);$('arenaSquare').classList.toggle('many',n>4);$('arenaSquare').classList.toggle('dense',n>6);$('arenaCount').textContent=n+'/'+AS.max;$('arenaBank').innerHTML=fmt(AS.pool)+' <small>RCOIN</small>';let title=ph==='idle'?'Лобби свободно':ph==='waiting'?'Ожидаем второго игрока':ph==='countdown'?'Старт через '+Math.ceil(left)+' сек.':ph==='rolling'?'Шарик катится по полю…':'Раунд завершён';if(ph==='done'&&AS.winner_idx>=0)title='Победитель: '+AS.players[AS.winner_idx].name;$('arenaStatus').textContent=title;$('arenaHint').textContent=ph==='idle'?(AS.free?'Вход бесплатный. Собери до 10 участников.':'Каждый выбирает свою ставку. Победитель забирает банк минус 10%.'):ph==='waiting'?'Нужен ещё один игрок — затем начнётся отсчёт 15 секунд.':AS.free?'У каждого равные шансы. Победитель получает 25 XP.':'Шанс пропорционален ставке. Победитель забирает '+fmt(AS.prize)+' RCOIN.';$('joinBtn').classList.toggle('hide',AS.you||!['idle','waiting','countdown'].includes(ph));$('addBetBtn').classList.toggle('hide',!(AS.you&&['waiting','countdown'].includes(ph)));$('joinBtn').disabled=!['idle','waiting','countdown'].includes(ph);$('leaveBtn').classList.toggle('hide',!(AS.you&&ph==='waiting'));$('arenaYourBet').textContent=AS.you?(AS.your_bet?fmt(AS.your_bet)+' RCOIN':'бесплатно'):'—';const meP=AS.players.find(p=>p.you);if(meP)arenaColor=meP.color;$('arenaYourColor').textContent=meP?meP.color:'—';document.querySelectorAll('#colorPicks .color-pick').forEach(c=>{const col=c.dataset.color;const used=AS.players.some(p=>p.color===col&&!p.you);c.disabled=!!meP||used;c.classList.toggle('selected',col===arenaColor)});const locked=!['idle','waiting','countdown'].includes(ph);const bi=$('arenaBetInput');if(bi){bi.disabled=locked}document.querySelectorAll('#betRow .chip').forEach(c=>{const v=Number(c.dataset.bet);c.disabled=locked;c.classList.toggle('on',!locked&&v===arenaBet)});const box=$('arenaPlayersBox');box.innerHTML='';AS.players.forEach((p,i)=>{const a=apAngle(i,n),rad=n===1?0:30,x=50+Math.cos(a*Math.PI/180)*rad,y=50+Math.sin(a*Math.PI/180)*rad;const d=document.createElement('div');d.className='arena-player'+(p.you?' you':'')+((ph==='done'&&AS.winner_idx===i)?' win':'');d.style.left=x+'%';d.style.top=y+'%';d.style.setProperty('--c',p.color);const av=document.createElement('div');av.className='ap-ava';const sp=document.createElement('span');if(p.avatar){const im=document.createElement('img');im.src=p.avatar;im.alt='';im.onerror=()=>{im.remove();sp.textContent=(p.name||'?').slice(0,1).toUpperCase()};sp.append(im)}else sp.textContent=(p.name||'?').slice(0,1).toUpperCase();av.append(sp);const b=document.createElement('b');b.textContent=p.name;const sm=document.createElement('small');sm.textContent=(AS.free?'бесплатно':fmt(p.bet)+' RCOIN')+' · '+p.pct+'%';d.append(av,b,sm);box.append(d)});arenaSectors();$('arenaCenter').textContent=ph==='countdown'?String(Math.ceil(left)):ph==='rolling'?'...':'ARENA';const list=$('players');list.innerHTML='';if(!n)list.innerHTML='<p class="muted">Пока никого нет.</p>';AS.players.forEach(p=>{const d=document.createElement('div');d.className='player';const a=document.createElement('div');a.className='avatar';a.style.background=p.color;if(p.avatar){const im=document.createElement('img');im.src=p.avatar;im.alt='';im.style.cssText='width:35px;height:35px;border-radius:50%;object-fit:cover';a.append(im)}else{a.textContent=(p.name||'?').slice(0,1).toUpperCase()}const t=document.createElement('div');t.innerHTML='<b>'+safe(p.name)+'</b><small>'+(AS.free?'бесплатно':fmt(p.bet)+' RCOIN')+' · '+safe(String(p.pct||0))+'% шанс</small>';d.append(a,t);list.append(d)});$('arenaHistory').textContent=AS.history?.length?AS.history.map(x=>x.name+' · '+x.reward).join('  •  '):'Пока нет завершённых раундов';const wn=$('arenaWin');if(wn){if(ph==='done'&&AS.winner_idx>=0){wn.textContent='🏆 '+AS.players[AS.winner_idx].name;wn.classList.add('show')}else wn.classList.remove('show')}arenaFx(ph)}
-async function pollArena(){if(!INIT)return;const j=await api('arena');if(j.ok){AS=j.state;AT=performance.now();renderArena()}arenaTimer=setTimeout(pollArena,AS&&['countdown','rolling'].includes(AS.phase)?450:1300)}function startArena(){if(!arenaTimer)pollArena()}
-function setArenaBet(v,fill){v=Math.max(0,Math.floor(Number(v)||0));arenaBet=v;const inp=$('arenaBetInput');if(inp&&(fill||document.activeElement!==inp))inp.value=v;document.querySelectorAll('#betRow .chip').forEach(c=>c.classList.toggle('on',Number(c.dataset.bet)===v))}
-async function arenaJoin(){let bet=Math.max(1,Math.floor(Number(arenaBet)||0));const j=await api('arena_join',{color:arenaColor,bet,photo_url:arenaAvatar||TU.photo_url||''});if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);haptic();toast('Ты в лобби!')}async function arenaLeave(){const j=await api('arena_leave');if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);toast('Ты покинул лобби')}
-async function arenaAdd(){const extra=Math.max(1,Math.floor(Number(arenaBet)||0));const j=await api('arena_add',{bet:extra});if(!j.ok)return toast(j.err);AS=j.state;AT=performance.now();renderArena();setBalance(j.balance);toast('Ставка увеличена')}
-async function loadArenaGifts(){if(!INIT)return;const box=$('arenaGifts');if(!box)return;const j=await api('nft_state');if(!j.ok){box.innerHTML='<p class="muted">Не удалось загрузить подарки.</p>';return}if(!j.items||!j.items.length){box.innerHTML='<p class="muted">Нет NFT — создай его в коллекции.</p>';return}box.innerHTML='';j.items.forEach(x=>{const d=document.createElement('div');d.className='gift-card';const im=document.createElement('img');im.src=x.url;im.alt=x.name;const lnk=document.createElement('a');lnk.href=x.url;lnk.target='_blank';lnk.rel='noopener';lnk.append(im);const b=document.createElement('b');b.textContent='#'+x.id;const bt=document.createElement('button');bt.className='btn mini '+(arenaAvatar===x.url?'green':'ghost');bt.textContent=arenaAvatar===x.url?'Выбран':'В арену';bt.onclick=()=>setArenaGift(x.url);d.append(lnk,b,bt);box.append(d)})}
-function setArenaGift(url){arenaAvatar=url||'';try{localStorage.setItem('rcoin_arena_avatar',arenaAvatar)}catch(e){}toast(arenaAvatar?'NFT будет аватаром в арене':'Аватар сброшен');loadArenaGifts()}
-function applyLook(){let t='dark',w='gradient';try{t=localStorage.getItem('rcoin_theme')||'dark';w=localStorage.getItem('rcoin_wall')||'gradient'}catch(e){}document.body.classList.remove('theme-blue','theme-purple','theme-green');if(t!=='dark')document.body.classList.add('theme-'+t);document.body.classList.toggle('wall-banner',w==='banner');document.body.classList.toggle('wall-plain',w==='plain');document.querySelectorAll('#themeRow .theme-chip').forEach(b=>b.classList.toggle('on',b.dataset.theme===t));document.querySelectorAll('#wallRow .chip').forEach(b=>b.classList.toggle('on',b.dataset.wall===w))}
-function setTheme(t){try{localStorage.setItem('rcoin_theme',t)}catch(e){}applyLook()}
-function setWall(w){try{localStorage.setItem('rcoin_wall',w)}catch(e){}applyLook()}
-function setAccent(a){try{localStorage.setItem('rcoin_accent',a||'')}catch(e){}applyAccent();toast(a?'Тема: '+a:'Тема: сапфир')}
-function applyAccent(){let a='';try{a=localStorage.getItem('rcoin_accent')||''}catch(e){}
- document.body.classList.remove('acc-ruby','acc-ice','acc-emerald','acc-gold');if(a)document.body.classList.add('acc-'+a);
- document.querySelectorAll('#accRow .chip').forEach(b=>b.classList.toggle('on',(b.dataset.acc||'')===a))}
-/* IT career */
-async function loadCareer(){const j=await api('it_state');if(!j.ok)return;$('jobStage').textContent=j.stage;$('jobLevel').textContent=j.level;$('jobXp').textContent=fmt(j.xp)+' XP';$('jobCoins').textContent=fmt(j.coins);$('jobTasks').textContent=fmt(j.tasks);$('jobCooldown').textContent=j.cooldown>0?'Следующее задание через '+Math.ceil(j.cooldown)+' сек.':'Можно брать новое задание.';$('taskBtn').disabled=j.cooldown>0}
-async function doTask(){const j=await api('it_task');if(!j.ok)return toast(j.err||'Не удалось выполнить задание');toast(j.msg||'Задание завершено');setBalance(j.balance);loadCareer()}
-/* NFT inventory */
-async function loadNft(){const j=await api('nft_state');if(!j.ok)return;const g=$('nftGrid');g.innerHTML='';$('nftCount').textContent=j.items.length+' предметов';if(!j.items.length){g.innerHTML='<p class="muted">Коллекция пока пуста. Создай первый NFT.</p>';return}j.items.forEach(x=>{const d=document.createElement('div');d.className='nft';const im=document.createElement('img');im.src=x.url;im.alt=x.name;const lnk=document.createElement('a');lnk.href=x.url;lnk.target='_blank';lnk.rel='noopener';lnk.append(im);const b=document.createElement('b');b.textContent=x.name+' #'+x.id;if(x.emoji_id){const ic=document.createElement('img');ic.className='ce';ic.src='/emoji/'+x.emoji_id+'.webp';ic.alt='';ic.onerror=()=>ic.remove();b.prepend(ic)}const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity;const acts=document.createElement('div');acts.className='nft-actions';const ab=document.createElement('button');ab.className='btn mini ghost';ab.textContent='В архив';ab.onclick=(e)=>{e.stopPropagation();nftToArchive(x.id)};acts.append(ab);const bb=document.createElement('button');bb.className='btn mini '+(x.in_balance?'red':'ghost');bb.textContent=x.in_balance?'Убрать из баланса':'В баланс';bb.onclick=()=>nftSet(x.id,'balance');const pb=document.createElement('button');pb.className='btn mini '+(x.in_profile?'red':'ghost');pb.textContent=x.in_profile?'Убрать из профиля':'В профиль';pb.onclick=()=>nftSet(x.id,'profile');acts.append(bb,pb);d.append(lnk,b,sm,acts);g.append(d)})}
-async function nftSet(id,target){const j=await api('nft_set',{id,target});if(!j.ok)return toast(j.err||'Не удалось закрепить');toast(j.msg||'Готово');loadNft();loadMe()}
-async function mintNft(){const j=await api('nft_mint');if(!j.ok)return toast(j.err||'Не удалось создать NFT');setBalance(j.balance);toast(j.msg||'NFT создан');loadNft()}
-async function nftToArchive(id){const j=await api('nft_to_archive',{id});if(!j.ok)return toast(j.err||'Не удалось');toast(j.msg||'NFT в архиве');loadNft()}
-async function nftPhoto(inp){const f=inp.files&&inp.files[0];if(!f)return;if(f.size>6*1024*1024)return toast('Фото до 6 МБ');
- const img=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.onerror=()=>r(null);fr.readAsDataURL(f)});
- if(!img)return toast('Не удалось прочитать фото');toast('Готовим NFT…');
- const j=await api('nft_photo',{image:img,name:(TU.first_name||'')});inp.value='';
- if(!j.ok)return toast(j.err||'Не удалось создать NFT');toast('NFT из фото создан');loadNft()}
-/* Live simulated market */
-const cc=$('chart'),cx=cc.getContext('2d');function drawChart(){if(!TS?.series?.length)return;const w=cc.width,h=cc.height,ps=TS.series.map(x=>x.p),lo=Math.min(...ps),hi=Math.max(...ps),rg=hi-lo||1;cx.clearRect(0,0,w,h);const up=ps.at(-1)>=ps[0];const gr=cx.createLinearGradient(0,0,0,h);gr.addColorStop(0,up?'rgba(39,201,130,.28)':'rgba(255,82,104,.28)');gr.addColorStop(1,'rgba(0,0,0,0)');cx.beginPath();ps.forEach((v,i)=>{const x=i/(ps.length-1)*w,y=h-12-(v-lo)/rg*(h-28);i?cx.lineTo(x,y):cx.moveTo(x,y)});cx.lineTo(w,h);cx.lineTo(0,h);cx.closePath();cx.fillStyle=gr;cx.fill();cx.beginPath();ps.forEach((v,i)=>{const x=i/(ps.length-1)*w,y=h-12-(v-lo)/rg*(h-28);i?cx.lineTo(x,y):cx.moveTo(x,y)});cx.strokeStyle=up?'#27c982':'#ff5268';cx.lineWidth=3;cx.stroke()}
-function renderTrade(){if(!TS)return;$('price').textContent=Number(TS.price).toFixed(2);const ch=(TS.price-TS.prev)/TS.prev*100;$('change').textContent=(ch>=0?'+':'')+ch.toFixed(2)+'%';$('change').className=ch>=0?'up':'down';$('holding').textContent=Number(TS.coins||0).toFixed(2);$('value').textContent=fmt(TS.value);$('invested').textContent=fmt(TS.invested);const pl=(TS.value||0)-(TS.invested||0);$('profit').textContent=(pl>=0?'+':'')+fmt(pl);$('profit').className=pl>=0?'up':'down';drawChart()}
-async function loadTrade(){const j=await api('trade_state');if(j.ok){TS=j;renderTrade()}}function startTrade(){if(!tradeTimer){loadTrade();tradeTimer=setInterval(loadTrade,5000)}else loadTrade()}async function buy(){const j=await api('trade_buy',{amount:$('amount').value});if(!j.ok)return toast(j.msg||j.err);TS=j.state;setBalance(j.balance);renderTrade();toast(j.msg||'Покупка выполнена')}async function sell(){const j=await api('trade_sell',{all:true});if(!j.ok)return toast(j.msg||j.err);TS=j.state;setBalance(j.balance);renderTrade();toast(j.msg||'Продажа выполнена')}
-async function loadSnowman(){const j=await api('snowman_state');if(!j.ok)return;$('snowballs').textContent=fmt(j.snowballs);$('snowmen').textContent=fmt(j.snowmen);const box=$('snowTop');box.innerHTML='';if(!j.leaderboard.length){box.textContent='Пока нет участников — начни первым!';return}j.leaderboard.forEach((p,i)=>{const d=document.createElement('div');d.className='snowman-score';const medals=['🥇','🥈','🥉'];const a=document.createElement('b');a.textContent=(medals[i]||('#'+(i+1)))+' '+p.name;const b=document.createElement('span');b.textContent=fmt(p.snowmen)+' ☃️ · '+fmt(p.snowballs)+' ❄️';d.append(a,b);box.append(d)})}
-async function snowCollect(){const j=await api('snowman_collect');if(!j.ok)return toast(j.err||'Не удалось собрать снежки');toast('+'+j.gained+' снежков!');loadSnowman();haptic()}
-async function snowBuild(){const j=await api('snowman_build');if(!j.ok)return toast(j.err||'Не удалось слепить снеговика');toast('Слеплено снеговиков: '+j.built+' ☃️');loadSnowman();haptic()}
-function setArenaColor(c){if(c==='#111111'&&!(ME&&ME.premium)){toast('Чёрный цвет доступен с Premium');return}arenaColor=c;document.querySelectorAll('#colorPicks .color-pick').forEach(x=>x.classList.toggle('selected',x.dataset.color===c));const el=$('arenaYourColor');if(el)el.textContent='выбран'}
-/* ---- MINING (TonCry style) ---- */
-let MINE=null;
-function mineScroll(){const b=$('mineServersBox');if(b)b.scrollIntoView({behavior:'smooth',block:'center'})}
-function mineCheck(){loadMining();toast('Данные обновлены')}
-let mineTimer=null,mineBase=0,mineRate=0,mineTs=0;
-function mineTick(){const add=mineRate*((Date.now()-mineTs)/1000)/86400;const el=$('minePending');if(el)el.textContent=fmt(Math.floor(mineBase+add))}
-async function loadMining(){const j=await api('mining_state');if(!j.ok)return toast(j.err||'Майнинг недоступен');MINE=j;
- mineBase=Number(j.pending)||0;mineRate=Number(j.rate)||0;mineTs=Date.now();
- if(mineTimer)clearInterval(mineTimer);mineTimer=setInterval(mineTick,1000);mineTick();
- $('mineRate').textContent=fmt(j.rate);$('mineBal').textContent=fmt(ME?ME.balance:0);
- const owned=j.servers.filter(s=>s.owned);$('mineServers').textContent=owned.length+' серверов';
- const perHour=Math.floor(j.rate/24),left=j.rate>0?Math.max(0,Math.ceil(((j.cap||j.rate*30)-j.pending)/j.rate*24)):0;
- $('mineEta').textContent='≈ '+fmt(perHour)+' в час · полный сбор через '+(j.rate>0?left+' ч':'—');
- const box=$('mineShop');box.innerHTML='';
- if(!owned.length&&!j.servers.length)box.innerHTML='<p class="muted">Серверов пока нет.</p>';
- j.servers.forEach(s=>{const d=document.createElement('div');d.className='srv'+(s.owned?' owned':'');const ic=document.createElement('div');ic.className='srv-ic';ic.innerHTML=glyph('wheel');const txt=document.createElement('div');const b=document.createElement('b');b.textContent=s.name;const sm=document.createElement('small');sm.textContent=(s.owned?'куплен · осталось '+Math.ceil(s.left/86400)+' дн.':'')+' '+fmt(s.per_day)+'/сутки';txt.append(b,sm);d.append(ic,txt);if(!s.owned){const bt=document.createElement('button');bt.className='srv-buy';bt.textContent=fmt(s.cost);bt.onclick=()=>mineBuy(s.tier);d.append(bt)}box.append(d)})}
-async function mineBuy(tier){const j=await api('mining_buy',{tier});if(!j.ok)return toast(j.err||'Не куплено');setBalance(j.balance);toast(j.msg);loadMining()}
-async function mineCollect(){const j=await api('mining_collect');if(!j.ok)return toast(j.err||'Пока пусто');setBalance(j.balance);toast(j.msg+(j.archived?' · '+fmt(j.archived)+' в Архив':''));loadMining()}
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){const pg=document.getElementById('mining');if(pg&&pg.classList.contains('active'))loadMining()}});
-/* ---- ARCHIVE / UPGRADER (2 вкладки) ---- */
-let AR=null,upgSel=[],upgTarget='',upgMode='gifts',coinMult=2,pickerKind='';
-function upgTab(m){upgMode=m;const coin=m==='coin';
- $('tabGifts').classList.toggle('on',!coin);$('tabCoin').classList.toggle('on',coin);
- $('multRow').classList.toggle('hide',!coin);$('coinBet').classList.toggle('hide',!coin);
- $('uplus').style.opacity=coin?'.25':'1';renderSel()}
-function openPicker(kind){pickerKind=kind;
- $('pickerTitle').textContent=kind==='mine'?'Ваши подарки':'Хочу получить';
- const box=$('upgPick');box.innerHTML='';
- if(kind==='mine'&&!(AR&&AR.items&&AR.items.length))box.innerHTML='<p class="muted">Нет NFT — открой бокс или создай NFT.</p>';
- if(kind==='target'){
-  const opts=[['','Любая редкость'],['common','Обычная'],['uncommon','Необычная'],['rare','Редкая'],['epic','Эпик'],['legendary','Легенда']];
-  opts.forEach(([k,label])=>{const d=document.createElement('div');d.className='nft'+(upgTarget===k?' on':'');const b=document.createElement('b');b.textContent=label;d.append(b);d.onclick=()=>{upgTarget=k;closePicker();renderSel()};box.append(d)});
-  const lots=(AR&&AR.gifts)||[];
-  if(lots.length){const h=document.createElement('div');h.className='muted';h.style.gridColumn='1/-1';h.textContent='Конкретный лот из архива';box.append(h);
-   lots.forEach(x=>{const d=document.createElement('div');d.className='nft'+(upgTarget===('a:'+x.id)?' on':'');const b=document.createElement('b');b.textContent=x.name+' #'+x.id;const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity+(x.price?' · ≈'+fmt(x.price):'');d.append(b,sm);d.onclick=()=>{upgTarget='a:'+x.id;closePicker();renderSel()};box.append(d)})}
- }else{
-  const items=(AR&&AR.items)||[];
-  if(!items.length)box.innerHTML='<p class="muted">Нет NFT — открой бокс или создай NFT.</p>';
-  items.forEach(x=>{const d=document.createElement('div');d.className='nft'+(upgSel.includes(x.id)?' on':'');const im=document.createElement('img');im.src=x.url;im.alt=x.name;im.loading='lazy';const b=document.createElement('b');b.textContent=x.name+' #'+x.id;const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity+' · '+fmt(x.value||0)+' RCOIN';d.append(im,b,sm);d.onclick=()=>{const i=upgSel.indexOf(x.id);if(i>=0)upgSel.splice(i,1);else{if(upgSel.length>=5)return toast('Максимум 5 подарков');upgSel.push(x.id)}d.classList.toggle('on');renderSel()};box.append(d)});
- }
- $('picker').classList.remove('hide')}
-function closePicker(){$('picker').classList.add('hide')}
-function coinPreview(){renderSel()}
-function setCoinMult(m){coinMult=m;document.querySelectorAll('#multRow .uchip').forEach(b=>b.classList.toggle('on',Number(b.dataset.m)===m));renderSel()}
-function renderSel(){
- const table=(AR&&AR.chance)||{};const items=((AR&&AR.items)||[]).filter(x=>upgSel.includes(x.id));
- let ch=0;
- if(upgMode==='coin'){const b0=Math.max(0,Math.floor(Number($('coinBet').value)||0));const t=(AR&&AR.coin_chance)||{'2.0':40,'4.0':20,'8.0':8};const k=Object.keys(t).find(k=>Number(k)===Number(coinMult));ch=b0>=10000?(k?t[k]:0):0}
- else if(items.length){const best=items.reduce((a,b)=>((table[b.rt]||30)>(table[a.rt]||30)?b:a),items[0]);ch=Math.min(88,(table[best.rt]||30)+5*(items.length-1))}
- $('upgChance').textContent=ch+'%';$('upgWheel').style.setProperty('--ch',ch);
- const bet=Math.max(0,Math.floor(Number($('coinBet').value)||0));
- let txt='Добавьте подарок или сумму с баланса',hint='выберите подарок',ready=false;
- if(upgMode==='coin'){if(bet>=10000){txt=fmt(bet)+' × '+coinMult+' = '+fmt(Math.floor(bet*coinMult));hint='шанс '+ch+'%';ready=true}}
- else if(items.length){let tgt='любая';if(upgTarget && upgTarget.startsWith('a:')){const lot=((AR&&AR.gifts)||[]).find(g=>String(g.id)===upgTarget.slice(2));tgt=lot?lot.name:'лот'}else if(upgTarget){tgt=({common:'Обычная',uncommon:'Необычная',rare:'Редкая',epic:'Эпик',legendary:'Легенда'})[upgTarget]||'любая'}
-  txt=items.map(x=>'#'+x.id).join(' · ')+' → '+tgt;hint='шанс '+ch+'%';ready=true}
- $('upgStake').textContent=txt;$('upgBtnHint').textContent=hint;$('upgBtn').classList.toggle('ready',ready);
- $('dialHint').textContent=upgMode==='coin'?'Сумма RCOIN':(items.length?'Готово к улучшению':'Выберите цель')}
-async function loadArchive(){const j=await api('archive_state');if(!j.ok)return toast(j.err||'Архив недоступен');AR=j;
- upgSel=upgSel.filter(id=>j.items.some(x=>x.id===id));
- $('archCount').textContent=j.archive+' NFT';
- const g=$('archGrid');g.innerHTML='';if(!j.gifts.length)g.innerHTML='<p class="muted">Архив пуст — улучшение выплатит коины.</p>';
- j.gifts.forEach(x=>{const d=document.createElement('div');d.className='nft';const b=document.createElement('b');b.textContent=x.name;const sm=document.createElement('small');sm.className='muted';sm.textContent=x.rarity;d.append(b,sm);if(x.price){const pr=document.createElement('div');pr.className='arch-price';pr.textContent='≈ '+fmt(x.price)+' RCOIN';d.append(pr)}g.append(d)});
- if(!document.querySelectorAll('#multRow .uchip.on').length)setCoinMult(2);renderSel()}
-async function upgSpin(){
- if(upgMode==='coin'){
-  const bet=Math.max(0,Math.floor(Number($('coinBet').value)||0));if(bet<10000)return toast('Минимум 10 000');
-  const nd=$('upgNeedle');nd.style.transition='transform 3.2s cubic-bezier(.12,.72,.1,1)';nd.style.transform='rotate('+(1800+Math.floor(Math.random()*360))+'deg)';
-  const j=await api('archive_spin_coins',{bet,mult:coinMult});await new Promise(r=>setTimeout(r,3200));
-  nd.style.transition='none';nd.style.transform='rotate(0deg)';
-  if(!j.ok)return toast(j.err||'Не удалось');
-  if(j.win){toast('Победа! +'+fmt(j.payout)+' RCOIN');confetti(80)}else toast('Провал');
-  setBalance(j.balance);if(AR&&j.pool!=null)AR.pool=j.pool;renderSel();return}
- if(!upgSel.length)return toast('Выберите подарок');
- const nd=$('upgNeedle');nd.style.transition='transform 3.2s cubic-bezier(.12,.72,.1,1)';nd.style.transform='rotate('+(1800+Math.floor(Math.random()*360))+'deg)';
- const j=await api('archive_spin',{ids:upgSel,target:upgTarget});await new Promise(r=>setTimeout(r,3200));
- nd.style.transition='none';nd.style.transform='rotate(0deg)';
- if(!j.ok)return toast(j.err||'Не удалось');
- if(j.win){toast('Победа! '+j.name);confetti(90);$('dialHint').textContent='Победа!'}else{$('dialHint').textContent='Провал'}
- setBalance(j.balance);upgSel=[];loadArchive()}
-function confetti(n=80){const box=document.createElement('div');box.className='confetti';const cols=['#ffd23d','#35d07f','#3d9bff','#ff7ab8','#ffffff'];for(let i=0;i<n;i++){const s=document.createElement('i');s.style.left=(Math.random()*100)+'%';s.style.top='-20px';s.style.background=cols[i%cols.length];s.style.animationDuration=(1.6+Math.random()*1.6)+'s';s.style.animationDelay=(Math.random()*.4)+'s';box.append(s)}document.body.append(box);setTimeout(()=>box.remove(),3800)}
-function arenaFx(ph){if((window._lastPhase||'')!==ph){window._lastPhase=ph;if(ph==='done'&&AS&&AS.winner_idx>=0){confetti(120);$('arenaSquare').classList.add('finish');setTimeout(()=>$('arenaSquare').classList.remove('finish'),2200)}else{$('arenaSquare').classList.remove('finish')}}}
-applyLook();try{arenaAvatar=localStorage.getItem('rcoin_arena_avatar')||''}catch(e){}applyCustomIcons();initBallTrails();premiumize(document.body);_ceObs.observe(document.body,{childList:true,subtree:true,characterData:true});loadMe();go('home');
-</script></body></html>"""
+async function eSpin(){
+  const ch=eChance(); if(!ch) return;
+  const btn=$('upgBtn'); btn.disabled=true; btn.classList.remove('ready');
+  $('upgSub').textContent='Крутим…';
+  const body = {ids:E.sel.slice(), bet:E.bet, target:E.target==='suit' ? '' : E.target, mode:E.mode};
+  if(E.mult!==2 && (E.mode==='nft'||E.mode==='coins')) body.bonus = E.mult;
+  const landed = await eAnimate(ch);
+  const j = await api('archive_spin', body);
+  if(!j.ok){ toast(j.err||'Не удалось'); if(j.balance!=null) setBal(j.balance); eRender(); return; }
+  if(j.balance!=null) setBal(j.balance);
+  if(j.win){
+    confetti(110); haptic();
+    showResult('<div class="pill bl">ПОБЕДА</div>'+(j.url?'<img src="'+safe(j.url)+'" alt="">':'')
+      +'<h3>'+safe(j.name||'Выигрыш')+'</h3><p class="muted" style="margin-top:5px">шанс '+j.chance+' %</p>'
+      +'<button class="btn" style="margin-top:11px" onclick="hideResult()">Забрать</button>');
+  } else {
+    showResult('<div class="pill">ПРОВАЛ</div><div style="display:grid;place-items:center;height:64px;color:#8890aa">'+icon('drop','lg')+'</div>'
+      +'<h3>NFT ушли в архив</h3><p class="muted" style="margin-top:5px">Шанс был '+j.chance+' %</p>'
+      +'<button class="btn ghost" style="margin-top:11px" onclick="hideResult()">Закрыть</button>');
+  }
+  E.sel=[]; NFTS=[]; loadNfts(); loadArchive();
+}
+async function loadArchive(){
+  const j=await api('archive_state'); if(!j.ok) return;
+  AR=j; $('pool').textContent=fmt(j.pool); $('archCount').textContent=fmt(j.archive);
+  const box=$('lots');
+  if(!j.gifts||!j.gifts.length) box.innerHTML='<div class="empty">Архив пуст</div>';
+  else box.innerHTML=j.gifts.slice(0,6).map(x=>'<div class="pitem"><img src="'+safe(x.url)+'" alt="" loading="lazy"><b>'+safe(x.name)+'</b><small>'+safe(x.rarity)+'</small></div>').join('');
+  eRender();
+}
+/* ui */
+function showSheet(h){ $('sheet').innerHTML=h; $('modal').classList.add('show'); }
+function closeModal(){ $('modal').classList.remove('show'); }
+function showResult(h){ $('resultCard').innerHTML=h; $('result').classList.add('show'); }
+function hideResult(){ $('result').classList.remove('show'); }
+function confetti(n=80){
+  const box=document.createElement('div'); box.className='confetti';
+  const cols=['#5b8dff','#8b6cf6','#ffd870','#35d69b','#fff'];
+  for(let i=0;i<n;i++){ const s=document.createElement('i'); s.style.left=(Math.random()*100)+'%'; s.style.top='-20px';
+    s.style.background=cols[i%cols.length]; s.style.animationDuration=(1.5+Math.random()*1.8)+'s'; s.style.animationDelay=(Math.random()*.4)+'s'; box.append(s); }
+  document.body.append(box); setTimeout(()=>box.remove(),4000);
+}
+
+/* ---------------- АРЕНА: кольцевые зоны ---------------- */
+
+function polar(cx, cy, r, deg){ const a = (deg - 90) * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
+function arcPath(cx, cy, r, from, to){
+  const [x0, y0] = polar(cx, cy, r, from), [x1, y1] = polar(cx, cy, r, to);
+  const large = (to - from) > 180 ? 1 : 0;
+  return 'M'+x0.toFixed(2)+' '+y0.toFixed(2)+' A'+r+' '+r+' 0 '+large+' 1 '+x1.toFixed(2)+' '+y1.toFixed(2);
+}
+function arenaZones(){
+  const st = ARA.state; if(!st) return [];
+  if(st.zones && st.zones.length) return st.zones;
+  return (st.players||[]).map((p,i)=>{ const n=(st.players||[]).length||1;
+    return {id:p.id, name:p.name, color:p.color, bet:p.bet, share:p.pct,
+            start:i*360/n, end:(i+1)*360/n}; });
+}
+function drawZones(winId){
+  const g = $('zoneRing'); if(!g) return;
+  const zs = arenaZones(); g.innerHTML = '';
+  const ns = 'http://www.w3.org/2000/svg';
+  zs.forEach(z=>{
+    const from = z.start + 0.8, to = Math.max(from + 0.4, z.end - 0.8);
+    const p = document.createElementNS(ns,'path');
+    p.setAttribute('d', arcPath(200,200,150,from,to));
+    p.setAttribute('stroke', z.color || '#3d9bff');
+    p.setAttribute('stroke-width', 46);
+    p.setAttribute('fill', 'none');
+    p.setAttribute('stroke-linecap','butt');
+    p.setAttribute('class','zone'+(winId!=null && z.id===winId ? ' on':''));
+    p.setAttribute('opacity', winId!=null && z.id!==winId ? '.32' : '1');
+    g.appendChild(p);
+    const mid = (from+to)/2;
+    const [tx,ty] = polar(200,200,150,mid);
+    const t = document.createElementNS(ns,'text');
+    t.setAttribute('x',tx); t.setAttribute('y',ty+4);
+    t.setAttribute('text-anchor','middle'); t.setAttribute('class','lbl');
+    t.setAttribute('fill','#07080d');
+    t.textContent = (z.name||'?').slice(0,8);
+    g.appendChild(t);
+  });
+}
+function ballAt(deg, r){
+  const [x,y] = polar(200,200,r||129,deg);
+  $('arenaBall').setAttribute('cx',x); $('arenaBall').setAttribute('cy',y);
+  $('arenaBallGlow').setAttribute('cx',x); $('arenaBallGlow').setAttribute('cy',y);
+}
+function renderArena(){
+  const st = ARA.state; if(!st) return;
+  const n = (st.players||[]).length;
+  $('arenaBank').textContent = fmt(st.pool||0);
+  const winId = st.winner_idx>=0 && st.players[st.winner_idx] ? st.players[st.winner_idx].id : null;
+  drawZones(winId);
+  const left = st.cd_left||0;
+  const label = st.phase==='idle'?'Лобби свободно': st.phase==='waiting'?'Ждём второго игрока'
+    : st.phase==='countdown'?'Старт через': st.phase==='rolling'?'Шарик едет':'Победитель';
+  const core = document.getElementById('arenaState');
+  if(st.phase==='countdown'){
+    const target = Date.now() + left*1000;
+    if(ARA.cdTarget !== Math.round(target/1000)) ARA.cdTarget = Math.round(target/1000);
+    startCountdown();
+  } else stopCountdown();
+  core.innerHTML = st.phase==='countdown' ? label+' <span class="cd" id="cdNum">'+Math.ceil(left)+'</span>' : label;
+  const list = $('apList');
+  if(!n){ list.innerHTML='<div class="empty">Пока никого нет — пригласи друга</div>'; }
+  else list.innerHTML = (st.players||[]).map((p,i)=>
+    '<div class="ap'+(p.you?' me':'')+((st.phase==='done'&&st.winner_idx===i)?' win':'')+'">'
+    +'<span class="dot" style="background:'+safe(p.color||'#3d9bff')+';color:'+safe(p.color||'#3d9bff')+'"></span>'
+    +'<span class="nm">'+safe(p.name)+(p.you?' <span class="pill bl" style="font-size:8px">ты</span>':'')+'</span>'
+    +'<span class="bet">'+(st.free?'бесплатно':fmt(p.bet)+' RCOIN')+'</span>'
+    +'<span class="pc">'+p.pct+' %</span></div>').join('');
+  const joined = !!st.you, locked = !['idle','waiting','countdown'].includes(st.phase);
+  $('arenaJoinBtn').classList.toggle('hide', joined);
+  $('arenaLeaveBtn').classList.toggle('hide', !joined || locked);
+  $('arenaBetInput').disabled = joined || locked;
+  $('arenaHist').innerHTML = (st.history||[]).length
+    ? st.history.map(h=>'<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.05)">'+safe(h.name)+' · '+safe(h.reward)+'</div>').join('')
+    : 'Пока нет завершённых раундов';
+  if(st.phase==='rolling') arenaBallAnimate();
+  else if(st.phase==='done' && st.winner_idx>=0 && st.players[st.winner_idx]){
+    const z = arenaZones().find(z=>z.id===st.players[st.winner_idx].id);
+    if(z) ballAt((z.start+z.end)/2);
+  } else ballAt(0);
+}
+function arenaBallAnimate(){
+  const st = ARA.state; if(!st) return;
+  const total = (st.roll_total||8) * 1000;
+  const left = Math.max(0, total - (st.roll_elapsed||0)*1000);
+  if(ARA.stage && ARA.stage.phase === 'rolling' && ARA.stage.key !== (st.roll_stop||0)) ARA.stage = null;
+  if(!ARA.stage){
+    const zs = arenaZones();
+    const winP = st.winner_idx>=0 ? zs.find(z=>z.id===st.players[st.winner_idx].id) : null;
+    ARA.stage = {phase:'rolling', key:st.roll_stop||0, t0:performance.now(),
+      dur:left, startDeg:0, endDeg: winP ? (winP.start+winP.end)/2 : 0,
+      wobble: (Math.random()*2-1)*18 };
+  }
+  const s = ARA.stage;
+  const k = Math.min(1, (performance.now()-s.t0)/s.dur);
+  const e = 1 - Math.pow(1-k, 2.4);
+  const jiggle = (1-k) * Math.sin(performance.now()/90) * 1.6;
+  ballAt(720*(1-k)*(1-k) + s.endDeg*e + jiggle);
+  if(k<1) requestAnimationFrame(arenaBallAnimate);
+}
+function startCountdown(){
+  if(ARA.cdTimer) return;
+  ARA.cdEnd = Date.now() + ((ARA.state && ARA.state.cd_left)||0)*1000;
+  ARA.cdTimer = setInterval(()=>{
+    const el = document.getElementById('cdNum');
+    if(!el) return;
+    const k = Math.max(0, Math.ceil((ARA.cdEnd - Date.now())/1000));
+    el.textContent = k;
+  }, 200);
+}
+function stopCountdown(){
+  if(ARA.cdTimer){ clearInterval(ARA.cdTimer); ARA.cdTimer = null; }
+}
+async function pollArena(){
+  if(!INIT && !window.__PREVIEW__) return;
+  const j = await api('arena');
+  if(j.ok){ ARA.state = j.state; renderArena(); if(j.balance!=null && ARA.lastPhase!==j.state.phase){ ARA.lastPhase=j.state.phase; setBal(j.balance); } }
+  ARA.timer = setTimeout(pollArena, ARA.state && ['countdown','rolling'].includes(ARA.state.phase) ? 500 : 1400);
+}
+function arenaStart(){ if(!ARA.timer) pollArena(); }
+function abPreset(v, btn){
+  $('arenaBetInput').value = v;
+  document.querySelectorAll('.btnrow2 button').forEach(b=>b.classList.toggle('on', Number(b.dataset.b)===v));
+}
+async function arenaJoin(){
+  const bet = Math.max(1, num($('arenaBetInput').value));
+  if(bet < 1) return toast('Ставка от 1 RCOIN');
+  const j = await api('arena_join', {bet});
+  if(!j.ok) return toast(j.err||'Не удалось войти');
+  ARA.state = j.state; if(j.balance!=null) setBal(j.balance); renderArena(); haptic(); toast('Ты в лобби');
+}
+async function arenaLeave(){
+  const j = await api('arena_leave');
+  if(!j.ok) return toast(j.err||'Не удалось');
+  ARA.state = j.state; if(j.balance!=null) setBal(j.balance); renderArena(); toast('Ставка возвращена');
+}
+/* ---------------- ТЕМЫ И ОБОИ ---------------- */
+const THEMES = [
+  {key:'default', name:'Сапфир', c1:'#3d7bff', c2:'#8b6cf6', emoji:'◆'},
+  {key:'ruby', name:'Рубин', c1:'#ff5470', c2:'#b3123b', emoji:'◆'},
+  {key:'ice', name:'Лёд', c1:'#7fdcff', c2:'#1f6fa8', emoji:'❄'},
+  {key:'emerald', name:'Изумруд', c1:'#4ce39a', c2:'#12855c', emoji:'◆'},
+  {key:'gold', name:'Золото', c1:'#ffd76a', c2:'#b97d10', emoji:'◆'},
+  {key:'violet', name:'Фиолет', c1:'#b06bff', c2:'#5b21b6', emoji:'◆'}
+];
+function applyTheme(){
+  let key='default', wall='';
+  try{ key = localStorage.getItem('rubin_theme')||'default'; wall = localStorage.getItem('rubin_wall')||''; }catch(e){}
+  const t = THEMES.find(x=>x.key===key) || THEMES[0];
+  document.documentElement.style.setProperty('--bl', t.c1);
+  document.documentElement.style.setProperty('--bl2', t.c2);
+  document.documentElement.style.setProperty('--vio', t.c2);
+  document.body.style.backgroundImage = wall ? 'url("'+wall+'")' : '';
+  if(wall){ document.body.style.backgroundColor='#000'; document.body.style.backgroundSize='cover'; document.body.style.backgroundAttachment='fixed'; }
+  const row = $('themeRow');
+  if(row) row.innerHTML = THEMES.map(x=>'<button class="th '+(x.key===key?'on':'')+'" title="'+x.name
+    +'" data-k="'+x.key+'" style="background:linear-gradient(150deg,'+x.c1+','+x.c2+')" onclick="setTheme2(\''+x.key+'\')"><i>◆</i></button>').join('');
+}
+function setTheme2(k){ try{ localStorage.setItem('rubin_theme', k); }catch(e){} applyTheme(); toast('Тема: '+(THEMES.find(t=>t.key===k)||{}).name); }
+function wallUpload(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  if(f.size > 3*1024*1024) return toast('Файл до 3 МБ');
+  const fr = new FileReader();
+  fr.onload = ()=>{
+    try{ localStorage.setItem('rubin_wall', fr.result); applyTheme(); toast('Обои установлены'); }
+    catch(e){ toast('Не хватило памяти — выбери фото поменьше'); }
+  };
+  fr.readAsDataURL(f); inp.value='';
+}
+function wallReset(){ try{ localStorage.removeItem('rubin_wall'); }catch(e){} applyTheme(); toast('Обои сброшены'); }
+
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeModal(); hideResult(); } });
+eMode('nft');
+applyTheme();
+boot();
+</script>
+</body>
+</html>
+"""
 
 
 async def page(request: web.Request):
@@ -6928,7 +7744,10 @@ async def start_web():
     app.router.add_get("/health", health)
     app.router.add_get("/healthz", health)
     app.router.add_get("/nft/{nid}", nft_asset)
+    app.router.add_get("/archive/{aid}", archive_asset)
     app.router.add_get("/banner", banner_asset)
+    app.router.add_get("/logo", logo_asset)
+    app.router.add_get("/wall", wall_asset)
     app.router.add_get("/fan", mining_fan_asset)
     app.router.add_get("/emoji/{eid}", emoji_asset)
     # Веб-приложение: бесплатная арена со ставками в игровой валюте, карьера и симулятор рынка.
@@ -6940,7 +7759,9 @@ async def start_web():
                    "mining_state": api_mining_state, "mining_buy": api_mining_buy, "mining_collect": api_mining_collect,
                    "archive_state": api_archive_state, "archive_spin": api_archive_spin,
                    "nft_photo": api_nft_photo, "nft_to_archive": api_nft_to_archive,
-                   "archive_spin_coins": api_archive_spin_coins})
+                   "archive_spin_coins": api_archive_spin_coins,
+                   "cases_state": api_cases_state, "case_open": api_case_open,
+                   "nft_upgrade": api_nft_upgrade, "admin_nft_create": api_admin_nft_create})
     for name, fn in routes.items():
         app.router.add_post("/api/" + name, api(fn))
     app.router.add_get("/api/prices", _prices)
@@ -7285,39 +8106,86 @@ def _nft_star_points(cx, cy, outer, inner, points=5, rot=-90):
 
 
 def _nft_tree(d, cx, cy, accent):
-    d.rectangle((cx - 11, cy + 42, cx + 11, cy + 86), fill=(120, 82, 54))
-    d.polygon([(cx, cy - 105), (cx - 88, cy + 32), (cx + 88, cy + 32)], fill=(26, 138, 86))
-    d.polygon([(cx, cy - 55), (cx - 74, cy + 60), (cx + 74, cy + 60)], fill=(32, 166, 102))
-    d.polygon([(cx, cy - 5), (cx - 58, cy + 94), (cx + 58, cy + 94)], fill=(40, 190, 120))
-    d.polygon(_nft_star_points(cx, cy - 118, 22, 9), fill=(255, 225, 120))
-    for yy, ww in ((cy + 8, 38), (cy + 38, 46), (cy + 66, 34)):
-        d.line((cx - ww, yy + 8, cx + ww, yy + 8), fill=(220, 245, 255, 150), width=4)
+    """Ёлка: три пушистых яруса, снег на ветках, гирлянда, звезда."""
+    d.rounded_rectangle((cx - 12, cy + 52, cx + 12, cy + 96), radius=5, fill=(122, 82, 52))
+    layers = [(cy - 118, cy + 42, 96), (cy - 62, cy + 74, 112), (cy + 2, cy + 106, 128)]
+    for top, bot, half in layers:
+        mid = (top + bot) // 2
+        d.polygon([(cx, top), (cx - half, bot), (cx + half, bot)], fill=(22, 118, 74))
+        d.polygon([(cx, top + 8), (cx - int(half * .92), bot - 10), (cx + int(half * .92), bot - 10)],
+                  fill=(30, 152, 98))
+        for k in range(4):
+            x0 = cx - half + 18 + k * (2 * half - 36) // 3
+            d.ellipse((x0 - 9, bot - 20, x0 + 9, bot - 6), fill=(240, 250, 255, 210))
+        d.line((cx - half + 16, mid, cx + half - 16, mid), fill=(255, 196, 96, 150), width=3)
+        for k in range(6):
+            x0 = cx - half + 26 + k * (2 * half - 52) // 5
+            d.ellipse((x0 - 4, mid - 14 - (k % 2) * 8, x0 + 4, mid - 6 - (k % 2) * 8),
+                      fill=(255, 90, 120) if k % 2 else (255, 214, 120))
+    d.polygon(_nft_star_points(cx, cy - 132, 24, 10), fill=(255, 226, 120))
+    d.ellipse((cx - 6, cy - 138, cx + 6, cy - 126), fill=(255, 255, 235, 200))
 
 
 def _nft_gift(d, cx, cy, accent):
-    d.rounded_rectangle((cx - 76, cy - 54, cx + 76, cy + 80), radius=12, fill=(196, 48, 66))
-    d.rectangle((cx - 88, cy - 78, cx + 88, cy - 44), fill=(226, 64, 82))
-    d.rectangle((cx - 15, cy - 78, cx + 15, cy + 80), fill=(255, 210, 92))
-    d.ellipse((cx - 42, cy - 116, cx - 2, cy - 70), fill=(255, 210, 92))
-    d.ellipse((cx + 2, cy - 116, cx + 42, cy - 70), fill=(255, 210, 92))
-    d.ellipse((cx - 16, cy - 102, cx + 16, cy - 70), fill=(226, 64, 82))
-    for yy in (cy - 10, cy + 34):
-        d.line((cx - 58, yy, cx + 58, yy), fill=(255, 240, 200, 90), width=3)
+    """Подарок: коробка с бантом, снежинками и лентой."""
+    d.rounded_rectangle((cx - 80, cy - 52, cx + 80, cy + 86), radius=14, fill=(178, 34, 52))
+    d.rounded_rectangle((cx - 80, cy - 52, cx + 80, cy - 10), radius=14, fill=(206, 46, 66))
+    d.rectangle((cx - 92, cy - 84, cx + 92, cy - 46), fill=(224, 66, 86))
+    d.rectangle((cx - 14, cy - 84, cx + 14, cy + 86), fill=(255, 210, 96))
+    d.ellipse((cx - 50, cy - 128, cx - 2, cy - 74), fill=(255, 210, 96))
+    d.ellipse((cx + 2, cy - 128, cx + 50, cy - 74), fill=(255, 210, 96))
+    d.ellipse((cx - 20, cy - 108, cx + 20, cy - 76), fill=(224, 66, 86))
+    for x0, y0, s in ((cx - 56, cy + 12, 9), (cx + 44, cy + 46, 7), (cx + 56, cy - 24, 6)):
+        for ang in (0, 60, 120):
+            a = math.radians(ang)
+            d.line((x0 - math.cos(a) * s, y0 - math.sin(a) * s, x0 + math.cos(a) * s, y0 + math.sin(a) * s),
+                   fill=(255, 255, 255, 210), width=2)
 
 
 def _nft_snowman(d, cx, cy, accent):
-    d.ellipse((cx - 88, cy - 10, cx + 88, cy + 108), fill=(226, 241, 255))
-    d.ellipse((cx - 62, cy - 82, cx + 62, cy + 16), fill=(238, 249, 255))
-    d.ellipse((cx - 44, cy - 158, cx + 44, cy - 72), fill=(248, 253, 255))
-    d.rectangle((cx - 48, cy - 190, cx + 48, cy - 158), fill=(32, 48, 68))
-    d.rectangle((cx - 64, cy - 160, cx + 64, cy - 146), fill=(43, 63, 88))
-    d.ellipse((cx - 23, cy - 132, cx - 12, cy - 121), fill=(24, 34, 48))
-    d.ellipse((cx + 12, cy - 132, cx + 23, cy - 121), fill=(24, 34, 48))
-    d.polygon([(cx, cy - 114), (cx + 30, cy - 105), (cx, cy - 96)], fill=(255, 150, 60))
-    d.rectangle((cx - 48, cy - 90, cx + 48, cy - 72), fill=(50, 140, 220))
-    d.rectangle((cx - 12, cy - 92, cx + 12, cy - 70), fill=(255, 210, 92))
-    for yy in (cy + 22, cy + 52):
-        d.ellipse((cx - 7, yy - 7, cx + 7, yy + 7), fill=(32, 54, 76))
+    """Снеговик как на референсе: цилиндр с лентой, шарф, ветки-руки, пуговицы."""
+    snow, shade = (246, 251, 255), (206, 224, 240)
+    base = cy + 128          # низ снеговика
+    # руки-ветки
+    for sx in (-1, 1):
+        x0 = cx + sx * 92
+        d.line((x0, base - 96, x0 + sx * 60, base - 128), fill=(122, 88, 58), width=8)
+        d.line((x0 + sx * 26, base - 110, x0 + sx * 44, base - 146), fill=(122, 88, 58), width=6)
+        d.line((x0 + sx * 46, base - 120, x0 + sx * 74, base - 104), fill=(122, 88, 58), width=6)
+    # тело: два шара с бликом слева и тенью справа
+    layers = ((cx - 104, base - 132, cx + 104, base, 0), (cx - 72, base - 226, cx + 72, base - 112, 1),
+              (cx - 54, base - 328, cx + 54, base - 218, 2))
+    for x0, y0, x1, y1, _ in layers:
+        d.ellipse((x0, y0, x1, y1), fill=snow)
+        w2 = (x1 - x0) // 2
+        d.ellipse((cx + int(w2 * .18), y0 + 8, x1, y1), fill=shade)
+        d.ellipse((x0, y0, cx + int(w2 * .3), y1), fill=snow)
+    hy = base - 276          # центр головы по Y
+    # лицо: глаза, нос-морковка, рот
+    for dx in (-19, 19):
+        d.ellipse((cx + dx - 9, hy - 18, cx + dx + 9, hy), fill=(28, 32, 44))
+        d.ellipse((cx + dx - 6, hy - 15, cx + dx - 1, hy - 9), fill=(255, 255, 255, 220))
+    d.polygon([(cx - 4, hy + 6), (cx + 44, hy + 16), (cx - 4, hy + 26)], fill=(242, 148, 58))
+    for dx in (-7, 3, 13):
+        d.ellipse((cx + dx - 3, hy + 40, cx + dx + 3, hy + 46), fill=(58, 62, 76))
+    # шарф
+    d.rounded_rectangle((cx - 58, base - 228, cx + 58, base - 188), radius=12, fill=(200, 48, 60))
+    for k in range(5):
+        x0 = cx - 50 + k * 25
+        d.rectangle((x0, base - 228, x0 + 12, base - 216), fill=(238, 238, 246))
+    d.polygon([(cx + 14, base - 216), (cx + 50, base - 164), (cx + 20, base - 158)], fill=(178, 38, 52))
+    # цилиндр
+    d.rectangle((cx - 46, base - 404, cx + 46, base - 332), fill=(34, 38, 50))
+    d.rectangle((cx - 46, base - 368, cx + 46, base - 352), fill=(190, 44, 58))
+    d.rounded_rectangle((cx - 68, base - 344, cx + 68, base - 320), radius=10, fill=(44, 48, 62))
+    # пуговицы
+    for yy in (base - 96, base - 62, base - 28):
+        d.ellipse((cx - 8, yy - 8, cx + 8, yy + 8), fill=(40, 46, 60))
+    # снежок на плечах
+    for k in range(9):
+        x0 = cx - 94 + k * 24
+        d.ellipse((x0 - 5, base - 140 + (k % 3) * 3, x0 + 7, base - 126 + (k % 3) * 3),
+                  fill=(255, 255, 255, 230))
 
 
 def _nft_snowflake(d, cx, cy, accent):
@@ -7472,6 +8340,26 @@ def _nft_cat(d, cx, cy, accent):
         d.ellipse((x - 3, cy - 70 + (i % 2) * 5, x + 3, cy - 64 + (i % 2) * 5), fill=(255, 205, 90))
 
 
+def _nft_capy(d, cx, cy, accent):
+    """Капибара: округлое тело, квадратная морда, маленькие уши и спокойный взгляд."""
+    fur = (158, 118, 80, 255)
+    dark = (124, 88, 58, 255)
+    d.ellipse((cx - 118, cy - 40, cx + 118, cy + 132), fill=fur)
+    d.ellipse((cx - 86, cy - 120, cx + 86, cy + 46), fill=fur)
+    for dx in (-58, 58):
+        d.ellipse((cx + dx - 17, cy - 136, cx + dx + 17, cy - 102), fill=dark)
+    d.ellipse((cx - 62, cy - 30, cx + 62, cy + 60), fill=(182, 142, 102, 255))
+    d.ellipse((cx - 18, cy + 8, cx + 18, cy + 44), fill=(48, 32, 26, 255))
+    for dx in (-38, 38):
+        d.ellipse((cx + dx - 12, cy - 66, cx + dx + 12, cy - 42), fill=(28, 22, 20, 255))
+        d.ellipse((cx + dx - 4, cy - 62, cx + dx + 2, cy - 54), fill=(255, 255, 255, 220))
+    d.arc((cx - 24, cy + 30, cx + 24, cy + 62), 15, 165, fill=(48, 32, 26, 255), width=5)
+    d.ellipse((cx - 116, cy + 112, cx - 46, cy + 146), fill=dark)
+    d.ellipse((cx + 46, cy + 112, cx + 116, cy + 146), fill=dark)
+    d.ellipse((cx - 126, cy + 26, cx - 92, cy + 92), fill=dark)
+    d.ellipse((cx + 92, cy + 26, cx + 126, cy + 92), fill=dark)
+
+
 def _nft_mammoth(d, cx, cy, accent):
     d.ellipse((cx - 112, cy - 42, cx + 78, cy + 104), fill=(150, 98, 62))
     d.ellipse((cx - 82, cy - 96, cx + 26, cy + 12), fill=(170, 112, 72))
@@ -7580,6 +8468,8 @@ def _nft_kind(photo: str, title: str) -> str:
     t = str(title or "").lower()
     rules = [
         (("роликс",), "rollix"),
+        (("капибар", "capy", "капик"), "capy"),
+        (("gta", "вайс", "vice city"), "gta"),
         (("мамонт", "слон"), "mammoth"),
         (("кот", "котик", "кошка", "cat"), "cat"),
         (("снегов", "снеговик"), "snowman"),
@@ -7864,7 +8754,7 @@ def _nft_top_pills(im, seed: int):
 
 
 def _nft_bottom_labels(im, title: str, rarity: str, model: str, accent, big: bool = False,
-                       background: str = ""):
+                       background: str = "", level: int = 1):
     w, h = im.size
     d = ImageDraw.Draw(im, "RGBA")
     f1 = _nft_font(True, 34 if big else 27)
@@ -7872,7 +8762,11 @@ def _nft_bottom_labels(im, title: str, rarity: str, model: str, accent, big: boo
     name = (title or "NFT").upper()[:26]
     d.text((38, h - 82), name, font=f1, fill=(255, 255, 255, 235))
     pct_m = next((int(round(w)) for nm, _, w in MODELS if nm == model), 0)
-    sub = f"{RARITY_NAME.get(str(rarity), str(rarity).title())} · {model or 'Стандартный'}" + (f" {pct_m}%" if pct_m else "")
+    if int(level or 1) <= 1:
+        sub = f"{model or 'Стандартный'} · без редкости"
+    else:
+        sub = f"{RARITY_NAME.get(str(rarity), str(rarity).title())} · {model or 'Стандартный'}"
+    sub += f" {pct_m}%" if pct_m else ""
     if background:
         pct_b = next((int(round(w)) for nm, _, w in BGS if nm == background), 0)
         if pct_b:
@@ -7960,20 +8854,25 @@ def _nft_capy_card(seed: int, title: str, rarity: str, model: str = "") -> bytes
             d.ellipse((gx - 7, gy - 3, gx + 7, gy + 11), fill=(206, 190, 160, 80))
     d.ellipse((w // 2 - 210, h - 150, w // 2 + 210, h - 100), fill=(196, 176, 146, 110))
     cx, cy = w // 2, h // 2 + 30
-    fur = (150, 112, 76, 255)
-    dark = (120, 86, 56, 255)
-    d.ellipse((cx - 170, cy - 90, cx + 170, cy + 150), fill=fur)
-    d.ellipse((cx - 150, cy - 170, cx + 150, cy + 60), fill=fur)
-    for dx in (-96, 96):
-        d.ellipse((cx + dx - 30, cy - 186, cx + dx + 30, cy - 126), fill=dark)
-    for dx in (-64, 64):
-        d.ellipse((cx + dx - 20, cy - 92, cx + dx + 20, cy - 52), fill=(30, 22, 18, 255))
-        d.ellipse((cx + dx - 8, cy - 86, cx + dx + 2, cy - 74), fill=(255, 255, 255, 230))
-    d.ellipse((cx - 54, cy - 24, cx + 54, cy + 34), fill=(178, 138, 100, 255))
-    d.ellipse((cx - 16, cy - 2, cx + 16, cy + 20), fill=(52, 34, 28, 255))
-    d.arc((cx - 26, cy + 6, cx + 26, cy + 40), 20, 160, fill=(52, 34, 28, 255), width=5)
-    d.ellipse((cx - 120, cy + 130, cx - 30, cy + 168), fill=dark)
-    d.ellipse((cx + 30, cy + 130, cx + 120, cy + 168), fill=dark)
+    fur = (162, 122, 86, 255)
+    dark = (132, 96, 64, 255)
+    # тело и голова капибары: тяжёлая нижняя часть и прямоугольная морда
+    d.ellipse((cx - 196, cy - 30, cx + 196, cy + 158), fill=fur)
+    d.rounded_rectangle((cx - 142, cy - 202, cx + 142, cy + 34), radius=68, fill=fur)
+    for dx in (-104, 104):
+        d.ellipse((cx + dx - 26, cy - 214, cx + dx + 26, cy - 158), fill=dark)
+    d.rounded_rectangle((cx - 78, cy - 78, cx + 78, cy + 40), radius=34, fill=(184, 144, 106, 255))
+    for dx in (-22, 22):
+        d.ellipse((cx + dx - 8, cy - 14, cx + dx + 8, cy + 4), fill=(52, 34, 28, 255))
+    d.arc((cx - 30, cy + 8, cx + 30, cy + 44), 15, 165, fill=(52, 34, 28, 255), width=5)
+    for dx in (-76, 76):
+        d.ellipse((cx + dx - 17, cy - 122, cx + dx + 17, cy - 88), fill=(28, 22, 18, 255))
+        d.ellipse((cx + dx - 5, cy - 116, cx + dx + 3, cy - 106), fill=(255, 255, 255, 225))
+    # листик на голове
+    d.ellipse((cx + 54, cy - 244, cx + 92, cy - 218), fill=(96, 170, 104, 255))
+    d.line((cx + 70, cy - 224, cx + 96, cy - 246), fill=(60, 132, 76, 255), width=4)
+    d.ellipse((cx - 170, cy + 132, cx - 46, cy + 170), fill=dark)
+    d.ellipse((cx + 46, cy + 132, cx + 170, cy + 170), fill=dark)
     d.text((34, h - 34), (model or "Стандартный")[:24], font=_nft_font(False, 24),
            fill=(120, 104, 84, 210), anchor="lb")
     d.text((w - 34, h - 34), f"#{seed}", font=_nft_font(False, 26), fill=(120, 104, 84, 220), anchor="rb")
@@ -8077,6 +8976,111 @@ def _nft_vice_card(seed: int, title: str, rarity: str, model: str = "") -> bytes
     return out.getvalue()
 
 
+GTA_LOGO_ASSET = Path(__file__).with_name("gta6_logo.jpg")
+_GTA_LOGO_CACHE = None
+
+
+def _gta_logo():
+    """Логотип GTA 6 без белого фона по краям (внутренний белый остаётся)."""
+    global _GTA_LOGO_CACHE
+    if _GTA_LOGO_CACHE is not None:
+        return _GTA_LOGO_CACHE or None
+    try:
+        from collections import deque
+        im = Image.open(GTA_LOGO_ASSET).convert("RGBA")
+        w, h = im.size
+        px = im.load()
+        seen = bytearray(w * h)
+        qq = deque()
+
+        def white(x, y):
+            r, g, b, a = px[x, y]
+            return a > 0 and min(r, g, b) > 224 and max(r, g, b) - min(r, g, b) < 26
+
+        for x in range(w):
+            for y in (0, h - 1):
+                if not seen[y * w + x] and white(x, y):
+                    seen[y * w + x] = 1
+                    qq.append((x, y))
+        for y in range(h):
+            for x in (0, w - 1):
+                if not seen[y * w + x] and white(x, y):
+                    seen[y * w + x] = 1
+                    qq.append((x, y))
+        while qq:
+            x, y = qq.popleft()
+            px[x, y] = (255, 255, 255, 0)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h and not seen[ny * w + nx] and white(nx, ny):
+                    seen[ny * w + nx] = 1
+                    qq.append((nx, ny))
+        box = im.getbbox()
+        if box:
+            im = im.crop(box)
+        im.thumbnail((560, 560), Image.LANCZOS)
+        _GTA_LOGO_CACHE = im
+    except Exception:
+        log.exception("gta logo")
+        _GTA_LOGO_CACHE = False
+    return _GTA_LOGO_CACHE or None
+
+
+def _nft_gta_card(seed: int, title: str, rarity: str, model: str = "") -> bytes:
+    """GTA 6: закат Vice City, пальмы, неоновая сетка и официальный знак VI."""
+    w, h = 1200, 780
+    im = Image.new("RGB", (w, h), (24, 8, 40))
+    d = ImageDraw.Draw(im)
+    top, mid, bot = (38, 8, 64), (188, 38, 120), (255, 158, 82)
+    for y in range(h):
+        k = y / h
+        if k < 0.56:
+            t = k / 0.56
+            col = tuple(int(top[i] + (mid[i] - top[i]) * t) for i in range(3))
+        else:
+            t = (k - 0.56) / 0.44
+            col = tuple(int(mid[i] + (bot[i] - mid[i]) * t) for i in range(3))
+        d.line((0, y, w, y), fill=col)
+    cx, cy, r = w // 2, int(h * 0.42), 230
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(255, 218, 145))
+    for i in range(8):
+        yy = cy + 12 + i * 27
+        d.rectangle((cx - r, yy, cx + r, yy + 11), fill=(255, 132, 96))
+    for px, flip in ((110, 1), (w - 110, -1)):
+        d.line((px, h - 30, px + 22 * flip, h - 270), fill=(30, 8, 38), width=15)
+        lx, ly = px + 22 * flip, h - 270
+        for dx, dy in ((-76, -36), (-50, -76), (0, -92), (50, -76), (76, -36)):
+            d.line((lx, ly, lx + dx * flip, ly + dy), fill=(22, 6, 30), width=17)
+            d.ellipse((lx + dx * flip - 28, ly + dy - 17, lx + dx * flip + 28, ly + dy + 17),
+                      fill=(22, 6, 30))
+    d.line((0, h - 120, w, h - 120), fill=(255, 84, 202), width=4)
+    for i in range(0, w + 1, 120):
+        d.line((w // 2, h - 120, i, h), fill=(255, 120, 214), width=2)
+    for i in range(1, 5):
+        yy = h - 120 + int(120 * (i / 5) ** 1.6)
+        d.line((0, yy, w, yy), fill=(255, 120, 214), width=2)
+    logo = _gta_logo()
+    if logo is not None:
+        glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        halo = Image.new("RGBA", logo.size, (255, 120, 220, 255))
+        halo.putalpha(logo.split()[3].filter(ImageFilter.GaussianBlur(26)).point(lambda v: int(v * .85)))
+        glow.alpha_composite(halo, ((w - logo.width) // 2, (h - logo.height) // 2 - 16))
+        im = Image.alpha_composite(im.convert("RGBA"), glow)
+        im.alpha_composite(logo, ((w - logo.width) // 2, (h - logo.height) // 2 - 16))
+        d = ImageDraw.Draw(im, "RGBA")
+    else:
+        f = _nft_font(True, 300)
+        txt = "VI"
+        tw = d.textlength(txt, font=f)
+        d.text(((w - tw) / 2, h * 0.16), txt, font=f, fill=(255, 255, 255))
+    d.text((34, h - 34), (model or "Vice City")[:24], font=_nft_font(False, 24),
+           fill=(255, 244, 250, 235), anchor="lb")
+    d.text((w - 34, h - 34), f"#{seed}", font=_nft_font(False, 26), fill=(255, 244, 250, 240), anchor="rb")
+    out = io.BytesIO()
+    im.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
 def _nft_penguin_card(seed: int, title: str, rarity: str, model: str = "") -> bytes:
     """Пингвин с ножом — рисуется кодом, без внешних файлов."""
     w, h = 1200, 780
@@ -8173,10 +9177,18 @@ def _nft_character_card(seed: int, title: str, photo: str, model: str,
             return _nft_snow_card(seed, title, rarity, model)
         return _nft_penguin_card(seed, title, rarity, model)
     w, h = 1280, 720
-    accent = NFT_MODEL_ACCENT.get(str(model), NFT_RARITY_COLOR.get(str(rarity), (200, 190, 255)))
-    im = _nft_premium_bg(w, h, accent, rarity, seed)
+    v = nft_variant(seed)
+    accent = NFT_MODEL_ACCENT.get(str(model), v["accent"])
+    im = _nft_gradient(w, h, v["top"], v["mid"]).convert("RGBA")
+    ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    do = ImageDraw.Draw(ov, "RGBA")
+    for rr, aa in ((520, 12), (400, 16), (300, 22), (200, 30)):
+        do.ellipse((w // 2 - rr, h // 2 - rr, w // 2 + rr, h // 2 + rr), fill=accent + (aa,))
+    rnd = random.Random(seed * 7919 + 3)
+    _nft_bg_decor(do, v["background"], rnd, w, h, accent)
+    im = Image.alpha_composite(im, ov)
     d = ImageDraw.Draw(im, "RGBA")
-    d.ellipse((w // 2 - 330, h - 190, w // 2 + 330, h + 60), fill=(0, 0, 0, 95))
+    d.ellipse((w // 2 - 330, h - 180, w // 2 + 330, h + 60), fill=(0, 0, 0, 90))
     d.ellipse((w // 2 - 250, h - 170, w // 2 + 250, h - 40), fill=accent + (18,))
 
     small = Image.new("RGBA", (420, 420), (0, 0, 0, 0))
@@ -8188,7 +9200,7 @@ def _nft_character_card(seed: int, title: str, photo: str, model: str,
         "snowflake": _nft_snowflake, "santa": _nft_santa, "planet": _nft_planet,
         "robot": _nft_robot, "bear": _nft_bear, "penguin": _nft_penguin,
         "crown": _nft_crown, "cocktail": _nft_cocktail, "blob": _nft_blob,
-        "cat": _nft_cat, "mammoth": _nft_mammoth, "orange": _nft_orange,
+        "cat": _nft_cat, "capy": _nft_capy, "mammoth": _nft_mammoth, "orange": _nft_orange,
         "sock": _nft_sock, "dumpling": _nft_dumpling, "bubble": _nft_bubble,
         "salad": _nft_salad, "dragon": _nft_dragon, "unicorn": _nft_unicorn,
         "deer": _nft_deer, "rollix": _nft_rollix,
@@ -8243,30 +9255,195 @@ def _nft_character_card(seed: int, title: str, photo: str, model: str,
                    rnd.randint(2, 7), (255, 246, 220), rnd.randint(40, 130))
 
     _nft_top_pills(im, seed)
-    _nft_bottom_labels(im, title, rarity, model, accent, background=background)
+    _nft_bottom_labels(im, title, rarity, model, accent, background=background, level=level)
     _nft_frame(im, rarity)
     out = io.BytesIO()
     im.convert("RGB").save(out, format="PNG", optimize=True)
     return out.getvalue()
 
 
-def _nft_blank_card(seed: int, title: str, rarity: str, level: int) -> bytes:
-    """Белая карточка для неулучшенного NFT: фото ещё нет."""
+NFT_MODEL_PALETTE = {
+    "Стандартный": ((24, 26, 38), (52, 58, 84), (196, 206, 232)),
+    "Зимний": ((8, 20, 38), (22, 64, 96), (168, 232, 255)),
+    "Снежный": ((14, 18, 34), (56, 84, 120), (236, 248, 255)),
+    "Золотой": ((26, 16, 8), (92, 62, 18), (255, 214, 120)),
+    "Неоновый": ((18, 6, 30), (86, 18, 96), (255, 120, 232)),
+    "Призрачный": ((16, 14, 30), (58, 48, 92), (206, 192, 255)),
+    "Космический": ((8, 6, 26), (48, 16, 88), (255, 140, 230)),
+}
+
+# Палитры уникальны для каждого NFT: выбираются детерминированно по номеру,
+# поэтому карточка на сервере и картинка в вебке всегда совпадают.
+NFT_BG_PALETTES = {
+    "Обычный": ((28, 20, 52), (86, 48, 140), (232, 200, 255)),
+    "Морозный": ((6, 16, 34), (18, 62, 88), (140, 232, 255)),
+    "Праздничный": ((34, 8, 22), (104, 20, 48), (255, 176, 96)),
+    "Звёздный": ((10, 8, 34), (46, 22, 92), (196, 160, 255)),
+    "Северное сияние": ((3, 22, 26), (6, 76, 72), (84, 255, 190)),
+    "Галактика": ((14, 4, 34), (60, 10, 100), (255, 116, 224)),
+}
+
+ARCHETYPES = ["tree", "gift", "snowman", "snowflake", "santa", "planet", "robot", "bear",
+              "penguin", "crown", "cocktail", "blob", "cat", "capy", "mammoth", "orange",
+              "sock", "dumpling", "bubble", "salad", "dragon", "unicorn", "deer"]
+
+VARIANT_SEEDS = [
+    "Ледяная", "Неоновая", "Золотая", "Полярная", "Мятная", "Закатная", "Хромовая",
+    "Лиловая", "Аметистовая", "Лазурная", "Пепельная", "Радужная", "Космическая",
+    "Кибер", "Ретро", "Голографическая", "Изумрудная", "Медная", "Жемчужная", "Огненная",
+]
+
+
+def nft_variant(seed: int) -> dict:
+    """Фон, модель и декоративные детали по номеру NFT — стабильно между перерисовками."""
+    rnd = random.Random(int(seed) * 7919 + 41)
+    palette = rnd.choice(list(NFT_BG_PALETTES.values()))
+    model = rnd.choice([m[0] for m in MODELS])
+    bg = rnd.choice([b[0] for b in BGS])
+    named = [(n, p) for n, p in NFT_BG_PALETTES.items() if p == palette]
+    return {"top": palette[0], "mid": palette[1], "accent": palette[2],
+            "model": model, "background": bg,
+            "palette_name": named[0][0] if named else "Обычный",
+            "archetype": rnd.choice(ARCHETYPES),
+            "variant": rnd.choice(VARIANT_SEEDS),
+            "hue": rnd.randint(-26, 26),
+            "ornament": rnd.choice(("stars", "snow", "bokeh", "grid", "rays"))}
+
+
+def _nft_unique_scene(seed: int, title: str, model: str, background: str, rarity: str,
+                      level: int, archetype: str = "", variant: str = "") -> bytes:
+    """Уникальная карточка NFT: своя палитра, своя архетип-фигура и свой орнамент."""
     w, h = 1280, 720
-    accent = NFT_RARITY_COLOR.get(rarity, (200, 190, 255))
-    im = Image.new("RGBA", (w, h), (249, 250, 253, 255))
+    v = nft_variant(seed)
+    if model:
+        top, mid, accent = NFT_MODEL_PALETTE.get(str(model), (v["top"], v["mid"], v["accent"]))
+    else:
+        top, mid, accent = v["top"], v["mid"], v["accent"]
+    rnd = random.Random(int(seed) * 104729 + 7)
+    im = _nft_gradient(w, h, top, mid).convert("RGBA")
+    ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov, "RGBA")
+    for _ in range(5):
+        rr = rnd.randint(180, 430)
+        cx = rnd.randint(0, w)
+        cy = rnd.randint(0, h)
+        d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=accent + (rnd.randint(8, 20),))
+    orn = v["ornament"]
+    if orn == "stars":
+        for _ in range(46):
+            x, y = rnd.randrange(w), rnd.randrange(h)
+            rr = rnd.randint(2, 8)
+            d.polygon(_nft_star_points(x, y, rr, max(1, rr * .34), 4, rnd.randint(0, 90)),
+                      fill=(255, 246, 224, rnd.randint(50, 165)))
+    elif orn == "snow":
+        for _ in range(38):
+            x, y = rnd.randrange(w), rnd.randrange(h)
+            rr = rnd.randint(3, 9)
+            for ang in (0, 60, 120):
+                a = math.radians(ang)
+                d.line((x - math.cos(a) * rr, y - math.sin(a) * rr,
+                        x + math.cos(a) * rr, y + math.sin(a) * rr),
+                       fill=(230, 248, 255, rnd.randint(35, 90)), width=1)
+    elif orn == "bokeh":
+        for _ in range(26):
+            x, y = rnd.randrange(w), rnd.randrange(h)
+            rr = rnd.randint(10, 52)
+            d.ellipse((x - rr, y - rr, x + rr, y + rr), outline=(255, 255, 255, rnd.randint(16, 42)), width=2)
+    elif orn == "grid":
+        for x in range(0, w, 64):
+            d.line((x, 0, x, h), fill=(255, 255, 255, 8), width=1)
+        for y in range(0, h, 64):
+            d.line((0, y, w, y), fill=(255, 255, 255, 8), width=1)
+    else:
+        for ang in range(0, 360, 18):
+            a = math.radians(ang)
+            d.line((w // 2, h // 2, w // 2 + math.cos(a) * 720, h // 2 + math.sin(a) * 720),
+                   fill=accent + (10,), width=26)
+    d.polygon([(0, h), (int(w * .38), 0), (int(w * .56), 0), (int(w * .16), h)],
+              fill=(255, 255, 255, 7))
+    im = Image.alpha_composite(im, ov)
     d = ImageDraw.Draw(im, "RGBA")
-    for y in range(h):
-        k = y / h
-        d.line((0, y, w, y), fill=(int(250 - 8 * k), int(251 - 8 * k), int(254 - 6 * k), 255))
-    d.rounded_rectangle((w // 2 - 210, 170, w // 2 + 210, 520), 44, outline=(206, 210, 222, 255), width=4)
-    d.ellipse((w // 2 - 58, 250, w // 2 + 58, 366), outline=(178, 186, 204, 255), width=7)
-    d.arc((w // 2 - 26, 292, w // 2 + 26, 344), 200, 340, fill=(178, 186, 204, 255), width=7)
-    d.text((w // 2, 420), "НЕ УЛУЧШЕН", font=_nft_font(True, 44), fill=(118, 128, 148, 255), anchor="mm")
-    d.text((w // 2, 470), "Улучши NFT, чтобы открыть арт", font=_nft_font(False, 24),
-           fill=(152, 160, 178, 255), anchor="mm")
+
+    # Фигуру рисуем в поле 1200x980 и вписываем целиком: фигуры разные по высоте,
+    # иначе цилиндр снеговика обрезается краем карточки.
+    fig = Image.new("RGBA", (1200, 980), (0, 0, 0, 0))
+    fd = ImageDraw.Draw(fig, "RGBA")
+    fx, fy = 600, 730
+    fd.ellipse((fx - 330, fy - 26, fx + 330, fy + 34), fill=(0, 0, 0, 78))
+    if not archetype:
+        archetype = _nft_kind("", title)
+        if archetype == "blob":
+            archetype = v["archetype"]
+    figures = {
+        "tree": _nft_tree, "gift": _nft_gift, "snowman": _nft_snowman, "snowflake": _nft_snowflake,
+        "santa": _nft_santa, "planet": _nft_planet, "robot": _nft_robot, "bear": _nft_bear,
+        "penguin": _nft_penguin, "crown": _nft_crown, "cocktail": _nft_cocktail, "blob": _nft_blob,
+        "cat": _nft_cat, "capy": _nft_capy, "mammoth": _nft_mammoth, "orange": _nft_orange,
+        "sock": _nft_sock, "dumpling": _nft_dumpling, "bubble": _nft_bubble, "salad": _nft_salad,
+        "dragon": _nft_dragon, "unicorn": _nft_unicorn, "deer": _nft_deer,
+    }
+    figures.get(archetype, _nft_blob)(fd, fx, fy, accent)
+    if archetype in ("blob", "bear", "cat", "capy", "penguin", "robot", "unicorn", "dragon", "deer"):
+        _nft_accessory(fd, str(model or v["model"]), seed, fx, fy - 420, accent)
+    box = fig.getbbox()
+    fig = fig.crop(box) if box else fig
+    scale = min(700 / max(1, fig.width), 600 / max(1, fig.height))
+    fig = fig.resize((max(1, int(fig.width * scale)), max(1, int(fig.height * scale))), Image.LANCZOS)
+    char = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    char.alpha_composite(fig, ((w - fig.width) // 2, int(h * .52) - fig.height // 2 + 40))
+
+    alpha0 = char.split()[3]
+    glow = Image.new("RGBA", (w, h), accent + (255,))
+    glow.putalpha(alpha0.filter(ImageFilter.GaussianBlur(26)).point(lambda v: int(v * .42)))
+    im = Image.alpha_composite(im, glow)
+    im.alpha_composite(char, (0, 0))
+
+    d = ImageDraw.Draw(im, "RGBA")
     _nft_top_pills(im, seed)
-    _nft_bottom_labels(im, title, rarity, "Ожидает улучшения", accent)
+    label_model = f"{model or v['model']} · {variant or v['variant']}"
+    _nft_bottom_labels(im, title, rarity, label_model, accent, level=level, background=background)
+    _nft_frame(im, rarity)
+    out = io.BytesIO()
+    im.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def _nft_blank_card(seed: int, title: str, rarity: str, level: int, model: str = "",
+                    background: str = "") -> bytes:
+    """Базовая карточка: палитра модели, крупный знак редкости и номер. Без белого фона."""
+    w, h = 1280, 720
+    top, mid, accent = NFT_MODEL_PALETTE.get(str(model), NFT_MODEL_PALETTE["Стандартный"])
+    rnd = random.Random(seed * 7919 + 13)
+    im = _nft_gradient(w, h, top, mid).convert("RGBA")
+    ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov, "RGBA")
+    for rr, aa in ((470, 14), (360, 20), (260, 30), (170, 44)):
+        d.ellipse((w // 2 - rr, h // 2 - int(rr * .74), w // 2 + rr, h // 2 + int(rr * .74)),
+                  fill=accent + (aa,))
+    for _ in range(40):
+        x, y = rnd.randrange(w), rnd.randrange(h)
+        rr = rnd.choice((1, 1, 2, 3))
+        d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=(255, 250, 240, rnd.randint(25, 110)))
+    if background:
+        _nft_bg_decor(d, background, rnd, w, h, accent)
+    d.polygon([(0, h), (int(w * .38), 0), (int(w * .56), 0), (int(w * .16), h)],
+              fill=(255, 255, 255, 7))
+    im = Image.alpha_composite(im, ov)
+    d = ImageDraw.Draw(im, "RGBA")
+    # центральный знак: ромб модели и стеклянная плашка
+    cx, cy = w // 2, int(h * .40)
+    d.rounded_rectangle((cx - 115, cy - 115, cx + 115, cy + 115), 40, fill=(0, 0, 0, 90),
+                        outline=accent + (130,), width=3)
+    for pad, a in ((46, 20), (30, 32)):
+        d.ellipse((cx - 78 - pad, cy - 78 - pad, cx + 78 + pad, cy + 78 + pad), fill=accent + (a,))
+    d.polygon([(cx, cy - 78), (cx + 78, cy), (cx, cy + 78), (cx - 78, cy)], fill=accent + (225,))
+    d.polygon([(cx, cy - 44), (cx + 44, cy), (cx, cy + 44), (cx - 44, cy)], fill=(10, 8, 18, 235))
+    d.text((cx, cy + 9), "NFT", font=_nft_font(True, 26), fill=accent + (245,), anchor="mm")
+    d.text((cx, cy + 152), "БАЗОВАЯ МОДЕЛЬ", font=_nft_font(True, 22), fill=accent + (235,), anchor="mm")
+    d.text((cx, cy + 182), "арт и редкость — после улучшения", font=_nft_font(False, 17),
+           fill=(230, 232, 245, 170), anchor="mm")
+    _nft_top_pills(im, seed)
+    _nft_bottom_labels(im, title, rarity, model or "Стандартный", accent, level=level, background=background)
     _nft_frame(im, rarity)
     out = io.BytesIO()
     im.convert("RGB").save(out, format="PNG", optimize=True)
@@ -8305,7 +9482,7 @@ def _nft_watch_card(seed: int, title: str, model: str, background: str,
                    rnd.randint(2, 8), (255, 232, 170), rnd.randint(35, 145))
 
     _nft_top_pills(im, seed)
-    _nft_bottom_labels(im, title or "Роликсы", rarity, "Швейцарский механизм", accent, big=True)
+    _nft_bottom_labels(im, title or "Роликсы", rarity, "Швейцарский механизм", accent, big=True, level=level)
     _nft_frame(im, rarity)
     out = io.BytesIO()
     im.convert("RGB").save(out, format="PNG", optimize=True)
@@ -8316,7 +9493,7 @@ def png_nft(seed: int, title: str, photo: str = "", model: str = "",
             background: str = "", rarity: str = "common", level: int = 1) -> bytes:
     """Премиум-карточка NFT: тёмный фон, свет, объём, часы Rolex-класса для «Роликсов»."""
     if photo == "blank":
-        return _nft_blank_card(seed, title, rarity, level)
+        return _nft_blank_card(seed, title, rarity, level, model, background)
     if photo == "photo":
         fp = NFT_DIR / f"photo_{seed}.png"
         if fp.is_file():
@@ -8329,9 +9506,34 @@ def png_nft(seed: int, title: str, photo: str = "", model: str = "",
             return _nft_photo_card((NFT_DIR / str(photo)).read_bytes(), title, rarity, seed)
         except Exception:
             log.exception("photo nft card")
+    low = str(title or "").lower()
+    if any(k in low for k in ("gta", "vice city", "вайс")):
+        return _nft_gta_card(seed, title, rarity, model)
+    if any(k in low for k in ("капибар", "capy", "капик")):
+        return _nft_capy_card(seed, title, rarity, model)
+    if any(k in low for k in ("пингвин", "penguin")) and level > 1:
+        return _nft_penguin_card(seed, title, rarity, model)
     if _nft_kind(photo, title) == "rollix":
         return _nft_watch_card(seed, title, model, background, rarity, level)
-    return _nft_character_card(seed, title, photo, model, background, rarity, level)
+    if level <= 1:
+        return _nft_blank_card(seed, title, rarity, level, model, background)
+    return _nft_unique_scene(seed, title, model, background, rarity, level)
+
+
+def make_nft_image(nid: int) -> Optional[bytes]:
+    """Рисует карточку NFT и кладёт PNG в kv, чтобы она пережила рестарт."""
+    r = q("SELECT id,name,photo,model,background,rarity,level FROM nft_items WHERE id=?", (int(nid),), one=True)
+    if not r:
+        return None
+    try:
+        raw = png_nft(int(r["id"]), r["name"], r.get("photo") or "", r.get("model") or "",
+                      r.get("background") or "", r.get("rarity") or "common", int(r.get("level") or 1))
+        kv_set(f"nftpng:{nid}", base64.b64encode(raw).decode("ascii"))
+        kv_set(f"nftsvg:{nid}", "")
+        return raw
+    except Exception:
+        log.exception("make_nft_image %s", nid)
+        return None
 
 
 def balance_text(uid: int) -> str:
@@ -9065,29 +10267,15 @@ def svg_nft(seed: int, title: str) -> str:
 def mint_nft(uid: int) -> tuple:
     if not spend(uid, MINT_COST):
         return False, f"❌ Отчеканить NFT стоит {fmt(MINT_COST)} RCOIN"
-    rar = random.choices(RARITIES, weights=[50, 27, 14, 7, 2])[0]
-    name = random.choice([n for n, _ in NFT_POOL[rar]])[0]
-    name = " ".join([n for n, _ in NFT_POOL[rar] if True][:0]) or name
-    pick = random.choice(NFT_POOL[rar])
+    pick = random.choice(NFT_POOL["common"] + NFT_POOL["rare"] + NFT_POOL["epic"])
     name = pick[0]
-    nid = make_nft(uid, name, rar)
-    path = NFT_DIR / f"nft_{nid}.svg"
-    try:
-        NFT_DIR.mkdir(parents=True, exist_ok=True)
-        svg = svg_nft(nid, name)
-        path.write_text(svg, encoding="utf-8")
-        row = q("SELECT photo,model,background,rarity,level FROM nft_items WHERE id=?", (nid,), one=True) or {}
-        # Store both SVG and PNG in the DB: artwork survives Render Free restarts.
-        kv_set(f"nftsvg:{nid}", svg)
-        raw_png = png_nft(nid, name, row.get("photo", ""), row.get("model", ""),
-                          row.get("background", ""), row.get("rarity", rar), int(row.get("level", 1)))
-        kv_set(f"nftpng:{nid}", base64.b64encode(raw_png).decode("ascii"))
-        kv_set(f"nftimg:{nid}", path.name)
-        x("UPDATE nft_items SET photo=? WHERE id=?", (path.name, nid))
-    except Exception as e:
-        log.warning("nft image: %s", e)
-    return True, (f"{nft_emoji(nid)} <b>NFT отчеканен!</b>\n{RARITY_EMOJI[rar]} <b>{esc(name)}</b> <code>#{nid}</code>\n"
-                  f"Редкость: {RARITY_NAME[rar]}\n\n<i>Картинка теперь показывается в балансе.</i>")
+    nid = make_nft(uid, name, "common", "blank", "Базовая модель. Арт откроется после улучшения.", MINT_COST)
+    row = q("SELECT model FROM nft_items WHERE id=?", (nid,), one=True) or {}
+    make_nft_image(nid)
+    return True, (f"{nft_emoji(nid)} <b>NFT отчеканен!</b>\n<b>{esc(name)}</b> <code>#{nid}</code>\n"
+                  f"🎭 Модель: {esc(row.get('model') or 'Стандартный')}\n"
+                  f"✨ Редкость: появится после улучшения\n\n"
+                  f"<i>Пока это карточка с моделью и номером — улучши NFT, чтобы открыть арт.</i>")
 
 
 @dp.callback_query(F.data == "ev:mint")
@@ -9177,11 +10365,85 @@ def api_nft_state(u, body):
     uu = get_user(uid)
     bid = int(uu.get("balance_nft_id") or 0)
     pid = int(uu.get("profile_nft_id") or 0)
-    rows = q("SELECT id,name,rarity FROM nft_items WHERE owner_id=? ORDER BY id DESC LIMIT 30", (uid,))
-    return {"ok": True, "balance_id": bid, "profile_id": pid,
-            "items": [{"id": r["id"], "name": r["name"], "rarity": RARITY_NAME.get(r["rarity"], r["rarity"]),
-                       "url": f"/nft/{r['id']}", "emoji_id": nft_emoji_id(r["id"]),
-                       "in_balance": r["id"] == bid, "in_profile": r["id"] == pid} for r in rows]}
+    rows = q("SELECT * FROM nft_items WHERE owner_id=? ORDER BY id DESC LIMIT 60", (uid,))
+    items = []
+    for r in rows:
+        it = nft_public(r)
+        it["in_balance"] = r["id"] == bid
+        it["in_profile"] = r["id"] == pid
+        it["emoji_id"] = nft_emoji_id(r["id"])
+        items.append(it)
+    return {"ok": True, "balance_id": bid, "profile_id": pid, "items": items,
+            "is_admin": is_admin(uid), "balance": uu["balance_coin"]}
+
+
+def api_nft_upgrade(u, body):
+    try:
+        nid = int(body.get("id", 0))
+    except (TypeError, ValueError):
+        return w_err("Неверный NFT")
+    ok, msg, n = nft_upgrade(u["user_id"], nid)
+    if not ok:
+        return {"ok": False, "err": msg}
+    return {"ok": True, "msg": msg, "item": nft_public(n), "balance": get_user(u["user_id"])["balance_coin"]}
+
+
+def api_cases_state(u, body):
+    return {"ok": True, "cases": [{"key": c["key"], "name": c["name"], "price": c["price"],
+                                    "icon": c["icon"], "tag": c["tag"], "accent": c["accent"],
+                                    "names": c["names"][:4]} for c in CASES],
+            "balance": get_user(u["user_id"])["balance_coin"]}
+
+
+def api_case_open(u, body):
+    res = case_open(u["user_id"], str(body.get("key", "")))
+    if res.get("ok"):
+        res["balance"] = get_user(u["user_id"])["balance_coin"]
+    return res
+
+
+def api_admin_nft_create(u, body):
+    uid = u["user_id"]
+    if not is_admin(uid):
+        return w_err("Только для администрации")
+    name = (str(body.get("name") or "").strip() or "Кастомный NFT")[:30]
+    try:
+        number = int(body.get("number", 0) or 0)
+    except (TypeError, ValueError):
+        number = 0
+    rarity = str(body.get("rarity") or "none").lower()
+    if rarity in ("none", "нет", "-", "без", ""):
+        rarity = "common"
+    if rarity not in ("rare", "epic", "common"):
+        return w_err("Редкость: none, rare или epic")
+    model = str(body.get("model") or "")
+    model = model if model in [m[0] for m in MODELS] else None
+    bg = str(body.get("background") or "")
+    bg = bg if bg in [b[0] for b in BGS] else None
+    if number > 0 and q("SELECT 1 FROM nft_items WHERE id=?", (number,), one=True):
+        return w_err(f"NFT #{number} уже существует")
+    nid = make_nft(uid, name, rarity, "blank", "Кастомный NFT администратора",
+                   RARITY_BASE.get(rarity, 50_000), model=model, background=bg, nft_id=number or None)
+    raw = str(body.get("image") or "")
+    if raw.startswith("data:image"):
+        try:
+            data = base64.b64decode(raw.split(",", 1)[1])
+            if 0 < len(data) <= 8 * 1024 * 1024:
+                NFT_DIR.mkdir(parents=True, exist_ok=True)
+                (NFT_DIR / f"photo_{nid}.png").write_bytes(data)
+                card = _nft_photo_card(data, name, rarity, nid)
+                (NFT_DIR / f"photo_{nid}_card.png").write_bytes(card)
+                kv_set(f"nftimg:{nid}", f"photo_{nid}_card.png")
+                kv_set(f"nftpng:{nid}", base64.b64encode(card).decode("ascii"))
+                x("UPDATE nft_items SET photo='photo' WHERE id=?", (nid,))
+        except Exception:
+            log.exception("admin nft image")
+    if rarity in UPGRADE_RARITIES:
+        x("UPDATE nft_items SET level=2 WHERE id=?", (nid,))
+    if not kv_get(f"nftpng:{nid}"):
+        make_nft_image(nid)
+    n = q("SELECT * FROM nft_items WHERE id=?", (nid,), one=True)
+    return {"ok": True, "msg": f"NFT #{nid} создан", "item": nft_public(n)}
 
 
 def api_nft_set(u, body):
@@ -9203,6 +10465,9 @@ def api_nft_set(u, body):
 
 
 def api_nft_photo(u, body):
+    uid = u["user_id"]
+    if not is_admin(uid):
+        return w_err("NFT из фото создаёт только владелец")
     raw = str(body.get("image") or "")
     if not raw.startswith("data:image"):
         return w_err("Нужно фото")
@@ -9217,22 +10482,31 @@ def api_nft_photo(u, body):
         im.verify()
     except Exception:
         return w_err("Это не картинка")
-    uid = u["user_id"]
-    if not is_admin(uid):
-        return w_err("NFT из фото создаёт только владелец")
     title = (str(body.get("name") or "").strip() or "Фото NFT")[:30]
-    nid = make_nft(uid, title, "rare", "photo", "NFT из личного фото",
-                   RARITY_BASE["rare"], model="Призрачный", background="Галактика")
+    try:
+        number = int(body.get("number", 0) or 0)
+    except (TypeError, ValueError):
+        number = 0
+    if number > 0 and q("SELECT 1 FROM nft_items WHERE id=?", (number,), one=True):
+        return w_err(f"NFT #{number} уже существует")
+    rarity = str(body.get("rarity") or "rare").lower()
+    if rarity not in UPGRADE_RARITIES:
+        rarity = "rare"
+    nid = make_nft(uid, title, rarity, "photo", "NFT из личного фото",
+                   RARITY_BASE[rarity], model="Призрачный", background="Галактика",
+                   nft_id=number or None)
     try:
         NFT_DIR.mkdir(parents=True, exist_ok=True)
         (NFT_DIR / f"photo_{nid}.png").write_bytes(data)
-        card = _nft_photo_card(data, title, "rare", nid)
+        card = _nft_photo_card(data, title, rarity, nid)
         (NFT_DIR / f"photo_{nid}_card.png").write_bytes(card)
         kv_set(f"nftimg:{nid}", f"photo_{nid}_card.png")
         kv_set(f"nftpng:{nid}", base64.b64encode(card).decode("ascii"))
+        x("UPDATE nft_items SET level=2 WHERE id=?", (nid,))
     except Exception:
         log.exception("api_nft_photo save")
-    return {"ok": True, "msg": f"NFT #{nid} создан", "id": nid}
+    n = q("SELECT * FROM nft_items WHERE id=?", (nid,), one=True)
+    return {"ok": True, "msg": f"NFT #{nid} создан", "id": nid, "item": nft_public(n)}
 
 
 def api_nft_to_archive(u, body):
@@ -9374,6 +10648,43 @@ async def mining_fan_asset(request: web.Request):
                         headers={"Cache-Control": "public, max-age=604800"})
 
 
+async def logo_asset(request: web.Request):
+    """Логотип для шапки веб-приложения: свой файл или нарисованный ромб."""
+    if BALANCE_BANNER.exists():
+        return web.FileResponse(BALANCE_BANNER, headers={"Cache-Control": "public, max-age=86400"})
+    if "png" not in _LOGO_PNG:
+        im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.rounded_rectangle((0, 0, 127, 127), 30, fill=(24, 16, 48, 255))
+        d.polygon([(64, 18), (110, 64), (64, 110), (18, 64)], fill=(199, 182, 255, 255))
+        d.polygon([(64, 34), (94, 64), (64, 94), (34, 64)], fill=(109, 40, 217, 255))
+        out = io.BytesIO()
+        im.save(out, format="PNG")
+        _LOGO_PNG["png"] = out.getvalue()
+    return web.Response(body=_LOGO_PNG["png"], content_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+_LOGO_PNG = {}
+
+
+async def wall_asset(request: web.Request):
+    """Обои интерфейса: размытый арт из code-art, внешних файлов не требует."""
+    if "png" not in _LOGO_PNG:
+        bright = Image.new("RGB", (720, 1200), (10, 6, 24))
+        ov = Image.new("RGBA", bright.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(ov)
+        for x, y, r, col in ((120, 120, 330, (124, 58, 237, 120)), (620, 420, 380, (219, 39, 119, 80)),
+                             (300, 1080, 420, (37, 99, 235, 90))):
+            d.ellipse((x - r, y - r, x + r, y + r), fill=col)
+        bright = Image.alpha_composite(bright.convert("RGBA"), ov).filter(ImageFilter.GaussianBlur(60)).convert("RGB")
+        out = io.BytesIO()
+        bright.save(out, format="JPEG", quality=72)
+        _LOGO_PNG["wall"] = out.getvalue()
+    return web.Response(body=_LOGO_PNG["wall"], content_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def banner_asset(request: web.Request):
     if BALANCE_BANNER.exists():
         return web.FileResponse(BALANCE_BANNER, headers={"Cache-Control": "public, max-age=86400"})
@@ -9417,6 +10728,22 @@ async def nft_asset(request: web.Request):
             raise web.HTTPNotFound()
     except (ValueError, TypeError):
         raise web.HTTPNotFound()
+
+async def archive_asset(request: web.Request):
+    """Превью лота NFT-архива: рисуется кодом, файлов не требует."""
+    try:
+        aid = int(request.match_info["aid"])
+        row = q("SELECT * FROM nft_archive WHERE id=?", (aid,), one=True)
+        if not row:
+            raise web.HTTPNotFound()
+        raw = png_nft(aid * 31 + 7, row["name"], row.get("photo") or "✨",
+                      row.get("model") or "", row.get("background") or "",
+                      row.get("rarity") or "common", 2)
+        return web.Response(body=raw, content_type="image/png",
+                            headers={"Cache-Control": "public, max-age=604800"})
+    except (ValueError, TypeError):
+        raise web.HTTPNotFound()
+
 
 def api_prices():
     """Публичный курс для live-графика (без авторизации)."""
@@ -9517,6 +10844,7 @@ async def cb_archive_withdraw(cb: CallbackQuery):
 # ---------------------------- МАЙНИНГ ----------------------------
 MINING_TERM = 30 * 86400
 MINING_SERVERS = [
+    (5, "Мини", 10_000_000, 250_000),
     (0, "Старт", 150_000_000, 3_000_000),
     (1, "Про", 500_000_000, 12_000_000),
     (2, "Бизнес", 1_000_000_000, 30_000_000),
@@ -9632,7 +10960,7 @@ async def cb_mining(cb: CallbackQuery):
 
 
 # ---------------------------- NFT-АРХИВ / АПГРЕЙДЕР ----------------------------
-UPG_CHANCE = {"common": 30, "uncommon": 40, "rare": 50, "epic": 60, "legendary": 70}
+UPG_CHANCE = {"common": 30, "rare": 45, "epic": 60, "uncommon": 45, "legendary": 60}
 RARITY_IDX = {r: i for i, r in enumerate(RARITIES)}
 
 
@@ -9641,9 +10969,9 @@ def archive_count() -> int:
 
 
 PREMIUM_LOTS = [
-    ("Дух Нового года", "🎆", "legendary", 1_000_000_000),
-    ("Ёлка-мультивселенная", "🌌", "legendary", 850_000_000),
-    ("Золотой Дед Мороз", "👑", "legendary", 700_000_000),
+    ("Дух Нового года", "🎆", "epic", 1_000_000_000),
+    ("Ёлка-мультивселенная", "🌌", "epic", 850_000_000),
+    ("Золотой Дед Мороз", "👑", "epic", 700_000_000),
     ("Северное сияние Prime", "🌠", "epic", 500_000_000),
     ("Кибер-снеговик 2077", "🤖", "epic", 500_000_000),
     ("Хрустальная ёлка", "🎄", "rare", 250_000_000),
@@ -9750,11 +11078,17 @@ def upg_chance(n: dict, bet: int = 0) -> int:
     return min(88, UPG_CHANCE.get(n["rarity"], 30) + min(10, max(0, int(bet)) // 100_000_000))
 
 
-def upg_spin(uid: int, ids, bet: int = 0, target: str = "") -> dict:
-    """Крутит апгрейдер. ids — до 5 NFT игрока. Успех: подарок из архива или коины."""
+def upg_spin(uid: int, ids, bet: int = 0, target: str = "", mode: str = "") -> dict:
+    """Крутит апгрейдер. ids — до 5 NFT игрока, bet — донат RCOIN.
+    mode: "nft" — выиграть можно только NFT; "coins" — только RCOIN;
+    по умолчанию архивный лот, а при пустом архиве — коины."""
     if isinstance(ids, int):
         ids = [ids]
     ids = [int(x) for x in (ids or [])][:5]
+    mode = str(mode or "")
+    bet = max(0, min(int(bet or 0), MAX_BET))
+    if mode == "coins" and not ids:
+        return {"ok": False, "err": "Для режима RCOIN выбери NFT-залог"}
     if not ids:
         return {"ok": False, "err": "Выбери NFT"}
     rows = [r for r in (q("SELECT * FROM nft_items WHERE id=? AND owner_id=?", (i, uid), one=True) for i in ids) if r]
@@ -9767,13 +11101,25 @@ def upg_spin(uid: int, ids, bet: int = 0, target: str = "") -> dict:
     if target.startswith("a:") and target[2:].isdigit():
         lot = q("SELECT * FROM nft_archive WHERE id=?", (int(target[2:]),), one=True)
     best = max(rows, key=lambda r: RARITY_IDX.get(r["rarity"], 0))
-    bet = max(0, min(int(bet or 0), MAX_BET))
+    stake = sum(nft_value(r) for r in rows) + bet
     chance = min(88, upg_chance(best, bet) + 5 * (len(rows) - 1))
     if bet and not spend(uid, bet):
         return {"ok": False, "err": "Недостаточно RCOIN для бонуса"}
-    stake = sum(nft_value(r) for r in rows)
     for r in rows:
         x("DELETE FROM nft_items WHERE id=? AND owner_id=? AND for_sale=0", (r["id"], uid))
+    if mode == "coins":
+        coins = max(int(stake * 1.6), RARITY_BASE.get(best["rarity"], 50_000))
+        if random.randint(1, 100) <= chance:
+            over = add_coin(uid, coins)
+            x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
+              (uid, ids[0], best["rarity"], "coins", chance, now()))
+            return {"ok": True, "win": True, "chance": chance, "coins": coins - over, "archived": over,
+                    "name": f"{fmt(coins - over)} RCOIN", "rarity": "coins"}
+        for r in rows:
+            archive_add(r)
+        x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
+          (uid, ids[0], best["rarity"], "lose", chance, now()))
+        return {"ok": True, "win": False, "chance": chance, "msg": "NFT ушли в архив"}
     if random.randint(1, 100) <= chance:
         all_rows = q("SELECT * FROM nft_archive")
         if lot:
@@ -9786,11 +11132,25 @@ def upg_spin(uid: int, ids, bet: int = 0, target: str = "") -> dict:
             pool = [r for r in all_rows if RARITY_IDX.get(r["rarity"], 0) >= RARITY_IDX.get(best["rarity"], 0)]
         if not pool:
             pool = sorted(all_rows, key=lambda r: -int(r.get("price") or 0))[:12]
+        if mode == "nft" and not lot and target in ("", "auto"):
+            # Режим «только NFT»: при пустом архиве рисуем свежую модель,
+            # чтобы победа никогда не превращалась в коины.
+            rarity = random.choice(UPGRADE_RARITIES)
+            name, photo = random.choice(nft_pool(rarity))
+            v = nft_variant(random.randint(1, 10_000_000))
+            new_id = make_nft(uid, name, rarity, photo, "Выиграно в апгрейдере",
+                              model=v["model"], background=v["background"])
+            make_nft_image(new_id)
+            x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
+              (uid, ids[0], best["rarity"], "win", chance, now()))
+            return {"ok": True, "win": True, "chance": chance, "nft_id": new_id,
+                    "name": name, "rarity": RARITY_NAME.get(rarity, rarity), "url": f"/nft/{new_id}?v=2"}
         if pool:
             pick = random.choice(pool)
             x("DELETE FROM nft_archive WHERE id=?", (pick["id"],))
             new_id = make_nft(uid, pick["name"], pick["rarity"], pick["photo"], "Выиграно в апгрейдере",
                               model=pick["model"], background=pick["background"])
+            make_nft_image(new_id)
             x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
               (uid, ids[0], best["rarity"], "win", chance, now()))
             return {"ok": True, "win": True, "chance": chance, "nft_id": new_id,
@@ -9817,12 +11177,17 @@ def upg_stuck() -> int:
 def api_archive_state(u, body):
     uid = u["user_id"]
     rows = q("SELECT * FROM nft_items WHERE owner_id=? AND for_sale=0 AND price>=0 ORDER BY id DESC LIMIT 40", (uid,))
+    items = []
+    for r in rows:
+        items.append({"id": r["id"], "name": r["name"], "rarity": RARITY_NAME.get(r["rarity"], r["rarity"]),
+                      "rt": r["rarity"], "value": nft_value(r), "level": r["level"],
+                      "model": r.get("model") or "", "url": f"/nft/{r['id']}?v={r['level']}"})
     return {"ok": True, "archive": archive_count(), "stuck": upg_stuck(),
             "chance": UPG_CHANCE, "coin_chance": UPG_COIN_CHANCE, "pool": upg_pool(),
-            "items": [{"id": r["id"], "name": r["name"], "rarity": RARITY_NAME.get(r["rarity"], r["rarity"]),
-                       "rt": r["rarity"], "value": nft_value(r), "url": f"/nft/{r['id']}"} for r in rows],
+            "items": items,
             "gifts": [{"id": r["id"], "name": r["name"], "rarity": RARITY_NAME.get(r["rarity"], r["rarity"]),
-                       "price": int(r.get("price") or 0)}
+                       "rt": r["rarity"], "price": int(r.get("price") or 0),
+                       "url": f"/archive/{r['id']}"}
                       for r in q("SELECT * FROM nft_archive ORDER BY price DESC, id DESC LIMIT 12")]}
 
 
@@ -9842,9 +11207,10 @@ def api_archive_spin(u, body):
         ids = [int(i) for i in ids if str(i).isdigit()]
         bet = int(body.get("bet", 0) or 0)
         target = str(body.get("target", "") or "")
+        mode = str(body.get("mode", "") or "")
     except (TypeError, ValueError):
         return w_err("Неверные данные")
-    return upg_spin(u["user_id"], ids, bet, target)
+    return upg_spin(u["user_id"], ids, bet, target, mode)
 
 
 def api_mining_state(u, body):
@@ -9891,7 +11257,7 @@ def api_mining_collect(u, body):
 
 
 # ---------------------------- NFT ИЗ ФОТО (владелец) ----------------------------
-def _nft_photo_card(raw: bytes, title: str, rarity: str, seed: int = 0) -> bytes:
+def _nft_photo_card(raw: bytes, title: str, rarity: str, seed: int = 0, level: int = 2) -> bytes:
     """Карточка NFT из загруженного фото: размытый фон + фото по центру + рамка."""
     w, h = 1280, 720
     accent = NFT_RARITY_COLOR.get(rarity, (200, 190, 255))
@@ -9914,7 +11280,7 @@ def _nft_photo_card(raw: bytes, title: str, rarity: str, seed: int = 0) -> bytes
                         fill=(0, 0, 0, 120), outline=accent + (200,), width=3)
     im.paste(photo, (px, py))
     _nft_top_pills(im, int(seed) or int.from_bytes(hashlib.md5(raw[:4096]).digest()[:4], "big"))
-    _nft_bottom_labels(im, title, rarity, "Фото владельца", accent)
+    _nft_bottom_labels(im, title, rarity, "Фото владельца", accent, level=level)
     _nft_frame(im, rarity)
     out = io.BytesIO()
     im.convert("RGB").save(out, format="PNG", optimize=True)
@@ -9946,6 +11312,8 @@ async def _create_photo_nft(target_uid: int, photo, caption: str) -> Optional[in
     nid = make_nft(target_uid, title, rarity, "photo", "NFT из личного фото",
                    RARITY_BASE[rarity], model="Призрачный", background="Галактика",
                    nft_id=(custom_id or None))
+    if rarity in UPGRADE_RARITIES:
+        x("UPDATE nft_items SET level=2 WHERE id=?", (nid,))
     try:
         NFT_DIR.mkdir(parents=True, exist_ok=True)
         (NFT_DIR / f"photo_{nid}.png").write_bytes(raw)
