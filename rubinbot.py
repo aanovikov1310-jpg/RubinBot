@@ -6610,7 +6610,7 @@ input{background:#0f0f12!important;border:1px solid #2b2b31!important;border-rad
 .upg-pick .nft.on:after{content:"✓";position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:50%;background:#35d07f;color:#08150f;font-weight:900;display:grid;place-items:center;font-size:13px}
 .arch-price{color:#8a8a92;font-size:10px;margin-top:3px}
 .upg2{padding:14px 12px 16px}
-.udial{position:relative;width:238px;height:238px;margin:8px auto 0;border-radius:50%;background:radial-gradient(circle at 50% 45%,#1b2030,#0d1017 72%);box-shadow:inset 0 0 0 10px #262b35,inset 0 0 0 12px #3a4150,inset 0 0 40px #000a,0 16px 40px #0006}
+.udial{position:relative;width:238px;height:238px;margin:8px auto 0;border-radius:50%;background:conic-gradient(from 0deg,#35d07f 0 calc(var(--ch,0) * 3.6deg),#2a3040 0),radial-gradient(circle at 50% 45%,#1b2030,#0d1017 72%);box-shadow:inset 0 0 0 10px #262b35,inset 0 0 0 12px #3a4150,inset 0 0 40px #000a,0 16px 40px #0006}
 .udial:before{content:"";position:absolute;inset:-9px;border-radius:50%;border:2px dashed #3d4453;opacity:.55}
 .udial-inner{position:absolute;inset:24px;border-radius:50%;display:grid;place-items:center;background:radial-gradient(circle at 50% 40%,#151a26,#0c0f16 75%);box-shadow:inset 0 0 0 1px #ffffff10}
 .uplus{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;font-size:34px;font-weight:300;color:#cfd6e6;border:1px solid #3a4150;background:#141a24;margin-bottom:26px}
@@ -6855,7 +6855,7 @@ function setCoinMult(m){coinMult=m;document.querySelectorAll('#multRow .uchip').
 function renderSel(){
  const table=(AR&&AR.chance)||{};const items=((AR&&AR.items)||[]).filter(x=>upgSel.includes(x.id));
  let ch=0;
- if(upgMode==='coin'){const t=(AR&&AR.coin_chance)||{'2.0':40,'4.0':20,'8.0':8};const k=Object.keys(t).find(k=>Number(k)===Number(coinMult));ch=k?t[k]:0}
+ if(upgMode==='coin'){const b0=Math.max(0,Math.floor(Number($('coinBet').value)||0));const t=(AR&&AR.coin_chance)||{'2.0':40,'4.0':20,'8.0':8};const k=Object.keys(t).find(k=>Number(k)===Number(coinMult));ch=b0>=10000?(k?t[k]:0):0}
  else if(items.length){const best=items.reduce((a,b)=>((table[b.rt]||30)>(table[a.rt]||30)?b:a),items[0]);ch=Math.min(88,(table[best.rt]||30)+5*(items.length-1))}
  $('upgChance').textContent=ch+'%';$('upgWheel').style.setProperty('--ch',ch);
  const bet=Math.max(0,Math.floor(Number($('coinBet').value)||0));
