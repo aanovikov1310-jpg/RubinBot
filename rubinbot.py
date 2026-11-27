@@ -90,6 +90,12 @@ IMAGE_PATH = "image.png"
 # For Render persistent disk, set NFT_DIR=/var/data/nft_images.
 NFT_DIR = Path(os.getenv("NFT_DIR", "/var/data/nft_images" if os.getenv("RENDER") else "nft_images"))
 BALANCE_BANNER = Path(os.getenv("BALANCE_BANNER", "balance_banner.png"))
+NFT_ART_VERSION = 5
+UI_TICKER_KEY = "ui:ticker"
+UI_TICKER_DEFAULT = ("RUBIN · NEW BLACK COLLECTION · АПГРЕЙДЕР 2.0 · "
+                     "ЧЁРНЫЙ ПРЕМИУМ · АРЕНА С БОНУСОМ · ")
+UI_THEME_KEY = "ui:theme"
+UI_THEME_DEFAULT = "obsidian"
 
 dp = Dispatcher(storage=MemoryStorage())
 bot: Bot = None  # type: ignore
@@ -688,6 +694,14 @@ def kv_set(key: str, value: str):
     x("INSERT INTO kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
 
+def ui_ticker() -> str:
+    return (kv_get(UI_TICKER_KEY) or UI_TICKER_DEFAULT).strip()[:300]
+
+
+def ui_theme() -> str:
+    return (kv_get(UI_THEME_KEY) or UI_THEME_DEFAULT).strip()[:24]
+
+
 def get_user(uid: int) -> Dict[str, Any]:
     r = q("SELECT * FROM users WHERE user_id=?", (uid,), one=True)
     if not r:
@@ -774,6 +788,21 @@ def add_coin(uid: int, n: int) -> int:
     if over:
         x("UPDATE users SET archive_coin=archive_coin+? WHERE user_id=?", (over, uid))
     return over
+
+
+def normalize_balances() -> int:
+    """Переносит всё, что выше лимита, в Архив. Нужно после старых админ-выдач."""
+    moved = 0
+    for r in q("SELECT user_id, balance_coin FROM users WHERE balance_coin>?", (MAX_BALANCE,)):
+        over = int(r["balance_coin"] or 0) - MAX_BALANCE
+        if over <= 0:
+            continue
+        if x("UPDATE users SET balance_coin=?, archive_coin=archive_coin+? WHERE user_id=?",
+             (MAX_BALANCE, over, r["user_id"]))[0] == 1:
+            moved += over
+    if moved:
+        log.info("Лимит баланса: в Архив перенесено %s RCOIN", fmt(moved))
+    return moved
 
 
 def spend(uid: int, n: int, col: str = "balance_coin") -> bool:
@@ -4010,8 +4039,19 @@ NFT_POOL = {
 }
 MODELS = [("Стандартный", 1.0, 30), ("Зимний", 1.2, 25), ("Снежный", 1.4, 18), ("Золотой", 2.0, 12),
           ("Неоновый", 2.5, 8), ("Призрачный", 3.5, 5), ("Космический", 5.0, 2)]
-BGS = [("Обычный", 1.0, 30), ("Морозный", 1.2, 25), ("Праздничный", 1.5, 18), ("Звёздный", 2.0, 14),
-       ("Северное сияние", 3.0, 8), ("Галактика", 4.0, 5)]
+BGS = [("Чёрный бархат", 1.0, 30), ("Обсидиан", 1.2, 25), ("Дым", 1.5, 18),
+       ("Нуар", 2.0, 14), ("Оникс", 3.0, 8), ("Полночь", 4.0, 5)]
+BG_ALIASES = {"Обычный": "Чёрный бархат", "Морозный": "Обсидиан", "Праздничный": "Дым",
+              "Звёздный": "Нуар", "Северное сияние": "Оникс", "Галактика": "Полночь"}
+
+
+def bg_label(name: str) -> str:
+    return BG_ALIASES.get(str(name or ""), str(name or "Чёрный бархат"))
+
+
+def bg_mult(name: str) -> float:
+    key = bg_label(name)
+    return next((m for nm, m, _ in BGS if nm == key), 1.0)
 PHOTOS = ["🎄", "🎁", "⛄", "❄️", "🎅", "🤶", "🦌", "🎀", "✨", "🌲", "🔔", "🍊", "🥂", "🧸", "🐧", "🐲", "🦄", "🤖", "🌌", "👑"]
 
 
@@ -4092,7 +4132,7 @@ def nft_public(n: dict, ver: int = 0) -> dict:
     level = int(n.get("level") or 1)
     return {"id": n["id"], "name": n["name"], "level": level,
             "model": n.get("model") or "Стандартный",
-            "background": n.get("background") or "Обычный",
+            "background": bg_label(n.get("background")),
             "rarity": RARITY_NAME.get(n.get("rarity") or "common", "Без редкости") if level > 1 else "Без редкости",
             "rarity_key": n.get("rarity") if level > 1 else "common",
             "value": nft_value(n),
@@ -4148,7 +4188,7 @@ def ensure_owner_nft():
         get_user(OWNER_ID)
         make_nft(OWNER_ID, "Рубин #1", "epic", OWNER_NFT_ASSET.name,
                  "Алмаз владельца Rubin bot. Единственный экземпляр.", INFINITE_PRICE,
-                 model="Призрачный", background="Обычный", nft_id=OWNER_NFT_ID)
+                 model="Призрачный", background="Чёрный бархат", nft_id=OWNER_NFT_ID)
         NFT_DIR.mkdir(parents=True, exist_ok=True)
         dst = NFT_DIR / "owner_nft_1.png"
         dst.write_bytes(raw)
@@ -4212,7 +4252,7 @@ def nft_value(n: dict) -> int:
     if nft_is_infinite(n):
         return 0
     mm = next((m for nm, m, _ in MODELS if nm == n["model"]), 1.0)
-    bm = next((m for nm, m, _ in BGS if nm == n["background"]), 1.0)
+    bm = bg_mult(n["background"])
     return int(RARITY_BASE.get(n["rarity"], 50_000) * mm * bm * (1 + 0.1 * (n["level"] - 1)))
 
 
@@ -4252,7 +4292,7 @@ def nft_card(n: dict) -> str:
     return (f"{nft_emoji(n['id'])} <b>{esc(n['name'])}</b> <code>#{n['id']}</code>\n"
             + rarity
             + f"📊 Уровень: {n['level']}\n🎭 Модель: {esc(n['model'])}\n"
-            f"🖼 Фон: {esc(n['background'])}\n💰 Стоимость: <b>{nft_price_text(n)}</b>{'' if nft_is_infinite(n) else ' RCOIN'}{sale}\n📝 {esc(n['description'] or '—')}{pin}")
+            f"🖼 Фон: {esc(bg_label(n['background']))}\n💰 Стоимость: <b>{nft_price_text(n)}</b>{'' if nft_is_infinite(n) else ' RCOIN'}{sale}\n📝 {esc(n['description'] or '—')}{pin}")
 
 
 def nft_upgrade_cost(n: dict) -> int:
@@ -5642,6 +5682,41 @@ async def cmd_admin(message: Message, state: FSMContext):
     await message.reply(f"{E('admin')} <b>АДМИН-ПАНЕЛЬ</b>\n\nВыберите действие:", reply_markup=admin_kb())
 
 
+@dp.message(Command("ticker"))
+async def cmd_ticker(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return await message.reply("⛔ Только для администрации.")
+    text = (command.args or "").strip()
+    if not text:
+        return await message.reply(f"Текущая строка:\n<code>{esc(ui_ticker())}</code>\n\n"
+                                   "Формат: <code>/ticker новый текст</code>")
+    kv_set(UI_TICKER_KEY, text[:300])
+    await message.reply("✅ Бегущая строка обновлена.")
+
+
+@dp.message(Command("arenabonus"))
+async def cmd_arena_bonus(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return await message.reply("⛔ Только для администрации.")
+    amount = parse_amount((command.args or "").strip(), get_user(message.from_user.id)["balance_coin"])
+    if amount <= 0:
+        return await message.reply("Формат: <code>/arenabonus 100кк</code>")
+    res = ar_admin_bonus(message.from_user.id, amount)
+    await message.reply(("✅ " if res.get("ok") else "❌ ") + str(res.get("msg") or res.get("err") or ""))
+
+
+@dp.message(Command("newcollection"))
+async def cmd_new_collection(message: Message, command: CommandObject):
+    if message.from_user.id != OWNER_ID:
+        return await message.reply("⛔ Только владелец.")
+    if (command.args or "").strip().upper() != "RESET":
+        return await message.reply("⚠️ Это удалит <b>все NFT игроков</b> и лоты архива, нумерация начнётся с #1.\n"
+                                   "Подтверди: <code>/newcollection RESET</code>")
+    res = reset_nft_collection()
+    await message.reply(f"✅ Новая коллекция: удалено <b>{res['items']}</b> NFT и <b>{res['lots']}</b> лотов. "
+                        f"В архиве: {res['archive']}.")
+
+
 def admin_exec(action: str, tid: Optional[int], a: List[str], by: int) -> str:
     u = get_user(tid) if tid else None
     nm = uname(u, False) if u else ""
@@ -5652,6 +5727,10 @@ def admin_exec(action: str, tid: Optional[int], a: List[str], by: int) -> str:
         if amt <= 0:
             return "❌ Неверная сумма."
         if action.startswith("give_"):
+            if kind == "coin":
+                over = add_coin(tid, amt)
+                note = f"\n🏛 Сверх лимита в Архив: <b>{fmt(over)}</b>" if over else ""
+                return f"✅ Выдано {fmt(amt - over)} RCOIN игроку {nm} ({tid}){note}"
             x(f"UPDATE users SET {col}={col}+? WHERE user_id=?", (amt, tid))
             return f"✅ Выдано {fmt(amt)} {kind.upper()} игроку {nm} ({tid})"
         if not spend(tid, amt, col):
@@ -6224,7 +6303,13 @@ def _ar_save():
 
 
 def ar_restore():
-    """После перезапуска возвращаем ставки, которые не успели разыграть."""
+    """После перезапуска возвращаем ставки и джекпот арены."""
+    try:
+        bonus = int(kv_get("arena:bonus") or 0)
+        if bonus > 0:
+            AR["bonus"] = bonus
+    except Exception:
+        pass
     raw = kv_get("arena:web")
     if not raw or raw in ("{}", "null"):
         return
@@ -6244,6 +6329,7 @@ def ar_restore():
 
 
 def ar_reset(refund: bool = False):
+    bonus = int(AR.get("bonus", 0) or 0)
     if refund:
         _ar_refund()
         try:
@@ -6252,7 +6338,7 @@ def ar_reset(refund: bool = False):
             pass
     AR.clear()
     AR.update(phase="idle", players={}, t_cd=0.0, t_roll=0.0, t_done=0.0,
-              winner=None, created=time.time())
+              winner=None, created=time.time(), bonus=bonus)
 
 
 ar_reset()
@@ -6291,13 +6377,19 @@ def ar_tick():
         winner = AR["winner"]
         players = dict(AR["players"])
         pool = sum(int(p.get("bet", 0) or 0) for p in players.values())
+        bonus = int(AR.get("bonus", 0) or 0)
         rake = pool // 10 if pool else 0
-        prize = pool - rake if pool else 0
+        prize = (pool - rake + bonus) if pool else 0
         payout = 0
         if pool > 0:
             treasury_add(rake)
             win_bet = int(players[winner].get("bet", 0) or 0)
             payout = int(prize * win_mult(winner)) if prize > win_bet > 0 else prize
+            AR["bonus"] = 0
+            try:
+                kv_set("arena:bonus", "0")
+            except Exception:
+                pass
             for uid, p in players.items():
                 settle(uid, "arena", int(p.get("bet", 0) or 0), prize if uid == winner else 0, "web arena")
             AR_HIST.insert(0, {"name": players[winner]["name"], "reward": f"{fmt(payout)} RCOIN", "paid": True})
@@ -6341,6 +6433,7 @@ def ar_state(uid: int) -> dict:
     count = len(ids)
     ph = AR["phase"]
     pool = sum(int(p.get("bet", 0) or 0) for p in pl.values())
+    bonus = int(AR.get("bonus", 0) or 0)
     players = []
     for i in ids:
         bet = int(pl[i].get("bet", 0) or 0)
@@ -6348,14 +6441,15 @@ def ar_state(uid: int) -> dict:
         players.append({"id": i, "name": pl[i]["name"], "color": pl[i]["color"], "pct": pct,
                         "avatar": pl[i].get("avatar", ""), "bet": bet, "you": i == uid})
     winner_idx = ids.index(AR["winner"]) if AR.get("winner") in ids else -1
-    return {"phase": ph, "players": players, "pool": pool, "bet": _ar_round_bet(), "you": uid in pl,
+    return {"phase": ph, "players": players, "pool": pool + bonus, "bonus": bonus, "bet": _ar_round_bet(), "you": uid in pl,
             "your_bet": int(pl[uid].get("bet", 0) or 0) if uid in pl else 0,
             "cd_left": max(0.0, AR["t_cd"] + AR_CD - t) if ph == "countdown" else 0,
             "roll_total": AR_ROLL, "roll_elapsed": min(AR_ROLL, t - AR["t_roll"]) if ph == "rolling" else (AR_ROLL if ph == "done" else 0),
             "winner_idx": winner_idx, "history": AR_HIST, "max": AR_MAX,
             "zones": ar_zones(pl) if count else [],
             "roll_stop": round(AR["t_roll"] + AR_ROLL, 3) if ph == "rolling" else 0,
-            "min_bet": AR_MIN_BET, "rake": pool // 10, "prize": pool - pool // 10, "free": pool == 0}
+            "min_bet": AR_MIN_BET, "rake": pool // 10, "prize": pool - pool // 10 + bonus,
+            "free": pool == 0 and bonus == 0}
 
 
 def a_arena(u, body):
@@ -6440,6 +6534,26 @@ def a_arena_leave(u, body):
     return {"ok": True, "state": ar_state(uid), "balance": int(get_user(uid)["balance_coin"])}
 
 
+def ar_admin_bonus(uid: int, amount: int) -> dict:
+    """Админ добавляет джекпот в арену из своего баланса."""
+    if not is_admin(uid):
+        return w_err("Только для администрации")
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        return w_err("Неверная сумма")
+    if amount <= 0:
+        return w_err("Сумма должна быть больше нуля")
+    if not spend(uid, amount):
+        return w_err("Недостаточно RCOIN")
+    AR["bonus"] = int(AR.get("bonus", 0) or 0) + amount
+    try:
+        kv_set("arena:bonus", str(AR["bonus"]))
+    except Exception:
+        log.debug("arena bonus save", exc_info=True)
+    return {"ok": True, "bonus": AR["bonus"], "msg": f"Бонус арены +{fmt(amount)}"}
+
+
 # ---------- мини-игры ----------
 def a_snowman_state(u, body):
     row = snowman_row(u["user_id"])
@@ -6465,6 +6579,8 @@ def a_me(u, body):
             "rank": u["rank_title"] or "Новичок",
             "premium": is_premium(uid),
             "is_admin": is_admin(uid),
+            "ticker": ui_ticker(),
+            "theme": ui_theme(),
             "badges": [{"key": b, "role": BADGES[b]["role"], "title": BADGES[b]["title"],
                         "emoji_id": BADGES[b].get("id") or ""} for b in profile_badges(uid) if b in BADGES],
             "nft_balance_url": f"/nft/{bid}" if bid else "",
@@ -6867,6 +6983,138 @@ input[type=file]{width:100%;font-size:11px;color:var(--t2)}
 @keyframes fall{to{transform:translateY(112vh) rotate(680deg)}}
 @media(min-width:620px){.cases{grid-template-columns:repeat(3,1fr)}.grid{grid-template-columns:repeat(3,1fr)}
  .stats{grid-template-columns:repeat(4,1fr)}.pickgrid{grid-template-columns:repeat(3,1fr)}}
+/* ================= GLASS 2.0 / THEMES / TICKER ================= */
+:root{--bg:#040405;--panel:#08090d}
+html[data-theme="iphone"]{--a1:#0a84ff;--a2:#5e5ce6;--a3:#64d2ff}
+html[data-theme="android"]{--a1:#7c4dff;--a2:#00bfa6;--a3:#ff4081}
+html[data-theme="ruby"]{--a1:#ff5470;--a2:#b3123b;--a3:#ff8a5c}
+html[data-theme="ice"]{--a1:#7fdcff;--a2:#2f7fd8;--a3:#b6f2ff}
+html[data-theme="emerald"]{--a1:#4ce39a;--a2:#12855c;--a3:#9dffcf}
+html[data-theme="violet"]{--a1:#b06bff;--a2:#5b21b6;--a3:#e0a8ff}
+html[data-theme="light"]{--a1:#0a84ff;--a2:#5e5ce6;--a3:#34c759}
+html.light{
+  --bg:#eef1f8;--t1:#10131b;--t2:#5b6272;--t3:#8a91a1;
+  --glass:linear-gradient(158deg,rgba(255,255,255,.86),rgba(255,255,255,.58));
+  --stroke:rgba(15,23,42,.10);--stroke2:rgba(15,23,42,.16);
+}
+html.light body{background:var(--bg);color:var(--t1)}
+html.light body:before{background:
+  radial-gradient(58% 42% at 82% -4%,rgba(10,132,255,.22),transparent 70%),
+  radial-gradient(52% 36% at 4% 14%,rgba(94,92,230,.16),transparent 72%),
+  radial-gradient(64% 44% at 46% 108%,rgba(52,199,89,.14),transparent 74%),#eef1f8;filter:none}
+html.light body:after{opacity:.18;background-image:linear-gradient(rgba(15,23,42,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(15,23,42,.06) 1px,transparent 1px)}
+html.light .glass{box-shadow:0 20px 50px rgba(30,45,80,.12),inset 0 1px 0 rgba(255,255,255,.9)}
+html.light .glass.hi{background:linear-gradient(160deg,rgba(255,255,255,.95),rgba(255,255,255,.6))}
+html.light .act,html.light .mode,html.light .mini,html.light .slot,html.light .srv,html.light .pl,html.light .st{color:#10131b;background:rgba(255,255,255,.48);border-color:rgba(15,23,42,.12)}
+html.light .nft{background:rgba(255,255,255,.62);border-color:rgba(15,23,42,.1)}
+html.light .nft .im{background:#e6ebf5}
+html.light .nft .num{background:rgba(255,255,255,.8);color:#10131b}
+html.light .sheet{background:linear-gradient(168deg,#fbfcff,#e9eef8);color:#10131b;border-color:rgba(15,23,42,.12)}
+html.light .nav{background:rgba(255,255,255,.78);border-color:rgba(15,23,42,.1);box-shadow:0 18px 50px rgba(30,45,80,.18),inset 0 1px 0 rgba(255,255,255,.9)}
+html.light .nav button{color:#7a8190}
+html.light .nav button.on{color:#10131b;background:linear-gradient(160deg,rgba(10,132,255,.18),rgba(255,255,255,.9));box-shadow:inset 0 0 0 1px rgba(10,132,255,.25)}
+html.light input,html.light select,html.light .betrow input{background:rgba(255,255,255,.8);color:#10131b;border-color:rgba(15,23,42,.14)}
+html.light .toast{background:#fff;color:#10131b;border-color:rgba(10,132,255,.28);box-shadow:0 12px 30px rgba(30,45,80,.18)}
+html.light .modal{background:rgba(210,219,234,.62)}
+html.light .pick{background:rgba(255,255,255,.55)}
+html.light .pick img,html.light .fullimg{background:#e6ebf5}
+html.light .chip{color:#394052;background:rgba(15,23,42,.05);border-color:rgba(15,23,42,.1)}
+html.light .case{background:linear-gradient(160deg,rgba(255,255,255,.82),rgba(255,255,255,.5))}
+html.light .tag{background:rgba(255,255,255,.7);color:#10131b}
+html.light .dial .core{background:radial-gradient(circle at 50% 32%,#fbfdff,#dfe6f2 78%);box-shadow:inset 0 0 0 1px rgba(15,23,42,.08),0 0 40px rgba(10,132,255,.18)}
+html.light .arena-core{background:radial-gradient(circle at 50% 32%,#fbfdff,#e2e8f4 78%);box-shadow:inset 0 0 0 1px rgba(15,23,42,.08),inset 0 0 40px rgba(255,255,255,.8),0 18px 46px rgba(30,45,80,.16)}
+html.light .arena-core small{color:#6b7280}
+html.light .arena .lbl{fill:#10131b}
+html.light .beam{background:linear-gradient(to top,rgba(10,132,255,0),rgba(10,132,255,.55))}
+html.light .ticker,html.light .upg-ticker{background:linear-gradient(90deg,rgba(255,255,255,.2),rgba(255,255,255,.72),rgba(255,255,255,.2))}
+html.light .ticker-track span{color:#4b5565}
+html.light .themePick{background:rgba(255,255,255,.5)}
+
+body{background:var(--bg,#040405)}
+body:before{filter:blur(10px)}
+body:after{opacity:.35}
+.glass{background:var(--glass);border-color:var(--stroke);backdrop-filter:blur(28px) saturate(1.55);-webkit-backdrop-filter:blur(28px) saturate(1.55);
+  box-shadow:0 22px 60px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.09),inset 0 -1px 0 rgba(0,0,0,.22)}
+.glass:after{content:"";position:absolute;left:12%;right:12%;top:0;height:1px;pointer-events:none;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.45),transparent);opacity:.7}
+@supports (padding:max(0px)){body{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}}
+
+/* бегущая строка */
+.ticker,.upg-ticker{position:relative;overflow:hidden;margin:0 2px 12px;border-radius:15px;padding:8px 0;
+  border:1px solid var(--stroke);background:linear-gradient(90deg,rgba(255,255,255,.03),rgba(255,255,255,.09),rgba(255,255,255,.03));
+  -webkit-mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent);
+  mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent)}
+.upg-ticker{margin:0 0 10px}
+.ticker-track{display:flex;width:max-content;animation:marquee 32s linear infinite;will-change:transform}
+.ticker-track span{display:block;white-space:nowrap;padding-right:38px;font:800 10px/1.25 inherit;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--t2)}
+@keyframes marquee{to{transform:translateX(-50%)}}
+
+/* апгрейдер 2.0 */
+.upg-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:4px}
+.upg-kicker{display:flex;align-items:center;gap:7px;font-size:9px;font-weight:900;letter-spacing:.2em;
+  color:var(--a1);text-transform:uppercase}
+.upg-kicker .live{width:7px;height:7px;border-radius:50%;background:var(--a1);
+  box-shadow:0 0 0 0 color-mix(in srgb,var(--a1) 60%,transparent);animation:live 1.8s infinite}
+@keyframes live{70%{box-shadow:0 0 0 8px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.upg-title{font-size:23px;font-weight:900;letter-spacing:-.6px;margin-top:2px}
+.upg-sub{font-size:10.5px;color:var(--t3);margin-top:3px}
+.upg-card{overflow:hidden}
+.upg-card:before{content:"";position:absolute;inset:-40% 26% auto;height:70%;pointer-events:none;
+  background:radial-gradient(circle,color-mix(in srgb,var(--a1) 22%,transparent),transparent 70%);filter:blur(30px)}
+.dial{width:min(84vw,330px);margin-top:10px}
+.dial-aura{position:absolute;inset:-12%;border-radius:50%;pointer-events:none;
+  background:radial-gradient(circle,color-mix(in srgb,var(--a1) 28%,transparent),transparent 62%);
+  filter:blur(18px);animation:aura 4.5s ease-in-out infinite}
+@keyframes aura{50%{transform:scale(1.06);opacity:.8}}
+.dial:after{content:"";position:absolute;inset:-2.5%;border-radius:50%;pointer-events:none;
+  border:1px dashed color-mix(in srgb,var(--a1) 55%,transparent);opacity:.55;animation:ringSpin 22s linear infinite}
+.dial.spinning:after{animation-duration:2.2s}
+@keyframes ringSpin{to{transform:rotate(360deg)}}
+.dial .spark{position:absolute;width:4px;height:4px;border-radius:50%;background:var(--a3);
+  box-shadow:0 0 12px var(--a1);opacity:.8;animation:floaty 5s ease-in-out infinite}
+.dial .s1{left:8%;top:18%}.dial .s2{right:10%;top:26%;animation-delay:-1.2s}
+.dial .s3{left:18%;bottom:12%;animation-delay:-2.4s}.dial .s4{right:16%;bottom:18%;animation-delay:-3.1s}
+@keyframes floaty{50%{transform:translateY(-9px) scale(1.3);opacity:.35}}
+.dial .core{box-shadow:inset 0 0 0 1px rgba(255,255,255,.12),0 0 40px color-mix(in srgb,var(--a1) 35%,transparent),0 0 90px rgba(0,0,0,.8)}
+.dial .beam{background:linear-gradient(to top,rgba(255,255,255,0),var(--a3));
+  box-shadow:0 0 18px color-mix(in srgb,var(--a1) 70%,transparent)}
+.chance-line{display:flex;align-items:center;gap:12px;margin:2px 2px 0;padding:10px 12px;border-radius:16px;
+  border:1px solid var(--stroke);background:rgba(255,255,255,.035)}
+.chance-line b{display:block;font-size:19px;font-weight:900;letter-spacing:-.6px;line-height:1;color:var(--a3)}
+.chance-line span{display:block;font-size:8.5px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--t3);margin-top:3px}
+.chancebar{flex:1;height:8px;border-radius:99px;background:rgba(0,0,0,.45);overflow:hidden;border:1px solid var(--stroke)}
+.chancebar i{display:block;height:100%;width:0;border-radius:inherit;transition:width .35s cubic-bezier(.2,.8,.2,1);
+  background:linear-gradient(90deg,var(--a2),var(--a1),var(--a3));
+  box-shadow:0 0 14px color-mix(in srgb,var(--a1) 60%,transparent)}
+.betrow .mini.on{background:linear-gradient(150deg,var(--a1),var(--a2));border-color:transparent;color:#fff}
+.betpresets{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:7px}
+.betpresets .mini{width:100%}
+.go{position:relative;overflow:hidden;letter-spacing:.02em}
+.go:after{content:"";position:absolute;top:0;bottom:0;width:45%;left:-60%;transform:skewX(-18deg);pointer-events:none;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);animation:shine 3.2s infinite}
+@keyframes shine{0%,55%{left:-60%}85%,100%{left:130%}}
+.go:disabled:after{display:none}
+
+/* карточки и темы */
+.nft{box-shadow:0 10px 30px rgba(0,0,0,.35);background:linear-gradient(180deg,rgba(15,17,24,.9),rgba(5,6,9,.92))}
+.nft .im{aspect-ratio:16/10}
+.pick img{aspect-ratio:16/10}
+.nft .im img{transition:transform .6s cubic-bezier(.2,.8,.2,1)}
+.nft:active .im img{transform:scale(1.04)}
+.nft .nm{font-size:11.5px}
+.themes{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.th{width:auto;height:62px;border-radius:16px;overflow:hidden;position:relative}
+.th i{position:absolute;top:6px;right:7px;inset:auto;width:16px;height:16px;border-radius:50%;
+  background:rgba(0,0,0,.4);display:grid;place-items:center;font-size:10px;color:#fff}
+.th span{position:absolute;left:6px;right:6px;bottom:5px;font-size:8px;font-weight:800;text-align:center;
+  color:#fff;text-shadow:0 1px 3px #000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.arena-add{display:flex;gap:8px;margin-top:8px}
+.arena-add input{flex:1;min-width:0;padding:12px 13px;border-radius:14px;border:1px solid var(--stroke2);
+  background:rgba(0,0,0,.45);color:#fff;font:800 14px inherit;outline:none;appearance:none}
+.arena-add input:focus{border-color:rgba(124,92,255,.75);box-shadow:0 0 0 3px rgba(124,92,255,.16)}
+
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -6919,6 +7167,8 @@ input[type=file]{width:100%;font-size:11px;color:var(--t2)}
     <div class="who"><b id="hName">Игрок</b><small id="hRank"><svg class="i xs"><use href="#i-medal"/></svg><span>Новичок</span></small></div>
     <div class="balpill"><svg class="i sm"><use href="#i-coin"/></svg><span id="topBal">—</span></div>
   </header>
+
+  <div class="ticker glass" id="tickerBar"><div class="ticker-track" id="tickerTrack"></div></div>
 
   <section id="home" class="page active">
     <div class="glass hi hero">
@@ -6983,13 +7233,21 @@ input[type=file]{width:100%;font-size:11px;color:var(--t2)}
   </section>
 
   <section id="upgrade" class="page">
-    <div class="glass pad">
-      <div class="h"><h2>Апгрейдер</h2><span class="chip a" id="modeChip">NFT → NFT</span></div>
+    <div class="glass pad upg-card">
+      <div class="upg-head">
+        <div>
+          <div class="upg-kicker"><span class="live"></span> APGRADER 2.0</div>
+          <h2 class="upg-title">Апгрейдер</h2>
+          <div class="upg-sub">Чёрная коллекция · честный шанс · комиссия в пул</div>
+        </div>
+        <span class="chip a" id="modeChip">NFT → NFT</span>
+      </div>
       <div class="dial" id="dialBox">
+        <div class="dial-aura"></div>
         <svg class="base" viewBox="0 0 240 240">
           <defs>
-            <linearGradient id="gw" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a98bff"/><stop offset="1" stop-color="#4f8bff"/></linearGradient>
-            <radialGradient id="gglow" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#7c5cff" stop-opacity=".35"/><stop offset="1" stop-color="#7c5cff" stop-opacity="0"/></radialGradient>
+            <linearGradient id="gw" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--a3)"/><stop offset="1" style="stop-color:var(--a1)"/></linearGradient>
+            <radialGradient id="gglow" cx="50%" cy="50%" r="50%"><stop offset="0" style="stop-color:var(--a1)" stop-opacity=".4"/><stop offset="1" style="stop-color:var(--a1)" stop-opacity="0"/></radialGradient>
           </defs>
           <circle cx="120" cy="120" r="104" fill="none" stroke="rgba(255,255,255,.055)" stroke-width="26"/>
           <circle cx="120" cy="120" r="117" fill="none" stroke="rgba(255,255,255,.06)"/>
@@ -7001,6 +7259,11 @@ input[type=file]{width:100%;font-size:11px;color:var(--t2)}
         <div class="beam zero" id="beam"></div>
         <div class="core" id="dialCore"><div class="ph"><svg class="i lg"><use href="#i-plus"/></svg><small>выбери NFT</small></div></div>
         <div class="arrow"><svg viewBox="0 0 24 24"><path d="M12 2 4 9.5l8 12.5 8-12.5z"/></svg></div>
+        <span class="spark s1"></span><span class="spark s2"></span><span class="spark s3"></span><span class="spark s4"></span>
+      </div>
+      <div class="chance-line">
+        <div style="min-width:76px"><b id="chancePct">0%</b><span>шанс выигрыша</span></div>
+        <div class="chancebar"><i id="chanceBar"></i></div>
       </div>
       <div class="slotrow">
         <div class="slot" id="slotFrom" onclick="ePicker('mine')">
@@ -7021,7 +7284,12 @@ input[type=file]{width:100%;font-size:11px;color:var(--t2)}
         <input id="betInput" aria-label="Сумма ставки в RCOIN" type="number" min="0" step="1000" value="0" inputmode="numeric" placeholder="0" oninput="eBet()">
         <button class="mini" onclick="eBet(0)">0</button>
         <button class="mini" onclick="eBet(10000)">10к</button>
+      </div>
+      <div class="betpresets">
         <button class="mini" onclick="eBet(100000)">100к</button>
+        <button class="mini" onclick="eBet(1000000)">1кк</button>
+        <button class="mini" onclick="eBet(10000000)">10кк</button>
+        <button class="mini" onclick="eBet(100000000)">100кк</button>
       </div>
       <div class="sumline" id="sumLine">Выберите NFT и введите сумму, чтобы открыть полосу выигрыша</div>
       <button class="go" id="upgBtn" disabled onclick="eSpin()">
@@ -7041,7 +7309,9 @@ input[type=file]{width:100%;font-size:11px;color:var(--t2)}
 
   <section id="arena" class="page">
     <div class="glass pad">
-      <div class="h"><h2>Арена</h2><span class="chip ok" id="onlineChip"><svg class="i xs fill"><use href="#i-life"/></svg>0/2</span></div>
+      <div class="h"><h2>Арена</h2><div style="display:flex;gap:6px;align-items:center">
+        <span class="chip g" id="arenaBonusChip">+0</span>
+        <span class="chip ok" id="onlineChip"><svg class="i xs fill"><use href="#i-life"/></svg>0/2</span></div></div>
       <div class="arena">
         <svg viewBox="0 0 400 400">
           <circle cx="200" cy="200" r="150" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="46"/>
@@ -7059,6 +7329,10 @@ input[type=file]{width:100%;font-size:11px;color:var(--t2)}
         <button class="mini" data-b="10000" onclick="abPreset(10000,this)">10к</button>
         <button class="mini" data-b="100000" onclick="abPreset(100000,this)">100к</button>
         <button class="mini" data-b="1000000" onclick="abPreset(1000000,this)">1кк</button>
+      </div>
+      <div class="arena-add hide" id="arenaAddRow">
+        <input id="arenaAddInput" aria-label="Добавить в банк арены" type="number" min="1" step="1000" value="10000" inputmode="numeric">
+        <button class="mini" onclick="arenaAdd()">+ В банк</button>
       </div>
       <div class="rowz" style="margin-top:9px">
         <button class="btn" id="arenaJoinBtn" onclick="arenaJoin()"><svg class="i sm"><use href="#i-plus"/></svg>Войти</button>
@@ -7093,6 +7367,21 @@ input[type=file]{width:100%;font-size:11px;color:var(--t2)}
       </div>
       <p class="tiny" style="margin-top:8px">Обои хранятся только на этом устройстве.</p>
     </div>
+    <div class="glass pad hide" style="margin-top:10px" id="adminPanel">
+      <div class="h"><h2>Админ-панель</h2><span class="chip g">WEB</span></div>
+      <label>Бегущая строка для всех</label>
+      <input id="admTicker" type="text" maxlength="180" placeholder="RUBIN · NEW BLACK COLLECTION ·">
+      <button class="btn" style="margin-top:8px" onclick="adminSaveTicker()">Сохранить тикер</button>
+      <div class="rowz" style="margin-top:8px">
+        <button class="btn ghost" onclick="adminRedrawNfts()">Перерисовать NFT</button>
+      </div>
+      <button class="btn red" style="margin-top:8px" onclick="adminResetAsk()">Новая коллекция NFT</button>
+      <p class="tiny" style="margin-top:6px">Удалит старые NFT и начнёт нумерацию с #1. Только для владельца.</p>
+      <label>Бонус в арену, RCOIN</label>
+      <div class="betrow"><input id="admArenaBonus" type="number" min="0" step="1000" value="1000000" inputmode="numeric">
+        <button class="mini" onclick="adminArenaBonus()">В банк</button></div>
+      <p class="tiny" id="admStatus" style="margin-top:8px"></p>
+    </div>
     <div class="glass pad" style="margin-top:10px">
       <div class="h"><h2>Правила</h2><span class="chip">честно</span></div>
       <p class="sub">Модель с номером — без редкости. Улучшение открывает уникальную картинку и одну из двух редкостей, а админ может выдать редкость или кастомный NFT сразу. RCOIN — игровая валюта без реальной стоимости.</p>
@@ -7123,7 +7412,7 @@ var fmt = function(n){ return Math.floor(Number(n)||0).toLocaleString('ru-RU').r
 var num = function(v){ return Math.max(0, Math.floor(Number(v)||0)); };
 var safe = function(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
 var icon = function(n, cls){ return '<svg class="i '+(cls||'')+'"><use href="#i-'+n+'"/></svg>'; };
-var ME=null, CASES=[], NFTS=[], AR=null;
+var ME=null, CASES=[], NFTS=[], AR=null, SERVER_THEME='obsidian';
 var mineTimer=null, mineBase=0, mineRate=0, mineTs=0;
 
 function xhr(path, body, cb){
@@ -7147,6 +7436,13 @@ function api(path, body){ return new Promise(function(res){ xhr(path, body, res)
 function toast(t){ var e=$('toast'); e.textContent=t; e.classList.add('show'); clearTimeout(toast.t); toast.t=setTimeout(function(){ e.classList.remove('show'); },2600); }
 function haptic(){ try { tg.HapticFeedback.impactOccurred('light'); } catch(e){} }
 function setBal(v){ if(v==null) return; var s=fmt(v); $('topBal').textContent=s; $('heroBal').textContent=s; $('pBal').textContent=s; if(ME) ME.balance=v; }
+function setTicker(t){
+  var text = String(t||'').trim() || 'RUBIN · NEW BLACK COLLECTION · АПГРЕЙДЕР 2.0 · ';
+  var chunk = safe(text) + ' · ' + safe(text) + ' · ' + safe(text);
+  ['tickerTrack','upgTickerTrack'].forEach(function(id){
+    var e = $(id); if(e) e.innerHTML = '<span>'+chunk+'</span><span>'+chunk+'</span>';
+  });
+}
 function go(p){
   Array.prototype.forEach.call(document.querySelectorAll('.page'), function(e){ e.classList.toggle('active', e.id===p); });
   Array.prototype.forEach.call(document.querySelectorAll('.nav button'), function(e){ e.classList.toggle('on', e.dataset.page===p); });
@@ -7161,6 +7457,9 @@ function boot(){
   api('me').then(function(j){
     if(!j.ok){ toast(j.err||'Открой приложение через бота'); return; }
     ME = j; setBal(j.balance);
+    if(j.theme) SERVER_THEME = j.theme;
+    setTicker(j.ticker);
+    applyTheme();
     var nm = j.name || 'Игрок';
     $('hName').textContent = nm; $('pName').textContent = nm;
     $('pRank').textContent = j.rank || 'Новичок';
@@ -7170,7 +7469,9 @@ function boot(){
     var src = j.nft_profile_url || j.photo_url || '';
     ['avaBox','pAva'].forEach(function(id){ var el=$(id);
       if(src){ el.innerHTML='<img src="'+safe(src)+'" alt="">'; } else el.textContent=(nm||'?').slice(0,1).toUpperCase(); });
-    if(j.is_admin){ var b=$('adminCreateBtn'); if(b) b.classList.remove('hide'); }
+    if(j.is_admin){ var b=$('adminCreateBtn'); if(b) b.classList.remove('hide');
+      var ap=$('adminPanel'); if(ap) ap.classList.remove('hide');
+      var at=$('admTicker'); if(at) at.value=j.ticker||''; }
     loadCases();
   });
 }
@@ -7311,6 +7612,44 @@ function adminCreate(){
   }
 }
 
+function admStatus(t){ var e=$('admStatus'); if(e) e.textContent=t||''; }
+function adminSaveTicker(){
+  var text=($('admTicker').value||'').trim();
+  if(!text) return toast('Введи текст');
+  api('admin_ui',{action:'ticker',text:text}).then(function(j){
+    if(!j.ok) return toast(j.err||'Ошибка');
+    setTicker(text); admStatus('Тикер обновлён'); toast('Тикер обновлён');
+  });
+}
+function adminRedrawNfts(){
+  api('admin_ui',{action:'redraw'}).then(function(j){
+    if(!j.ok) return toast(j.err||'Ошибка');
+    NFTS=[]; loadNfts(); toast('Кэш NFT сброшен'); admStatus('NFT перерисуются при открытии');
+  });
+}
+function adminResetAsk(){
+  showSheet('<div><div class="shead"><h3>Новая коллекция NFT</h3><button class="xb" onclick="closeModal()">'+icon('x','sm')+'</button></div>'
+    +'<p class="sub">Будут удалены все NFT игроков и лоты архива. Нумерация начнётся с #1. Это необратимо.</p>'
+    +'<label>Введи RESET для подтверждения</label><input id="admConfirm" type="text" placeholder="RESET">'
+    +'<button class="btn red" style="margin-top:10px" onclick="adminResetConfirm()">Удалить и создать заново</button></div>');
+}
+function adminResetConfirm(){
+  var c=($('admConfirm').value||'').trim().toUpperCase();
+  api('admin_ui',{action:'reset',confirm:c}).then(function(j){
+    if(!j.ok) return toast(j.err||'Ошибка');
+    closeModal(); NFTS=[]; loadNfts(); loadArchive(); boot();
+    toast('Коллекция пересоздана'); admStatus('Удалено '+j.items+' NFT, лотов '+j.lots);
+  });
+}
+function adminArenaBonus(){
+  var amount=num($('admArenaBonus').value);
+  if(!amount) return toast('Введи сумму');
+  api('admin_ui',{action:'arena_bonus',amount:amount}).then(function(j){
+    if(!j.ok) return toast(j.err||'Ошибка');
+    if(j.balance!=null) setBal(j.balance); admStatus('Бонус арены: '+fmt(j.bonus)); toast('Бонус добавлен');
+  });
+}
+
 /* ============ майнинг ============ */
 function loadMining(){
   api('mining_state').then(function(j){
@@ -7356,12 +7695,10 @@ function eBet(v){
 }
 function eChance(){
   var n = findNft(E.id);
-  var total = (n ? num(n.value) : 0) + num(E.bet);
-  if(!n || total < 10000) return 0;
-  var pct = Math.round(15000000 / total);
-  if(E.mode==='coins') pct = Math.round(pct * 1.6);
-  if(E.target==='rare' && (n.rarity_key||'common')==='epic') pct = Math.round(pct*0.7);
-  return Math.max(3, Math.min(85, pct));
+  if(!n) return 0;
+  var base = (n.rarity_key==='epic') ? 60 : (n.rarity_key==='rare') ? 45 : 30;
+  var bonus = Math.min(10, Math.floor(num(E.bet) / 100000000));
+  return Math.max(3, Math.min(88, base + bonus));
 }
 function zonePath(ch){
   var a = Math.max(2.5, ch*3.6);                 // сектор от -90° по часовой
@@ -7374,6 +7711,8 @@ function zonePath(ch){
 function eRender(){
   var n = findNft(E.id);
   var ch = eChance();
+  var cp=$('chancePct'); if(cp) cp.textContent = ch ? ch+'%' : '0%';
+  var cb=$('chanceBar'); if(cb) cb.style.width = (ch||0)+'%';
   // зона выигрыша: только при внесённой сумме/NFT, иначе полосы нет
   var zw = $('zoneWrap');
   zw.innerHTML = ch>0 ? '<path d="'+zonePath(ch).d+'" fill="url(#gw)" opacity=".92"/>' : '';
@@ -7390,13 +7729,13 @@ function eRender(){
     ? '<div class="sid"><img src="'+safe(n.url)+'" alt=""></div><div class="tx"><small>Что улучшаем</small><b>#'+n.id+' '+safe(n.name)+'</b></div>'
     : '<div class="sid">'+icon('plus','sm')+'</div><div class="tx"><small>Что улучшаем</small><b>Выбрать NFT</b></div>';
   $('slotTo').innerHTML = '<div class="sid">'+icon(E.target==='suit'?'lock':'crown','sm')+'</div><div class="tx"><small>Цель</small><b>'+(E.target==='suit'?'Лот архива':(TARGET_LABEL[E.target]||'Любой предмет'))+'</b></div>';
-  var line = 'Выберите NFT и введите сумму, чтобы открыть полосу выигрыша';
-  if(n && E.mode==='nft') line = 'Ставка: #'+n.id+' '+safe(n.name)+(E.bet?' + '+fmt(E.bet)+' RCOIN':'')+' → '+($('slotTo').querySelector('b').textContent);
-  if(n && E.mode==='coins') line = 'Из #'+n.id+' получим '+fmt(eCoins())+' RCOIN';
+  var line = 'Выберите NFT — шанс и сектор появятся сразу';
+  if(n && E.mode==='nft') line = 'Ставка: #'+n.id+' '+safe(n.name)+(E.bet?' + '+fmt(E.bet)+' RCOIN':'')+' → '+($('slotTo').querySelector('b').textContent)+' · шанс '+ch+'%';
+  if(n && E.mode==='coins') line = 'Из #'+n.id+' получим '+fmt(eCoins())+' RCOIN · шанс '+ch+'%';
   $('sumLine').innerHTML = line;
   var ready = ch>0;
   var btn=$('upgBtn'); btn.disabled=!ready;
-  $('upgText').textContent = ready ? 'Улучшить' : (n ? 'Введите сумму' : 'Выберите NFT');
+  $('upgText').textContent = ready ? 'Улучшить · '+ch+'%' : (n ? 'Введите сумму' : 'Выберите NFT');
 }
 function eCoins(){
   var n = findNft(E.id); if(!n) return 0;
@@ -7432,42 +7771,56 @@ function eSpin(){
   var ch=eChance(); if(!ch) return;
   var n = findNft(E.id); if(!n) return;
   var btn=$('upgBtn'); btn.disabled=true;
+  var btnText=$('upgText'); if(btnText) btnText.textContent='Крутим…';
   var box=$('dialBox'), beam=$('beam');
   box.classList.add('spinning');
-  var span = zonePath(ch).span;
-  var turns = 4 + Math.floor(Math.random()*3);
-  var off = span*(0.2 + Math.random()*0.6);   // точка внутри сектора
-  var targetDeg = turns*360 + (360 - off);
-  beam.classList.remove('zero');
-  beam.style.transition = 'none';
-  beam.style.transform = 'translateX(-50%) rotate(0deg)';
-  /* 1 кадр форсируем, чтобы переход реально запустился */
-  beam.getBoundingClientRect();
-  beam.style.transition = 'transform 4.6s cubic-bezier(.12,.85,.06,1)';
-  beam.style.transform = 'translateX(-50%) rotate('+targetDeg+'deg)';
-  setTimeout(function(){
-    box.classList.remove('spinning');
-    var body = {ids:[E.id], bet:E.bet, target:(E.target==='suit'?'':E.target), mode:E.mode};
-    if(E.target && E.target.indexOf('a:')===0) body.lot = num(E.target.slice(2));
-    api('archive_spin', body).then(function(j){
-      if(!j.ok){ toast(j.err||'Не удалось'); if(j.balance!=null) setBal(j.balance); btn.disabled=false; eRender(); return; }
+  var body = {ids:[E.id], bet:E.bet, target:(E.target==='suit'?'':E.target), mode:E.mode};
+  if(E.target && E.target.indexOf('a:')===0) body.lot = num(E.target.slice(2));
+  api('archive_spin', body).then(function(j){
+    if(!j.ok){
+      toast(j.err||'Не удалось'); if(j.balance!=null) setBal(j.balance);
+      box.classList.remove('spinning'); eRender(); return;
+    }
+    var chNow = j.chance || ch;
+    var span = zonePath(chNow).span;
+    var win = !!j.win;
+    var turns = 5 + Math.floor(Math.random()*3);
+    var targetDeg;
+    if(win){
+      var off = span*(0.18 + Math.random()*0.64);
+      targetDeg = turns*360 + (360 - off);
+    } else {
+      var gap = Math.max(4, 360 - span);
+      var off2 = span + gap*(0.25 + Math.random()*0.5);
+      targetDeg = turns*360 + (360 - off2);
+    }
+    beam.classList.remove('zero');
+    beam.style.transition = 'none';
+    beam.style.transform = 'translateX(-50%) rotate(0deg)';
+    /* 1 кадр форсируем, чтобы переход реально запустился */
+    beam.getBoundingClientRect();
+    beam.style.transition = 'transform 4.4s cubic-bezier(.12,.85,.06,1)';
+    beam.style.transform = 'translateX(-50%) rotate('+targetDeg+'deg)';
+    setTimeout(function(){
+      box.classList.remove('spinning');
       if(j.balance!=null) setBal(j.balance);
-      if(j.win){
-        confetti(120); haptic();
+      if(win){
+        confetti(140); haptic();
         showSheet('<div style="text-align:center"><span class="chip ok">ПОБЕДА</span>'
           +(j.url?'<img class="fullimg" src="'+safe(j.url)+'" alt="" style="margin:10px 0">':'')
           +'<h3>'+safe(j.name||'Выигрыш')+'</h3>'
+          +'<p class="sub" style="margin-top:5px">Шанс: '+chNow+'% · '+safe(j.rarity||'')+'</p>'
           +'<button class="btn" style="margin-top:12px" onclick="closeModal()">Забрать</button></div>');
       } else {
         showSheet('<div style="text-align:center"><span class="chip">БЕЗ ВЫИГРЫША</span>'
           +'<div style="display:grid;place-items:center;height:70px;color:#8b90ad">'+icon('drop','lg')+'</div>'
-          +'<h3>NFT ушли в архив</h3>'
+          +'<h3>NFT ушли в архив</h3><p class="sub" style="margin-top:5px">Шанс был '+chNow+'%</p>'
           +'<button class="btn ghost" style="margin-top:12px" onclick="closeModal()">Закрыть</button></div>');
       }
       E.id=0; E.bet=0; E.target=''; $('betInput').value=0;
       NFTS=[]; loadNfts(); loadArchive();
-    });
-  }, 4700);
+    }, 4500);
+  });
 }
 function loadArchive(){
   api('archive_state').then(function(j){
@@ -7541,6 +7894,7 @@ function renderArena(){
   var st=ARA.state; if(!st) return;
   var ps=st.players||[];
   $('arenaBank').textContent = fmt(st.pool||0);
+  $('arenaBonusChip').textContent = '+'+fmt(st.bonus||0);
   $('onlineChip').innerHTML = icon('life','xs fill')+ps.length+'/2';
   var winId = (st.winner_idx>=0 && ps[st.winner_idx]) ? ps[st.winner_idx].id : null;
   drawZones(winId);
@@ -7565,6 +7919,9 @@ function renderArena(){
   $('arenaJoinBtn').classList.toggle('hide', joined);
   $('arenaLeaveBtn').classList.toggle('hide', !joined || locked);
   $('arenaBetInput').disabled = joined || locked;
+  var canAdd = joined && !locked && (st.phase==='waiting' || st.phase==='countdown');
+  var addRow=$('arenaAddRow'); if(addRow) addRow.classList.toggle('hide', !canAdd);
+  var addInput=$('arenaAddInput'); if(addInput) addInput.disabled = !canAdd;
   $('arenaHist').innerHTML = (st.history&&st.history.length)
     ? st.history.map(function(h){ return '<div style="padding:5px 0;border-bottom:1px solid rgba(255,255,255,.06)">'+safe(h.name)+' · '+safe(h.reward)+'</div>'; }).join('')
     : 'Пока нет завершённых раундов';
@@ -7617,15 +7974,24 @@ function arenaLeave(){
     ARA.state=j.state; if(j.balance!=null) setBal(j.balance); renderArena(); toast('Ставка возвращена');
   });
 }
+function arenaAdd(){
+  var bet=Math.max(1,num($('arenaAddInput').value));
+  api('arena_add',{bet:bet}).then(function(j){
+    if(!j.ok) return toast(j.err||'Не удалось добавить');
+    ARA.state=j.state; if(j.balance!=null) setBal(j.balance); renderArena(); haptic(); toast('Ставка усилена');
+  });
+}
 
 /* ============ темы и обои ============ */
 var THEMES = [
-  {key:'sapphire', name:'Сапфир', a1:'#7c5cff', a2:'#4f8bff', a3:'#c06bff'},
-  {key:'ruby',     name:'Рубин',  a1:'#ff5470', a2:'#b3123b', a3:'#ff8a5c'},
-  {key:'ice',      name:'Лёд',    a1:'#7fdcff', a2:'#2f7fd8', a3:'#b6f2ff'},
-  {key:'emerald',  name:'Изумруд',a1:'#4ce39a', a2:'#12855c', a3:'#9dffcf'},
-  {key:'gold',     name:'Золото', a1:'#ffd76a', a2:'#b97d10', a3:'#ffe9ad'},
-  {key:'violet',   name:'Фиолет', a1:'#b06bff', a2:'#5b21b6', a3:'#e0a8ff'}
+  {key:'obsidian', name:'Обсидиан', a1:'#d8b46a', a2:'#8f6a2a', a3:'#ffe6b0'},
+  {key:'iphone',   name:'iPhone',   a1:'#0a84ff', a2:'#5e5ce6', a3:'#64d2ff'},
+  {key:'android',  name:'Android',  a1:'#7c4dff', a2:'#00bfa6', a3:'#ff4081'},
+  {key:'ruby',     name:'Рубин',    a1:'#ff5470', a2:'#b3123b', a3:'#ff8a5c'},
+  {key:'ice',      name:'Лёд',      a1:'#7fdcff', a2:'#2f7fd8', a3:'#b6f2ff'},
+  {key:'emerald',  name:'Изумруд',  a1:'#4ce39a', a2:'#12855c', a3:'#9dffcf'},
+  {key:'violet',   name:'Фиолет',   a1:'#b06bff', a2:'#5b21b6', a3:'#e0a8ff'},
+  {key:'light',    name:'Свет',     a1:'#0a84ff', a2:'#5e5ce6', a3:'#34c759', light:true}
 ];
 var store = {
   get:function(k){ try { return localStorage.getItem(k); } catch(e) { return null; } },
@@ -7633,17 +7999,21 @@ var store = {
   del:function(k){ try { localStorage.removeItem(k); } catch(e) {} }
 };
 function applyTheme(){
-  var key = store.get('rubin_theme') || 'sapphire';
+  var key = store.get('rubin_theme') || SERVER_THEME || 'obsidian';
   var wall = store.get('rubin_wall') || '';
   var t = THEMES.filter(function(x){ return x.key===key; })[0] || THEMES[0];
   var rs = document.documentElement.style;
   rs.setProperty('--a1', t.a1); rs.setProperty('--a2', t.a2); rs.setProperty('--a3', t.a3);
+  document.documentElement.setAttribute('data-theme', t.key);
+  document.documentElement.classList.toggle('light', !!t.light);
   document.body.classList.toggle('wall', !!wall);
   document.body.style.backgroundImage = wall ? 'url("'+wall+'")' : '';
+  try { if(tg){ tg.setHeaderColor(t.light?'#eef1f8':'#040405'); tg.setBackgroundColor(t.light?'#eef1f8':'#040405'); } } catch(e){}
   var row=$('themeRow');
   if(row) row.innerHTML = THEMES.map(function(x){
     return '<button class="th '+(x.key===key?'on':'')+'" title="'+x.name+'" data-k="'+x.key+'" '
-      +'style="background:linear-gradient(150deg,'+x.a1+','+x.a3+')" onclick="setTheme(\''+x.key+'\')"><i>'+(x.key===key?'✓':'')+'</i></button>';
+      +'style="background:linear-gradient(150deg,'+x.a1+','+x.a3+')" onclick="setTheme(\''+x.key+'\')">'
+      +'<i>'+(x.key===key?'✓':'')+'</i><span>'+x.name+'</span></button>';
   }).join('');
 }
 function setTheme(k){
@@ -7727,7 +8097,8 @@ async def start_web():
                    "nft_photo": api_nft_photo, "nft_to_archive": api_nft_to_archive,
                    "archive_spin_coins": api_archive_spin_coins,
                    "cases_state": api_cases_state, "case_open": api_case_open,
-                   "nft_upgrade": api_nft_upgrade, "admin_nft_create": api_admin_nft_create})
+                   "nft_upgrade": api_nft_upgrade, "admin_nft_create": api_admin_nft_create,
+                   "admin_ui": api_admin_ui})
     for name, fn in routes.items():
         app.router.add_post("/api/" + name, api(fn))
     app.router.add_get("/api/prices", _prices)
@@ -7776,6 +8147,8 @@ async def main():
         log.error("BOT_TOKEN не задан! Создай/перевыпусти токен в @BotFather и добавь переменную окружения BOT_TOKEN.")
         return
     init_db()
+    normalize_balances()
+    migrate_nft_art()
     ensure_owner_nft()
     ar_restore()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -8054,9 +8427,9 @@ NFT_BG_PALETTES = {
     "Северное сияние": ((4, 22, 26), (8, 74, 72), (80, 255, 190)),
     "Галактика": ((14, 6, 32), (56, 12, 96), (255, 110, 220)),
 }
-NFT_RARITY_COLOR = {"common": (110, 220, 150), "uncommon": (90, 190, 255),
-                    "rare": (190, 130, 255), "epic": (255, 160, 80),
-                    "legendary": (255, 215, 90)}
+NFT_RARITY_COLOR = {"common": (198, 202, 212), "uncommon": (160, 190, 220),
+                    "rare": (214, 182, 116), "epic": (255, 226, 174),
+                    "legendary": (255, 236, 190)}
 NFT_MODEL_ACCENT = {"Зимний": (150, 220, 255), "Снежный": (230, 245, 255),
                     "Золотой": (255, 205, 100), "Неоновый": (255, 90, 220),
                     "Призрачный": (200, 180, 255), "Космический": (255, 125, 235)}
@@ -8649,41 +9022,75 @@ def _nft_spark(d, x, y, r, color, alpha=220):
 
 
 def _nft_premium_bg(w: int, h: int, accent, rarity: str, seed: int):
+    """Чёрный студийный фон: мягкий свет, дымка, боке, блик на полу, зерно."""
     rnd = random.Random(seed ^ 0x5EEDBEEF)
-    top = tuple(min(255, 7 + accent[i] // 20) for i in range(3))
-    bottom = (2, 3, 7)
-    im = _nft_gradient(w, h, top, bottom).convert("RGBA")
-    ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(ov, "RGBA")
-    for rr, aa in ((430, 12), (340, 18), (260, 26), (190, 38), (125, 48)):
-        d.ellipse((w // 2 - rr, h // 2 - int(rr * .78), w // 2 + rr, h // 2 + int(rr * .78)),
-                  fill=accent + (aa,))
-    d.polygon([(0, h), (int(w * .34), 0), (int(w * .52), 0), (int(w * .16), h)],
-              fill=(255, 255, 255, 7))
-    d.polygon([(w, 0), (int(w * .76), h), (int(w * .91), h), (w, int(h * .42))],
-              fill=accent + (9,))
-    for _ in range(34):
-        x, y = rnd.randrange(w), rnd.randrange(h)
-        rr = rnd.choice((1, 1, 1, 2, 2, 3))
-        a = rnd.randint(30, 125)
-        d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=(255, 250, 235, a))
-    for _ in range(6):
-        x, y = rnd.randrange(40, w - 40), rnd.randrange(40, h - 40)
-        _nft_spark(d, x, y, rnd.randint(4, 10), (255, 245, 220), rnd.randint(35, 90))
-    for yy in (h * .22, h * .78):
-        d.line((30, yy, w - 30, yy), fill=(255, 255, 255, 10), width=1)
-    im = Image.alpha_composite(im, ov)
+    top = (4 + accent[0] // 42, 4 + accent[1] // 42, 6 + accent[2] // 38)
+    im = _nft_gradient(w, h, top, (0, 0, 0)).convert("RGBA")
+
+    haze = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    hd = ImageDraw.Draw(haze, "RGBA")
+    for _ in range(8):
+        cx, cy = rnd.randint(-120, w + 120), rnd.randint(-80, int(h * .72))
+        rx, ry = rnd.randint(160, 430), rnd.randint(120, 310)
+        hd.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=accent + (rnd.randint(3, 9),))
+    haze = haze.filter(ImageFilter.GaussianBlur(90))
+    im = Image.alpha_composite(im, haze)
+
+    key = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    kd = ImageDraw.Draw(key, "RGBA")
+    cx, cy = w // 2, int(h * .40)
+    for rr, aa in ((470, 26), (330, 38), (215, 52), (140, 66)):
+        kd.ellipse((cx - rr, cy - int(rr * .6), cx + rr, cy + int(rr * .6)),
+                   fill=(255, 246, 228, aa))
+    key = key.filter(ImageFilter.GaussianBlur(80))
+    im = Image.alpha_composite(im, key)
+
+    bokeh = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(bokeh, "RGBA")
+    for _ in range(13):
+        r = rnd.randint(8, 38)
+        x, y = rnd.randrange(w), rnd.randrange(int(h * .06), int(h * .68))
+        col = rnd.choice((accent, (255, 242, 214), (150, 185, 255), (255, 255, 255)))
+        a = rnd.randint(10, 28)
+        bd.ellipse((x - r, y - r, x + r, y + r), fill=col + (a // 3,), outline=col + (a,),
+                   width=max(1, r // 9))
+    bokeh = bokeh.filter(ImageFilter.GaussianBlur(5))
+    im = Image.alpha_composite(im, bokeh)
+
+    floor = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    fd = ImageDraw.Draw(floor, "RGBA")
+    fy = int(h * .80)
+    for rr, aa in ((250, 18), (170, 26), (100, 34)):
+        fd.ellipse((cx - rr, fy - rr // 5, cx + rr, fy + rr // 5), fill=accent + (aa,))
+    fd.rectangle((0, fy, w, h), fill=(0, 0, 0, 140))
+    floor = floor.filter(ImageFilter.GaussianBlur(45))
+    im = Image.alpha_composite(im, floor)
+
+    scrim = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(scrim, "RGBA")
+    top_y = int(h * .82)
+    span = max(1, h - top_y)
+    for i in range(span):
+        sd.line((0, top_y + i, w, top_y + i), fill=(0, 0, 0, int(175 * (i / span) ** 1.25)))
+    im = Image.alpha_composite(im, scrim)
+
+    beam = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    be = ImageDraw.Draw(beam, "RGBA")
+    be.polygon([(int(w * .12), 0), (int(w * .30), 0), (int(w * .58), h), (int(w * .40), h)],
+               fill=(255, 255, 255, 5))
+    beam = beam.filter(ImageFilter.GaussianBlur(22))
+    im = Image.alpha_composite(im, beam)
 
     mask = Image.radial_gradient("L").resize((w, h), Image.BILINEAR)
-    alpha = mask.point(lambda v: int((v / 255) ** 1.55 * 218))
+    alpha = mask.point(lambda v: int((v / 255) ** 1.9 * 238))
     black = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     black.putalpha(alpha)
     im = Image.alpha_composite(im, black)
 
     try:
-        noise = Image.effect_noise((w, h), 13).convert("L")
+        noise = Image.effect_noise((w, h), 9).convert("L")
         grain = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-        grain.putalpha(noise.point(lambda v: int(v * .045)))
+        grain.putalpha(noise.point(lambda v: int(v * .038)))
         im = Image.alpha_composite(im, grain)
     except Exception:
         pass
@@ -8730,9 +9137,9 @@ def _nft_bottom_labels(im, title: str, rarity: str, model: str, accent, big: boo
     w, h = im.size
     d = ImageDraw.Draw(im, "RGBA")
     f1 = _nft_font(True, 34 if big else 27)
-    f2 = _nft_font(False, 15)
+    f2 = _nft_font(False, 14)
     name = (title or "NFT").upper()[:26]
-    d.text((38, h - 82), name, font=f1, fill=(255, 255, 255, 235))
+    d.text((38, h - 100), name, font=f1, fill=(255, 255, 255, 235))
     pct_m = next((int(round(w)) for nm, _, w in MODELS if nm == model), 0)
     if int(level or 1) <= 1:
         sub = f"{model or 'Стандартный'} · без редкости"
@@ -8740,12 +9147,13 @@ def _nft_bottom_labels(im, title: str, rarity: str, model: str, accent, big: boo
         sub = f"{RARITY_NAME.get(str(rarity), str(rarity).title())} · {model or 'Стандартный'}"
     sub += f" {pct_m}%" if pct_m else ""
     if background:
-        pct_b = next((int(round(w)) for nm, _, w in BGS if nm == background), 0)
+        bg = bg_label(background)
+        pct_b = next((int(round(x)) for nm, _, x in BGS if nm == bg), 0)
         if pct_b:
-            sub += f" · {background} {pct_b}%"
-    d.text((40, h - 40), sub, font=f2, fill=(255, 255, 255, 145))
-    d.text((w - 40 - d.textlength("RUBIN NFT", font=f2), h - 40), "RUBIN NFT", font=f2,
-           fill=accent + (185,))
+            sub += f" · {bg} {pct_b}%"
+    d.text((40, h - 62), sub, font=f2, fill=(255, 255, 255, 155))
+    d.text((w - 40 - d.textlength("RUBIN NFT", font=f2), h - 62), "RUBIN NFT", font=f2,
+           fill=accent + (200,))
 
 
 def _nft_frame(im, rarity: str):
@@ -9282,70 +9690,18 @@ def nft_variant(seed: int) -> dict:
             "ornament": rnd.choice(("stars", "snow", "bokeh", "grid", "rays"))}
 
 
-def _nft_unique_scene(seed: int, title: str, model: str, background: str, rarity: str,
-                      level: int, archetype: str = "", variant: str = "") -> bytes:
-    """Уникальная карточка NFT: своя палитра, своя архетип-фигура и свой орнамент."""
-    w, h = 1280, 720
+def _nft_figure_canvas(seed: int, title: str, archetype: str, model: str, accent,
+                       w: int, h: int, max_w: int = 700, max_h: int = 600,
+                       with_shadow: bool = True, center_y: Optional[int] = None) -> "Image.Image":
+    """Рисует фигуру в полный холст с мягкой тенью — общая база для карточек."""
     v = nft_variant(seed)
-    if model:
-        top, mid, accent = NFT_MODEL_PALETTE.get(str(model), (v["top"], v["mid"], v["accent"]))
-    else:
-        top, mid, accent = v["top"], v["mid"], v["accent"]
-    rnd = random.Random(int(seed) * 104729 + 7)
-    im = _nft_gradient(w, h, top, mid).convert("RGBA")
-    ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(ov, "RGBA")
-    for _ in range(5):
-        rr = rnd.randint(180, 430)
-        cx = rnd.randint(0, w)
-        cy = rnd.randint(0, h)
-        d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=accent + (rnd.randint(8, 20),))
-    orn = v["ornament"]
-    if orn == "stars":
-        for _ in range(46):
-            x, y = rnd.randrange(w), rnd.randrange(h)
-            rr = rnd.randint(2, 8)
-            d.polygon(_nft_star_points(x, y, rr, max(1, rr * .34), 4, rnd.randint(0, 90)),
-                      fill=(255, 246, 224, rnd.randint(50, 165)))
-    elif orn == "snow":
-        for _ in range(38):
-            x, y = rnd.randrange(w), rnd.randrange(h)
-            rr = rnd.randint(3, 9)
-            for ang in (0, 60, 120):
-                a = math.radians(ang)
-                d.line((x - math.cos(a) * rr, y - math.sin(a) * rr,
-                        x + math.cos(a) * rr, y + math.sin(a) * rr),
-                       fill=(230, 248, 255, rnd.randint(35, 90)), width=1)
-    elif orn == "bokeh":
-        for _ in range(26):
-            x, y = rnd.randrange(w), rnd.randrange(h)
-            rr = rnd.randint(10, 52)
-            d.ellipse((x - rr, y - rr, x + rr, y + rr), outline=(255, 255, 255, rnd.randint(16, 42)), width=2)
-    elif orn == "grid":
-        for x in range(0, w, 64):
-            d.line((x, 0, x, h), fill=(255, 255, 255, 8), width=1)
-        for y in range(0, h, 64):
-            d.line((0, y, w, y), fill=(255, 255, 255, 8), width=1)
-    else:
-        for ang in range(0, 360, 18):
-            a = math.radians(ang)
-            d.line((w // 2, h // 2, w // 2 + math.cos(a) * 720, h // 2 + math.sin(a) * 720),
-                   fill=accent + (10,), width=26)
-    d.polygon([(0, h), (int(w * .38), 0), (int(w * .56), 0), (int(w * .16), h)],
-              fill=(255, 255, 255, 7))
-    im = Image.alpha_composite(im, ov)
-    d = ImageDraw.Draw(im, "RGBA")
-
-    # Фигуру рисуем в поле 1200x980 и вписываем целиком: фигуры разные по высоте,
-    # иначе цилиндр снеговика обрезается краем карточки.
-    fig = Image.new("RGBA", (1200, 980), (0, 0, 0, 0))
-    fd = ImageDraw.Draw(fig, "RGBA")
-    fx, fy = 600, 730
-    fd.ellipse((fx - 330, fy - 26, fx + 330, fy + 34), fill=(0, 0, 0, 78))
     if not archetype:
         archetype = _nft_kind("", title)
         if archetype == "blob":
             archetype = v["archetype"]
+    fig = Image.new("RGBA", (1200, 980), (0, 0, 0, 0))
+    fd = ImageDraw.Draw(fig, "RGBA")
+    fx, fy = 600, 730
     figures = {
         "tree": _nft_tree, "gift": _nft_gift, "snowman": _nft_snowman, "snowflake": _nft_snowflake,
         "santa": _nft_santa, "planet": _nft_planet, "robot": _nft_robot, "bear": _nft_bear,
@@ -9355,22 +9711,63 @@ def _nft_unique_scene(seed: int, title: str, model: str, background: str, rarity
         "dragon": _nft_dragon, "unicorn": _nft_unicorn, "deer": _nft_deer,
     }
     figures.get(archetype, _nft_blob)(fd, fx, fy, accent)
-    if archetype in ("blob", "bear", "cat", "capy", "penguin", "robot", "unicorn", "dragon", "deer"):
-        _nft_accessory(fd, str(model or v["model"]), seed, fx, fy - 420, accent)
     box = fig.getbbox()
     fig = fig.crop(box) if box else fig
-    scale = min(700 / max(1, fig.width), 600 / max(1, fig.height))
+    scale = min(max_w / max(1, fig.width), max_h / max(1, fig.height))
     fig = fig.resize((max(1, int(fig.width * scale)), max(1, int(fig.height * scale))), Image.LANCZOS)
     char = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    char.alpha_composite(fig, ((w - fig.width) // 2, int(h * .52) - fig.height // 2 + 40))
+    cy = int(center_y) if center_y is not None else int(h * .50)
+    char.alpha_composite(fig, ((w - fig.width) // 2, cy - fig.height // 2))
+    return char
 
-    alpha0 = char.split()[3]
+
+def _nft_unique_scene(seed: int, title: str, model: str, background: str, rarity: str,
+                      level: int, archetype: str = "", variant: str = "") -> bytes:
+    """Премиальная чёрная карточка: студийный свет, объём, отражение и глубина."""
+    w, h = 1280, 720
+    v = nft_variant(seed)
+    if model:
+        top, mid, accent = NFT_MODEL_PALETTE.get(str(model), (v["top"], v["mid"], v["accent"]))
+    else:
+        top, mid, accent = v["top"], v["mid"], v["accent"]
+    im = _nft_premium_bg(w, h, accent, rarity, seed)
+    if not archetype:
+        archetype = _nft_kind("", title)
+        if archetype == "blob":
+            archetype = v["archetype"]
+    char = _nft_figure_canvas(seed, title, archetype, model, accent, w, h, 700, 430, True, 395)
+    alpha = char.split()[3]
+    gloss = Image.new("RGBA", (w, h), (255, 255, 255, 0))
+    light = Image.linear_gradient("L").resize((w, h), Image.BILINEAR).point(
+        lambda v: int((1 - v / 255) * 46))
+    gloss.putalpha(ImageChops.multiply(alpha, light))
+    char = Image.alpha_composite(char, gloss)
+    alpha = char.split()[3]
+
+    shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    sh = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+    sh.putalpha(alpha.filter(ImageFilter.GaussianBlur(28)).point(lambda v: int(v * .72)))
+    shadow.alpha_composite(sh, (0, 26))
+    im = Image.alpha_composite(im, shadow)
+
     glow = Image.new("RGBA", (w, h), accent + (255,))
-    glow.putalpha(alpha0.filter(ImageFilter.GaussianBlur(26)).point(lambda v: int(v * .42)))
+    glow.putalpha(alpha.filter(ImageFilter.GaussianBlur(30)).point(lambda v: int(v * .40)))
     im = Image.alpha_composite(im, glow)
+
+    rim_a = ImageChops.subtract(alpha, ImageChops.offset(alpha, 3, 3))
+    rim_a = rim_a.filter(ImageFilter.GaussianBlur(1)).point(lambda v: int(v * .80))
+    rim = Image.new("RGBA", (w, h), (255, 240, 220, 255))
+    rim.putalpha(rim_a)
+    im = Image.alpha_composite(im, rim)
     im.alpha_composite(char, (0, 0))
 
     d = ImageDraw.Draw(im, "RGBA")
+    rnd = random.Random(int(seed) * 104729 + 17)
+    for _ in range(14):
+        x, y = rnd.randrange(40, w - 40), rnd.randrange(80, h - 100)
+        rr = rnd.randint(1, 2)
+        d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=(255, 246, 224, rnd.randint(18, 55)))
+
     _nft_top_pills(im, seed)
     label_model = f"{model or v['model']} · {variant or v['variant']}"
     _nft_bottom_labels(im, title, rarity, label_model, accent, level=level, background=background)
@@ -9382,38 +9779,35 @@ def _nft_unique_scene(seed: int, title: str, model: str, background: str, rarity
 
 def _nft_blank_card(seed: int, title: str, rarity: str, level: int, model: str = "",
                     background: str = "") -> bytes:
-    """Базовая карточка: палитра модели, крупный знак редкости и номер. Без белого фона."""
+    """Запечатанная чёрная карточка: силуэт модели, свет и номер. Без геометрии."""
     w, h = 1280, 720
     top, mid, accent = NFT_MODEL_PALETTE.get(str(model), NFT_MODEL_PALETTE["Стандартный"])
-    rnd = random.Random(seed * 7919 + 13)
-    im = _nft_gradient(w, h, top, mid).convert("RGBA")
-    ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(ov, "RGBA")
-    for rr, aa in ((470, 14), (360, 20), (260, 30), (170, 44)):
-        d.ellipse((w // 2 - rr, h // 2 - int(rr * .74), w // 2 + rr, h // 2 + int(rr * .74)),
-                  fill=accent + (aa,))
-    for _ in range(40):
-        x, y = rnd.randrange(w), rnd.randrange(h)
-        rr = rnd.choice((1, 1, 2, 3))
-        d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=(255, 250, 240, rnd.randint(25, 110)))
-    if background:
-        _nft_bg_decor(d, background, rnd, w, h, accent)
-    d.polygon([(0, h), (int(w * .38), 0), (int(w * .56), 0), (int(w * .16), h)],
-              fill=(255, 255, 255, 7))
-    im = Image.alpha_composite(im, ov)
+    im = _nft_premium_bg(w, h, accent, rarity, seed)
+    v = nft_variant(seed)
+    kind = _nft_kind("", title)
+    if kind == "blob":
+        kind = v["archetype"]
+    char = _nft_figure_canvas(seed, title, kind, model, accent, w, h, 480, 300, False, 440)
+    bb = char.getbbox()
+    if bb:
+        obj = char.crop(bb)
+        mask = obj.split()[3].filter(ImageFilter.GaussianBlur(1))
+        grad = _nft_gradient(obj.width, obj.height, (220, 224, 236), (42, 46, 60)).convert("RGBA")
+        sil = Image.new("RGBA", obj.size, (0, 0, 0, 0))
+        sil.paste(grad, (0, 0), mask)
+
+        glow = Image.new("RGBA", (w, h), accent + (255,))
+        gmask = Image.new("L", (w, h), 0)
+        gmask.paste(mask, ((w - obj.width) // 2, int(h * .46) - obj.height // 2))
+        glow.putalpha(gmask.filter(ImageFilter.GaussianBlur(28)).point(lambda x: int(x * .42)))
+        im = Image.alpha_composite(im, glow)
+        im.alpha_composite(sil, ((w - sil.width) // 2, int(h * .46) - obj.height // 2))
+
     d = ImageDraw.Draw(im, "RGBA")
-    # центральный знак: ромб модели и стеклянная плашка
-    cx, cy = w // 2, int(h * .40)
-    d.rounded_rectangle((cx - 115, cy - 115, cx + 115, cy + 115), 40, fill=(0, 0, 0, 90),
-                        outline=accent + (130,), width=3)
-    for pad, a in ((46, 20), (30, 32)):
-        d.ellipse((cx - 78 - pad, cy - 78 - pad, cx + 78 + pad, cy + 78 + pad), fill=accent + (a,))
-    d.polygon([(cx, cy - 78), (cx + 78, cy), (cx, cy + 78), (cx - 78, cy)], fill=accent + (225,))
-    d.polygon([(cx, cy - 44), (cx + 44, cy), (cx, cy + 44), (cx - 44, cy)], fill=(10, 8, 18, 235))
-    d.text((cx, cy + 9), "NFT", font=_nft_font(True, 26), fill=accent + (245,), anchor="mm")
-    d.text((cx, cy + 152), "БАЗОВАЯ МОДЕЛЬ", font=_nft_font(True, 22), fill=accent + (235,), anchor="mm")
-    d.text((cx, cy + 182), "арт и редкость — после улучшения", font=_nft_font(False, 17),
-           fill=(230, 232, 245, 170), anchor="mm")
+    _nft_center_text(d, w, 64, "S E A L E D", _nft_font(True, 15), accent + (230,))
+    _nft_center_text(d, w, 96, "БАЗОВАЯ МОДЕЛЬ", _nft_font(True, 22), (255, 255, 255, 225))
+    _nft_center_text(d, w, 128, "арт и редкость — после улучшения",
+                     _nft_font(False, 16), (230, 232, 245, 165))
     _nft_top_pills(im, seed)
     _nft_bottom_labels(im, title, rarity, model or "Стандартный", accent, level=level, background=background)
     _nft_frame(im, rarity)
@@ -9478,13 +9872,6 @@ def png_nft(seed: int, title: str, photo: str = "", model: str = "",
             return _nft_photo_card((NFT_DIR / str(photo)).read_bytes(), title, rarity, seed)
         except Exception:
             log.exception("photo nft card")
-    low = str(title or "").lower()
-    if any(k in low for k in ("gta", "vice city", "вайс")):
-        return _nft_gta_card(seed, title, rarity, model)
-    if any(k in low for k in ("капибар", "capy", "капик")):
-        return _nft_capy_card(seed, title, rarity, model)
-    if any(k in low for k in ("пингвин", "penguin")) and level > 1:
-        return _nft_penguin_card(seed, title, rarity, model)
     if _nft_kind(photo, title) == "rollix":
         return _nft_watch_card(seed, title, model, background, rarity, level)
     if level <= 1:
@@ -9506,6 +9893,53 @@ def make_nft_image(nid: int) -> Optional[bytes]:
     except Exception:
         log.exception("make_nft_image %s", nid)
         return None
+
+
+def migrate_nft_art() -> int:
+    """Сбрасывает старый кэш картинок, чтобы все NFT перерисовались в новом стиле."""
+    try:
+        if kv_get("nftart:version") == str(NFT_ART_VERSION):
+            return 0
+        n = x("DELETE FROM kv WHERE key LIKE 'nftpng:%' OR key LIKE 'nftsvg:%'")[0]
+        kv_set("nftart:version", str(NFT_ART_VERSION))
+        log.info("NFT-арт v%s: сброшено %s старых превью", NFT_ART_VERSION, n)
+        return n
+    except Exception:
+        log.exception("migrate_nft_art")
+        return 0
+
+
+def redraw_nft_art() -> int:
+    """Принудительно перерисовать все NFT при следующем открытии."""
+    n = x("DELETE FROM kv WHERE key LIKE 'nftpng:%' OR key LIKE 'nftsvg:%'")[0]
+    kv_set("nftart:version", str(NFT_ART_VERSION))
+    return n
+
+
+def reset_nft_collection() -> dict:
+    """Новая коллекция: удаляет старые NFT и лоты, начинает нумерацию с #1."""
+    old_items = int(q("SELECT COUNT(*) c FROM nft_items", one=True)["c"])
+    old_lots = archive_count()
+    x("DELETE FROM nft_items")
+    x("DELETE FROM nft_archive")
+    x("UPDATE users SET balance_nft_id=0, profile_nft_id=0")
+    try:
+        x("DELETE FROM kv WHERE key LIKE 'nftpng:%' OR key LIKE 'nftimg:%' OR key LIKE 'nftsvg:%'")
+    except Exception:
+        log.debug("reset nft kv", exc_info=True)
+    try:
+        if DATABASE_URL:
+            x("ALTER SEQUENCE nft_items_id_seq RESTART WITH 1")
+            x("ALTER SEQUENCE nft_archive_id_seq RESTART WITH 1")
+        else:
+            x("DELETE FROM sqlite_sequence WHERE name IN ('nft_items','nft_archive')")
+    except Exception:
+        log.debug("reset nft sequence", exc_info=True)
+    kv_set("nftart:version", str(NFT_ART_VERSION))
+    seed_nft_archive()
+    ensure_owner_nft()
+    log.warning("Коллекция NFT пересоздана: удалено %s NFT и %s лотов", old_items, old_lots)
+    return {"items": old_items, "lots": old_lots, "archive": archive_count()}
 
 
 def balance_text(uid: int) -> str:
@@ -10416,6 +10850,40 @@ def api_admin_nft_create(u, body):
         make_nft_image(nid)
     n = q("SELECT * FROM nft_items WHERE id=?", (nid,), one=True)
     return {"ok": True, "msg": f"NFT #{nid} создан", "item": nft_public(n)}
+
+
+def api_admin_ui(u, body):
+    uid = u["user_id"]
+    if not is_admin(uid):
+        return w_err("Только для администрации")
+    action = str(body.get("action") or "")
+    if action == "ticker":
+        text = str(body.get("text") or "").strip()[:300]
+        if not text:
+            return w_err("Пустой текст")
+        kv_set(UI_TICKER_KEY, text)
+        return {"ok": True, "ticker": text, "msg": "Тикер обновлён"}
+    if action == "theme":
+        theme = str(body.get("theme") or "").strip()[:24] or UI_THEME_DEFAULT
+        kv_set(UI_THEME_KEY, theme)
+        return {"ok": True, "theme": theme, "msg": "Тема по умолчанию обновлена"}
+    if action == "redraw":
+        n = redraw_nft_art()
+        return {"ok": True, "count": n, "msg": f"Сброшено {n} превью"}
+    if action == "reset":
+        if uid != OWNER_ID:
+            return w_err("Новая коллекция доступна только владельцу")
+        if str(body.get("confirm") or "").strip().upper() != "RESET":
+            return w_err("Введи RESET для подтверждения")
+        res = reset_nft_collection()
+        return {"ok": True, **res, "msg": "Коллекция пересоздана"}
+    if action == "arena_bonus":
+        try:
+            amount = int(body.get("amount") or 0)
+        except (TypeError, ValueError):
+            return w_err("Неверная сумма")
+        return ar_admin_bonus(uid, amount)
+    return w_err("Неизвестное действие")
 
 
 def api_nft_set(u, body):
