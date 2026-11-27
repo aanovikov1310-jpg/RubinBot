@@ -90,7 +90,7 @@ IMAGE_PATH = "image.png"
 # For Render persistent disk, set NFT_DIR=/var/data/nft_images.
 NFT_DIR = Path(os.getenv("NFT_DIR", "/var/data/nft_images" if os.getenv("RENDER") else "nft_images"))
 BALANCE_BANNER = Path(os.getenv("BALANCE_BANNER", "balance_banner.png"))
-NFT_ART_VERSION = 5
+NFT_ART_VERSION = 6
 UI_TICKER_KEY = "ui:ticker"
 UI_TICKER_DEFAULT = ("RUBIN · NEW BLACK COLLECTION · АПГРЕЙДЕР 2.0 · "
                      "ЧЁРНЫЙ ПРЕМИУМ · АРЕНА С БОНУСОМ · ")
@@ -7099,8 +7099,8 @@ body:after{opacity:.35}
 
 /* карточки и темы */
 .nft{box-shadow:0 10px 30px rgba(0,0,0,.35);background:linear-gradient(180deg,rgba(15,17,24,.9),rgba(5,6,9,.92))}
-.nft .im{aspect-ratio:16/10}
-.pick img{aspect-ratio:16/10}
+.nft .im{aspect-ratio:1300/680}
+.pick img{aspect-ratio:1300/680}
 .nft .im img{transition:transform .6s cubic-bezier(.2,.8,.2,1)}
 .nft:active .im img{transform:scale(1.04)}
 .nft .nm{font-size:11.5px}
@@ -8830,6 +8830,7 @@ def _nft_kind(photo: str, title: str) -> str:
         (("пельмен", "dumpling"), "dumpling"),
         (("пузыр", "bubble"), "bubble"),
         (("оливье", "салат", "salad"), "salad"),
+        (("меч", "клинок", "sword"), "sword"),
     ]
     for keys, kind in rules:
         if any(k in t for k in keys):
@@ -9690,10 +9691,35 @@ def nft_variant(seed: int) -> dict:
             "ornament": rnd.choice(("stars", "snow", "bokeh", "grid", "rays"))}
 
 
-def _nft_figure_canvas(seed: int, title: str, archetype: str, model: str, accent,
-                       w: int, h: int, max_w: int = 700, max_h: int = 600,
-                       with_shadow: bool = True, center_y: Optional[int] = None) -> "Image.Image":
-    """Рисует фигуру в полный холст с мягкой тенью — общая база для карточек."""
+def _nft_sword(d, cx, cy, accent):
+    """Меч с лентой и листьями — для кастомных NFT."""
+    for ang in (-38, -12, 18, 44):
+        a = math.radians(ang)
+        lx, ly = cx + math.cos(a) * 78, cy + math.sin(a) * 74
+        d.ellipse((lx - 26, ly - 54, lx + 26, ly + 54), fill=(34, 132, 64))
+        d.line((lx, ly - 44, lx, ly + 44), fill=(20, 90, 45), width=3)
+    d.polygon([(cx - 26, cy - 150), (cx + 26, cy - 150), (cx + 18, cy + 120),
+               (cx, cy + 180), (cx - 18, cy + 120)], fill=(198, 204, 214))
+    d.polygon([(cx - 10, cy - 145), (cx + 4, cy - 145), (cx + 4, cy + 110),
+               (cx - 2, cy + 160)], fill=(240, 244, 250))
+    d.rounded_rectangle((cx - 70, cy - 160, cx + 70, cy - 130), 12, fill=(160, 166, 178))
+    d.rounded_rectangle((cx - 60, cy - 156, cx + 60, cy - 136), 8, fill=(210, 216, 226))
+    d.rounded_rectangle((cx - 18, cy - 250, cx + 18, cy - 160), 10, fill=(48, 52, 64))
+    for i in range(5):
+        d.line((cx - 14, cy - 240 + i * 16, cx + 14, cy - 240 + i * 16),
+               fill=(70, 76, 90), width=3)
+    d.ellipse((cx - 30, cy - 282, cx + 30, cy - 238), fill=(190, 196, 206))
+    d.ellipse((cx - 90, cy - 150, cx - 10, cy - 80), fill=(180, 24, 40))
+    d.ellipse((cx + 10, cy - 150, cx + 90, cy - 80), fill=(180, 24, 40))
+    d.polygon([(cx - 40, cy - 110), (cx - 90, cy + 40), (cx - 60, cy + 50),
+               (cx - 10, cy - 100)], fill=(200, 30, 48))
+    d.polygon([(cx + 10, cy - 100), (cx + 60, cy + 60), (cx + 90, cy + 40),
+               (cx + 40, cy - 110)], fill=(200, 30, 48))
+
+
+def _nft_figure_image(seed: int, title: str, archetype: str, model: str, accent,
+                      max_w: int, max_h: int) -> "Image.Image":
+    """Возвращает обрезанную и масштабированную фигуру без фона."""
     v = nft_variant(seed)
     if not archetype:
         archetype = _nft_kind("", title)
@@ -9701,20 +9727,27 @@ def _nft_figure_canvas(seed: int, title: str, archetype: str, model: str, accent
             archetype = v["archetype"]
     fig = Image.new("RGBA", (1200, 980), (0, 0, 0, 0))
     fd = ImageDraw.Draw(fig, "RGBA")
-    fx, fy = 600, 730
     figures = {
         "tree": _nft_tree, "gift": _nft_gift, "snowman": _nft_snowman, "snowflake": _nft_snowflake,
         "santa": _nft_santa, "planet": _nft_planet, "robot": _nft_robot, "bear": _nft_bear,
         "penguin": _nft_penguin, "crown": _nft_crown, "cocktail": _nft_cocktail, "blob": _nft_blob,
         "cat": _nft_cat, "capy": _nft_capy, "mammoth": _nft_mammoth, "orange": _nft_orange,
         "sock": _nft_sock, "dumpling": _nft_dumpling, "bubble": _nft_bubble, "salad": _nft_salad,
-        "dragon": _nft_dragon, "unicorn": _nft_unicorn, "deer": _nft_deer,
+        "dragon": _nft_dragon, "unicorn": _nft_unicorn, "deer": _nft_deer, "sword": _nft_sword,
+        "rollix": _nft_rollix,
     }
-    figures.get(archetype, _nft_blob)(fd, fx, fy, accent)
+    figures.get(archetype, _nft_blob)(fd, 600, 730, accent)
     box = fig.getbbox()
     fig = fig.crop(box) if box else fig
     scale = min(max_w / max(1, fig.width), max_h / max(1, fig.height))
-    fig = fig.resize((max(1, int(fig.width * scale)), max(1, int(fig.height * scale))), Image.LANCZOS)
+    return fig.resize((max(1, int(fig.width * scale)), max(1, int(fig.height * scale))), Image.LANCZOS)
+
+
+def _nft_figure_canvas(seed: int, title: str, archetype: str, model: str, accent,
+                       w: int, h: int, max_w: int = 700, max_h: int = 600,
+                       with_shadow: bool = True, center_y: Optional[int] = None) -> "Image.Image":
+    """Рисует фигуру в полный холст — общая база для старых карточек."""
+    fig = _nft_figure_image(seed, title, archetype, model, accent, max_w, max_h)
     char = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     cy = int(center_y) if center_y is not None else int(h * .50)
     char.alpha_composite(fig, ((w - fig.width) // 2, cy - fig.height // 2))
@@ -9855,11 +9888,238 @@ def _nft_watch_card(seed: int, title: str, model: str, background: str,
     return out.getvalue()
 
 
+GMINES_PALETTES = {
+    "Чёрный бархат": {"bg": (10, 10, 12), "ink": (246, 242, 232), "accent": (216, 180, 106)},
+    "Обсидиан": {"bg": (27, 36, 48), "ink": (245, 248, 255), "accent": (120, 190, 255)},
+    "Дым": {"bg": (239, 228, 207), "ink": (35, 32, 28), "accent": (180, 40, 60)},
+    "Нуар": {"bg": (18, 201, 232), "ink": (255, 255, 255), "accent": (0, 80, 120)},
+    "Оникс": {"bg": (14, 58, 58), "ink": (235, 255, 250), "accent": (80, 220, 190)},
+    "Полночь": {"bg": (26, 42, 90), "ink": (240, 245, 255), "accent": (120, 160, 255)},
+}
+
+
+def _nft_shade(color, factor, alpha=255):
+    return tuple(max(0, min(255, int(c * factor))) for c in color[:3]) + (alpha,)
+
+
+def _nft_palette(background, seed):
+    key = bg_label(background)
+    pal = GMINES_PALETTES.get(key)
+    if pal:
+        return pal
+    keys = list(GMINES_PALETTES)
+    return GMINES_PALETTES[keys[int(seed) % len(keys)]]
+
+
+def _nft_symbol_tile(kind: str, size: int, color) -> Image.Image:
+    tile = Image.new("RGBA", (size * 2, size * 2), (0, 0, 0, 0))
+    d = ImageDraw.Draw(tile, "RGBA")
+    c = size
+    if kind == "paw":
+        d.ellipse((c - size * .30, c - size * .02, c + size * .30, c + size * .34), fill=color)
+        for dx, dy in ((-.30, -.18), (-.10, -.30), (.10, -.30), (.30, -.18)):
+            r = size * .13
+            x, y = c + dx * size, c + dy * size
+            d.ellipse((x - r, y - r, x + r, y + r), fill=color)
+    elif kind == "snow":
+        for ang in (0, 60, 120):
+            a = math.radians(ang)
+            dx, dy = math.cos(a) * size * .36, math.sin(a) * size * .36
+            d.line((c - dx, c - dy, c + dx, c + dy), fill=color, width=max(2, size // 14))
+            for side in (-1, 1):
+                b = math.radians(ang + side * 35)
+                d.line((c + dx * .55, c + dy * .55,
+                        c + dx * .55 + math.cos(b) * size * .16,
+                        c + dy * .55 + math.sin(b) * size * .16),
+                       fill=color, width=max(2, size // 16))
+    elif kind == "gamepad":
+        d.rounded_rectangle((c - size * .42, c - size * .20, c + size * .42, c + size * .24),
+                            radius=size * .14, fill=color)
+        d.ellipse((c - size * .52, c - size * .16, c - size * .16, c + size * .34), fill=color)
+        d.ellipse((c + size * .16, c - size * .16, c + size * .52, c + size * .34), fill=color)
+    elif kind == "star":
+        d.polygon(_nft_star_points(c, c, size * .44, size * .13, 4, -90), fill=color)
+    elif kind == "crown":
+        d.polygon([(c - size * .42, c + size * .26), (c - size * .34, c - size * .22),
+                   (c - size * .10, c + size * .02), (c, c - size * .36),
+                   (c + size * .10, c + size * .02), (c + size * .34, c - size * .22),
+                   (c + size * .42, c + size * .26)], fill=color)
+    elif kind == "magnifier":
+        d.ellipse((c - size * .34, c - size * .34, c + size * .18, c + size * .18),
+                  outline=color, width=max(2, size // 10))
+        d.line((c + size * .08, c + size * .08, c + size * .44, c + size * .44),
+               fill=color, width=max(2, size // 9))
+    else:
+        d.ellipse((c - size * .34, c - size * .34, c + size * .34, c + size * .34),
+                  outline=color, width=max(2, size // 10))
+        d.line((c, c - size * .20, c, c + size * .20), fill=color, width=max(2, size // 12))
+        d.line((c - size * .20, c, c + size * .20, c), fill=color, width=max(2, size // 12))
+    return tile
+
+
+def _nft_watermark_kind(kind: str, title: str) -> str:
+    t = (title or "").lower()
+    if any(k in t for k in ("меч", "клинок", "sword")):
+        return "magnifier"
+    if any(k in t for k in ("гейм", "gamer", "кибер", "cyber", "неон")):
+        return "gamepad"
+    if kind in ("cat", "capy", "bear", "deer", "penguin", "mammoth", "unicorn", "dragon", "blob"):
+        return "paw"
+    if kind in ("tree", "gift", "snowman", "snowflake", "santa"):
+        return "snow"
+    if kind in ("robot", "rollix"):
+        return "gamepad"
+    if kind in ("planet", "crown", "cocktail"):
+        return "star"
+    return "coin"
+
+
+def _nft_watermark(im, kind: str, ink):
+    w, h = im.size
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    size = 48
+    step_x, step_y = 230, 190
+    for row in range(-1, 5):
+        for col in range(-1, 7):
+            x = col * step_x + (row % 2) * step_x // 2
+            y = row * step_y
+            angle = (col * 13 + row * 27) % 44 - 22
+            tile = _nft_symbol_tile(kind, size, ink + (255,))
+            tile = tile.rotate(angle, resample=Image.BICUBIC, expand=True)
+            layer.alpha_composite(tile, (x, y))
+    alpha = layer.split()[3].point(lambda v: int(v * .08))
+    layer.putalpha(alpha)
+    im.alpha_composite(layer)
+
+
+def _nft_card_character(fig, sealed: bool = False):
+    if fig is None:
+        return None
+    alpha = fig.split()[3]
+    outline_mask = alpha.filter(ImageFilter.MaxFilter(9))
+    pad = 10
+    canvas = Image.new("RGBA", (fig.width + pad * 2, fig.height + pad * 2), (0, 0, 0, 0))
+    outline = Image.new("RGBA", canvas.size, (18, 18, 24, 255))
+    om = Image.new("L", canvas.size, 0)
+    om.paste(outline_mask, (pad, pad))
+    outline.putalpha(om.point(lambda v: int(v * .85)))
+    canvas.alpha_composite(outline, (0, 0))
+    f = fig.convert("RGBA")
+    if sealed:
+        f = ImageEnhance.Color(f).enhance(.70)
+        f = ImageEnhance.Brightness(f).enhance(.95)
+    a = f.split()[3]
+    gloss = Image.new("RGBA", f.size, (255, 255, 255, 0))
+    gd = ImageDraw.Draw(gloss)
+    gd.ellipse((int(f.width * .12), int(f.height * .05),
+                int(f.width * .62), int(f.height * .48)), fill=(255, 255, 255, 90))
+    gloss = gloss.filter(ImageFilter.GaussianBlur(16))
+    gloss.putalpha(ImageChops.multiply(gloss.split()[3], a))
+    f = Image.alpha_composite(f, gloss)
+    shade = Image.linear_gradient("L").resize(f.size).point(lambda v: int(v * .22))
+    sh = Image.new("RGBA", f.size, (0, 0, 0, 255))
+    sh.putalpha(ImageChops.multiply(shade, a))
+    f = Image.alpha_composite(f, sh)
+    canvas.alpha_composite(f, (pad, pad))
+    return canvas
+
+
+def _nft_brand(im, ink):
+    d = ImageDraw.Draw(im, "RGBA")
+    f = _nft_font(True, 46)
+    text = "RUBIN"
+    d.text((42, 30), text, font=f, fill=ink + (245,))
+    tw = d.textlength(text, font=f)
+    sx = 42 + int(tw) - 4
+    d.polygon(_nft_star_points(sx, 26, 15, 4, 4, -90), fill=ink + (245,))
+    d.text((44, 86), "NFT COLLECTION", font=_nft_font(False, 15), fill=ink + (145,))
+
+
+def _nft_number_band(im, seed: int, ink, band):
+    w, h = im.size
+    d = ImageDraw.Draw(im, "RGBA")
+    d.polygon([(w - 340, h), (w, h - 340), (w, h - 250), (w - 250, h)], fill=band)
+    f = _nft_font(True, 44)
+    txt = f"#{seed}"
+    tw = int(d.textlength(txt, font=f))
+    layer = Image.new("RGBA", (tw + 60, 100), (0, 0, 0, 0))
+    dl = ImageDraw.Draw(layer)
+    dl.text((28, 20), txt, font=f, fill=(0, 0, 0, 90))
+    dl.text((25, 17), txt, font=f, fill=(255, 255, 255, 245))
+    layer = layer.rotate(-45, expand=True, resample=Image.BICUBIC)
+    im.alpha_composite(layer, (w - layer.width - 2, h - layer.height - 2))
+
+
+def _nft_watch_art():
+    base = _rollix_base_image()
+    if base is None:
+        return None
+    watch = base.resize((820, 820), Image.LANCZOS)
+    watch = ImageEnhance.Contrast(watch).enhance(1.14)
+    watch = ImageEnhance.Color(watch).enhance(1.06)
+    lum = watch.convert("L").point(lambda v: 0 if v < 9 else min(255, int(v * 1.3)))
+    core = Image.new("L", (820, 820), 0)
+    ImageDraw.Draw(core).ellipse((62, 62, 758, 758), fill=255)
+    mask = ImageChops.lighter(lum, core).filter(ImageFilter.GaussianBlur(1.15))
+    watch = watch.convert("RGBA")
+    watch.putalpha(mask)
+    return watch
+
+
+def _nft_gmines_card(seed: int, title: str, model: str, background: str, rarity: str,
+                     level: int, sealed: bool = False, art=None) -> bytes:
+    """Карточка в стиле примеров: цветной фон, водяные знаки, бренд и номер."""
+    w, h = 1300, 680
+    pal = _nft_palette(background, seed)
+    bg, ink, accent = pal["bg"], pal["ink"], pal["accent"]
+    im = Image.new("RGB", (w, h), bg).convert("RGBA")
+
+    mask = Image.radial_gradient("L").resize((w, h), Image.BILINEAR)
+    dark = mask.point(lambda v: int((v / 255) ** 2 * 34))
+    black = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    black.putalpha(dark)
+    im = Image.alpha_composite(im, black)
+
+    kind = _nft_kind("", title)
+    if kind == "blob":
+        kind = nft_variant(seed)["archetype"]
+    _nft_watermark(im, _nft_watermark_kind(kind, title), ink)
+
+    if art is None:
+        fig = _nft_figure_image(seed, title, kind, model, accent, int(w * .54), int(h * .68))
+        art = _nft_card_character(fig, sealed)
+    else:
+        a = art.convert("RGBA")
+        scale = min(w * .62 / max(1, a.width), h * .82 / max(1, a.height))
+        a = a.resize((max(1, int(a.width * scale)), max(1, int(a.height * scale))), Image.LANCZOS)
+        art = _nft_card_character(a, False)
+
+    x = (w - art.width) // 2
+    y = int(h * .52) - art.height // 2
+    shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    sh = Image.new("RGBA", art.size, (0, 0, 0, 255))
+    sh.putalpha(art.split()[3].filter(ImageFilter.GaussianBlur(16)).point(lambda v: int(v * .35)))
+    shadow.alpha_composite(sh, (x, y + 14))
+    im = Image.alpha_composite(im, shadow)
+    im.alpha_composite(art, (x, y))
+
+    _nft_brand(im, ink)
+    if sealed:
+        d = ImageDraw.Draw(im, "RGBA")
+        d.text((44, 116), "SEALED · АРТ ОТКРОЕТСЯ ПОСЛЕ УЛУЧШЕНИЯ",
+               font=_nft_font(True, 13), fill=ink + (150,))
+    _nft_number_band(im, seed, ink, _nft_shade(bg, .74, 200))
+
+    out = io.BytesIO()
+    im.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
 def png_nft(seed: int, title: str, photo: str = "", model: str = "",
             background: str = "", rarity: str = "common", level: int = 1) -> bytes:
-    """Премиум-карточка NFT: тёмный фон, свет, объём, часы Rolex-класса для «Роликсов»."""
+    """NFT в стиле примеров: цветной фон, водяные знаки, бренд и номер."""
     if photo == "blank":
-        return _nft_blank_card(seed, title, rarity, level, model, background)
+        return _nft_gmines_card(seed, title, model, background, rarity, level, sealed=True)
     if photo == "photo":
         fp = NFT_DIR / f"photo_{seed}.png"
         if fp.is_file():
@@ -9873,10 +10133,11 @@ def png_nft(seed: int, title: str, photo: str = "", model: str = "",
         except Exception:
             log.exception("photo nft card")
     if _nft_kind(photo, title) == "rollix":
-        return _nft_watch_card(seed, title, model, background, rarity, level)
-    if level <= 1:
-        return _nft_blank_card(seed, title, rarity, level, model, background)
-    return _nft_unique_scene(seed, title, model, background, rarity, level)
+        art = _nft_watch_art()
+        if art is not None:
+            return _nft_gmines_card(seed, title, model, background, rarity, level,
+                                    sealed=level <= 1, art=art)
+    return _nft_gmines_card(seed, title, model, background, rarity, level, sealed=level <= 1)
 
 
 def make_nft_image(nid: int) -> Optional[bytes]:
