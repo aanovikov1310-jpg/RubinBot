@@ -90,7 +90,7 @@ IMAGE_PATH = "image.png"
 # For Render persistent disk, set NFT_DIR=/var/data/nft_images.
 NFT_DIR = Path(os.getenv("NFT_DIR", "/var/data/nft_images" if os.getenv("RENDER") else "nft_images"))
 BALANCE_BANNER = Path(os.getenv("BALANCE_BANNER", "balance_banner.png"))
-NFT_ART_VERSION = 6
+NFT_ART_VERSION = 7
 UI_TICKER_KEY = "ui:ticker"
 UI_TICKER_DEFAULT = ("RUBIN · NEW BLACK COLLECTION · АПГРЕЙДЕР 2.0 · "
                      "ЧЁРНЫЙ ПРЕМИУМ · АРЕНА С БОНУСОМ · ")
@@ -5653,6 +5653,7 @@ ADMIN_ACTIONS = {
     "gift_give": ("💌 Выдать подарок-бокс игроку", True, ["Редкость: none / rare / epic / random"]),
     "gift_gen": ("🎁 Сгенерировать подарок (код)", False, ["Редкость: none / rare / epic / random"]),
     "mailing": ("📨 Рассылка", False, ["Текст рассылки (HTML разрешён)"]),
+    "ticker": ("📢 Бегущая строка", False, ["Текст строки (пусто — оставить как есть)"]),
 }
 
 
@@ -5671,7 +5672,8 @@ def admin_kb() -> InlineKeyboardMarkup:
               [a("info"), a("history")],
               [a("nft_self"), a("nft_create")], [a("gift_gen"), a("gift_give")],
               [btn("📦 Список подарков", "adm:gift_list")],
-              [btn("🤖 Нейросеть", "adm:ai")])
+              [btn("🤖 Нейросеть", "adm:ai")],
+              [btn("📢 Бегущая строка", "adm:ticker"), btn("🏛 Архив NFT", "arx:view")])
 
 
 @dp.message(P("адм1308", "admin", "админ"))
@@ -5680,6 +5682,21 @@ async def cmd_admin(message: Message, state: FSMContext):
         return await message.reply("❌ У вас нет прав администратора.")
     await state.clear()
     await message.reply(f"{E('admin')} <b>АДМИН-ПАНЕЛЬ</b>\n\nВыберите действие:", reply_markup=admin_kb())
+
+
+@dp.message(StateFilter("adm_ticker"))
+async def adm_ticker_set(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return await message.reply("⛔ Нет прав.")
+    text = (message.text or "").strip()
+    await state.clear()
+    if not text or text == "-":
+        return await message.reply(f"Текст не изменён.\n<code>{esc(ui_ticker())}</code>")
+    kv_set(UI_TICKER_KEY, text[:300])
+    log.info("ticker обновлён админом %s", message.from_user.id)
+    await message.reply(f"✅ Бегущая строка обновлена:\n<code>{esc(text[:300])}</code>",
+                        reply_markup=admin_kb())
 
 
 @dp.message(Command("ticker"))
@@ -5729,7 +5746,13 @@ def admin_exec(action: str, tid: Optional[int], a: List[str], by: int) -> str:
         if action.startswith("give_"):
             if kind == "coin":
                 over = add_coin(tid, amt)
-                note = f"\n🏛 Сверх лимита в Архив: <b>{fmt(over)}</b>" if over else ""
+                if not over:
+                    # короткий путь: сумма влезла в лимит
+                    return f"✅ Выдано {fmt(amt)} RCOIN игроку {nm} ({tid})"
+                moved = normalize_balances()   # страховка от прямых UPDATE мимо add_coin
+                note = f"\n🏛 Сверх лимита в Архив: <b>{fmt(over)}</b>"
+                if moved:
+                    log.info("archive sweep: перенесено %s RCOIN", moved)
                 return f"✅ Выдано {fmt(amt - over)} RCOIN игроку {nm} ({tid}){note}"
             x(f"UPDATE users SET {col}={col}+? WHERE user_id=?", (amt, tid))
             return f"✅ Выдано {fmt(amt)} {kind.upper()} игроку {nm} ({tid})"
@@ -5918,6 +5941,10 @@ async def cb_admin(cb: CallbackQuery, state: FSMContext):
         except Exception as e:
             await cb.message.answer(f"❌ {esc(str(e))}")
         return await ans(cb)
+    if action == "ticker":
+        return await ask(cb, state, "adm_ticker",
+                         f"📢 <b>Бегущая строка</b>\nСейчас: <code>{esc(ui_ticker())}</code>\n\n"
+                         "Введи новый текст (пусто — оставить):")
     if action == "gift_list":
         rows = q("SELECT code,rarity,owner_id,used FROM gifts ORDER BY id DESC LIMIT 15")
         await cb.message.answer("🎁 <b>Подарки (последние 15)</b>\n" + ("\n".join(f"<code>{r['code']}</code> {RARITY_EMOJI.get(r['rarity'], '')} — {'открыт' if r['used'] else ('у ' + str(r['owner_id']) if r['owner_id'] else 'в запасе')}" for r in rows) or "пусто"))
@@ -6505,7 +6532,7 @@ def a_arena_add(u, body):
     uid = u["user_id"]
     if uid not in AR["players"]:
         return w_err("Сначала войди в лобби")
-    if AR["phase"] not in ("waiting", "countdown"):
+    if AR["phase"] not in ("idle", "waiting", "countdown"):
         return w_err("Добавить ставку можно до старта шарика")
     try:
         extra = int(float(body.get("bet", 0) or 0))
@@ -7030,6 +7057,110 @@ html.light .ticker,html.light .upg-ticker{background:linear-gradient(90deg,rgba(
 html.light .ticker-track span{color:#4b5565}
 html.light .themePick{background:rgba(255,255,255,.5)}
 
+/* ================= LIQUID GLASS: iPhone / Android ================= */
+/* Стекло перестаёт быть «тёмной карточкой»: за ним виден цветной фон,
+   сверху матовый блик, по краю светлый контур, глубина через многослойную тень. */
+html[data-theme="iphone"],html[data-theme="android"]{
+  --glass:linear-gradient(158deg,rgba(255,255,255,.16),rgba(255,255,255,.045) 42%,rgba(255,255,255,.02));
+  --stroke:rgba(255,255,255,.18);--stroke2:rgba(255,255,255,.26);
+  --glow1:color-mix(in srgb,var(--a1) 55%,transparent);
+  --glow2:color-mix(in srgb,var(--a3) 45%,transparent);
+}
+html[data-theme="iphone"] body,html[data-theme="android"] body{
+  background:#04060c;
+}
+html[data-theme="iphone"] body:before,html[data-theme="android"] body:before{
+  filter:blur(46px) saturate(1.3);opacity:1;
+  background:
+    radial-gradient(58% 44% at 84% -6%,var(--glow1),transparent 72%),
+    radial-gradient(52% 38% at 2% 12%,var(--glow2),transparent 74%),
+    radial-gradient(68% 46% at 48% 106%,var(--glow1),transparent 76%),
+    #05070e;
+}
+html[data-theme="android"] body:before{
+  filter:blur(64px) saturate(1.55);
+}
+html[data-theme="iphone"] .glass,html[data-theme="android"] .glass{
+  backdrop-filter:blur(34px) saturate(1.9);
+  -webkit-backdrop-filter:blur(34px) saturate(1.9);
+  border:1px solid var(--stroke);
+  box-shadow:0 26px 70px rgba(0,0,0,.55),
+             inset 0 1px 0 rgba(255,255,255,.34),
+             inset 0 -1px 0 rgba(255,255,255,.06),
+             0 0 0 1px rgba(0,0,0,.25);
+}
+html[data-theme="android"] .glass{border-radius:26px}
+html[data-theme="iphone"] .glass::before,html[data-theme="android"] .glass::before{
+  content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:linear-gradient(150deg,rgba(255,255,255,.16),transparent 38%,transparent 70%,rgba(255,255,255,.05));
+}
+html[data-theme="iphone"] .glass:after,html[data-theme="android"] .glass:after{
+  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--a3) 70%,white),transparent);
+  opacity:.9;height:1px;
+}
+html[data-theme="iphone"] .nft,html[data-theme="android"] .nft{
+  background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.03));
+  border-color:var(--stroke);backdrop-filter:blur(18px) saturate(1.6);
+  -webkit-backdrop-filter:blur(18px) saturate(1.6);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 14px 34px rgba(0,0,0,.45);
+}
+html[data-theme="iphone"] .nav,html[data-theme="android"] .nav{
+  background:rgba(18,22,34,.42);backdrop-filter:blur(30px) saturate(2);
+  -webkit-backdrop-filter:blur(30px) saturate(2);
+  border:1px solid rgba(255,255,255,.14);
+  box-shadow:0 20px 50px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.28);
+}
+html[data-theme="android"] .nav{border-radius:30px}
+html[data-theme="iphone"] .nav button.on,html[data-theme="android"] .nav button.on{
+  background:linear-gradient(160deg,color-mix(in srgb,var(--a1) 42%,transparent),color-mix(in srgb,var(--a3) 26%,transparent));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 6px 18px color-mix(in srgb,var(--a1) 35%,transparent);
+}
+html[data-theme="iphone"] .act,html[data-theme="android"] .act,
+html[data-theme="iphone"] .mode,html[data-theme="android"] .mode,
+html[data-theme="iphone"] .mini,html[data-theme="android"] .mini,
+html[data-theme="iphone"] .slot,html[data-theme="android"] .slot,
+html[data-theme="iphone"] .srv,html[data-theme="android"] .srv,
+html[data-theme="iphone"] .pl,html[data-theme="android"] .pl,
+html[data-theme="iphone"] .st,html[data-theme="android"] .st,
+html[data-theme="iphone"] .pick,html[data-theme="android"] .pick,
+html[data-theme="iphone"] .case,html[data-theme="android"] .case{
+  background:linear-gradient(160deg,rgba(255,255,255,.12),rgba(255,255,255,.035));
+  border-color:rgba(255,255,255,.16);
+  backdrop-filter:blur(20px) saturate(1.7);
+  -webkit-backdrop-filter:blur(20px) saturate(1.7);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.24),0 10px 26px rgba(0,0,0,.35);
+}
+html[data-theme="iphone"] .sheet,html[data-theme="android"] .sheet{
+  background:linear-gradient(168deg,rgba(30,36,52,.86),rgba(10,13,22,.94));
+  border:1px solid rgba(255,255,255,.16);
+  backdrop-filter:blur(40px) saturate(2);
+  -webkit-backdrop-filter:blur(40px) saturate(2);
+  box-shadow:0 -10px 60px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.28);
+}
+html[data-theme="iphone"] .btn,html[data-theme="android"] .btn{
+  background:linear-gradient(160deg,var(--a1),color-mix(in srgb,var(--a2) 80%,black));
+  box-shadow:0 12px 30px color-mix(in srgb,var(--a1) 32%,transparent),
+             inset 0 1px 0 rgba(255,255,255,.42),inset 0 -2px 6px rgba(0,0,0,.22);
+}
+html[data-theme="iphone"] .btn.ghost,html[data-theme="android"] .btn.ghost{
+  background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.24);
+}
+html[data-theme="iphone"] input,html[data-theme="android"] input,
+html[data-theme="iphone"] select,html[data-theme="android"] select{
+  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.16);
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.28);
+}
+html[data-theme="iphone"] .dial .core,html[data-theme="android"] .dial .core{
+  background:radial-gradient(circle at 50% 30%,rgba(255,255,255,.16),rgba(6,8,14,.92) 74%);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.14),
+             0 0 60px color-mix(in srgb,var(--a1) 30%,transparent);
+}
+html[data-theme="android"] .ticker,html[data-theme="iphone"] .ticker{
+  background:linear-gradient(90deg,rgba(255,255,255,.05),rgba(255,255,255,.13),rgba(255,255,255,.05));
+  border-color:rgba(255,255,255,.16);
+}
+
 body{background:var(--bg,#040405)}
 body:before{filter:blur(10px)}
 body:after{opacity:.35}
@@ -7045,7 +7176,9 @@ body:after{opacity:.35}
   -webkit-mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent);
   mask-image:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent)}
 .upg-ticker{margin:0 0 10px}
-.ticker-track{display:flex;width:max-content;animation:marquee 32s linear infinite;will-change:transform}
+.ticker-track{display:flex;width:max-content;animation:marquee 26s linear infinite;will-change:transform;
+  animation-play-state:running!important}
+@media (prefers-reduced-motion:reduce){.ticker-track{animation-duration:60s}}
 .ticker-track span{display:block;white-space:nowrap;padding-right:38px;font:800 10px/1.25 inherit;
   letter-spacing:.16em;text-transform:uppercase;color:var(--t2)}
 @keyframes marquee{to{transform:translateX(-50%)}}
@@ -7334,6 +7467,12 @@ body:after{opacity:.35}
         <input id="arenaAddInput" aria-label="Добавить в банк арены" type="number" min="1" step="1000" value="10000" inputmode="numeric">
         <button class="mini" onclick="arenaAdd()">+ В банк</button>
       </div>
+      <div class="rowz hide" id="arenaQuickRow" style="margin-top:8px">
+        <button class="mini" onclick="arenaAddQuick(10000)">+10к</button>
+        <button class="mini" onclick="arenaAddQuick(100000)">+100к</button>
+        <button class="mini" onclick="arenaAddQuick(1000000)">+1кк</button>
+        <button class="mini" onclick="arenaAddQuick(10000000)">+10кк</button>
+      </div>
       <div class="rowz" style="margin-top:9px">
         <button class="btn" id="arenaJoinBtn" onclick="arenaJoin()"><svg class="i sm"><use href="#i-plus"/></svg>Войти</button>
         <button class="btn ghost hide" id="arenaLeaveBtn" onclick="arenaLeave()"><svg class="i sm"><use href="#i-x"/></svg>Выйти</button>
@@ -7437,10 +7576,17 @@ function toast(t){ var e=$('toast'); e.textContent=t; e.classList.add('show'); c
 function haptic(){ try { tg.HapticFeedback.impactOccurred('light'); } catch(e){} }
 function setBal(v){ if(v==null) return; var s=fmt(v); $('topBal').textContent=s; $('heroBal').textContent=s; $('pBal').textContent=s; if(ME) ME.balance=v; }
 function setTicker(t){
-  var text = String(t||'').trim() || 'RUBIN · NEW BLACK COLLECTION · АПГРЕЙДЕР 2.0 · ';
-  var chunk = safe(text) + ' · ' + safe(text) + ' · ' + safe(text);
+  var text = String(t||'').trim();
+  if(!text) text = 'GMines · Новая чёрная коллекция NFT · Апгрейдер 2.0';
+  var one = safe(text) + '  •  ';
+  var chunk = one + one + one;
   ['tickerTrack','upgTickerTrack'].forEach(function(id){
-    var e = $(id); if(e) e.innerHTML = '<span>'+chunk+'</span><span>'+chunk+'</span>';
+    var e = $(id); if(!e) return;
+    // дублируем ленту, чтобы translateX(-50%) давал бесшовную бесконечную прокрутку
+    e.innerHTML = '<span>'+chunk+'</span><span>'+chunk+'</span>';
+    e.style.animation = 'none';
+    void e.offsetWidth;               // перезапуск анимации после смены текста
+    e.style.animation = '';
   });
 }
 function go(p){
@@ -7693,17 +7839,30 @@ function eBet(v){
   else { E.bet = v; $('betInput').value = v; }
   eRender();
 }
+function eIds(){
+  var ids = E.ids && E.ids.length ? E.ids.slice() : [];
+  if(E.id && ids.indexOf(E.id) < 0) ids.push(E.id);
+  return ids.slice(0,5);
+}
 function eChance(){
-  var n = findNft(E.id);
-  if(!n) return 0;
-  var base = (n.rarity_key==='epic') ? 60 : (n.rarity_key==='rare') ? 45 : 30;
+  var ids = eIds(); if(!ids.length) return 0;
+  var best = null, bestIdx = 0;
+  ids.forEach(function(id){
+    var n = NFTS.filter(function(x){ return x.id===id; })[0];
+    if(!n) return;
+    var idx = (n.rarity_key==='epic') ? 3 : (n.rarity_key==='rare') ? 2 : 1;
+    if(idx > bestIdx || !best){ bestIdx = idx; best = n; }
+  });
+  if(!best) return 0;
+  var base = (best.rarity_key==='epic') ? 60 : (best.rarity_key==='rare') ? 45 : 30;
   var bonus = Math.min(10, Math.floor(num(E.bet) / 100000000));
-  return Math.max(3, Math.min(88, base + bonus));
+  var extra = Math.max(0, ids.length - 1) * 5;
+  return Math.max(3, Math.min(88, base + bonus + extra));
 }
 function zonePath(ch){
   var a = Math.max(2.5, ch*3.6);                 // сектор от -90° по часовой
   var x0=120, y0=120, R=104;
-  var p0=[x0, y0-R], e=(-90+a)*Math.PI/180;
+  var p0=[x0, y0-R], e=(0+a)*Math.PI/180;   // сектор и луч считаются от -90° (12 часов)
   var p1=[x0+R*Math.cos(e), y0+R*Math.sin(e)];
   var d = 'M'+x0+' '+y0+' L'+p0[0]+' '+p0[1]+' A'+R+' '+R+' 0 '+(a>180?1:0)+' 1 '+p1[0].toFixed(2)+' '+p1[1].toFixed(2)+' Z';
   return {d:d, span:a};
@@ -7716,6 +7875,7 @@ function eRender(){
   // зона выигрыша: только при внесённой сумме/NFT, иначе полосы нет
   var zw = $('zoneWrap');
   zw.innerHTML = ch>0 ? '<path d="'+zonePath(ch).d+'" fill="url(#gw)" opacity=".92"/>' : '';
+  if(typeof E.util==='number') E.util = ch;
   var core = $('dialCore');
   if(n){
     core.innerHTML = '<img src="'+safe(n.url)+'" alt="" onerror="this.style.display=\'none\'">';
@@ -7774,7 +7934,7 @@ function eSpin(){
   var btnText=$('upgText'); if(btnText) btnText.textContent='Крутим…';
   var box=$('dialBox'), beam=$('beam');
   box.classList.add('spinning');
-  var body = {ids:[E.id], bet:E.bet, target:(E.target==='suit'?'':E.target), mode:E.mode};
+  var body = {ids:eIds(), bet:E.bet, target:(E.target==='suit'?'':E.target), mode:E.mode};
   if(E.target && E.target.indexOf('a:')===0) body.lot = num(E.target.slice(2));
   api('archive_spin', body).then(function(j){
     if(!j.ok){
@@ -7782,7 +7942,8 @@ function eSpin(){
       box.classList.remove('spinning'); eRender(); return;
     }
     var chNow = j.chance || ch;
-    var span = zonePath(chNow).span;
+    zw.innerHTML = '<path d="'+zonePath(chNow).d+'" fill="url(#gw)" opacity=".92"/>';
+    span = Math.max(2.5, chNow*3.6);      // сектор победы = фактический шанс сервера
     var win = !!j.win;
     var turns = 5 + Math.floor(Math.random()*3);
     var targetDeg;
@@ -7919,9 +8080,10 @@ function renderArena(){
   $('arenaJoinBtn').classList.toggle('hide', joined);
   $('arenaLeaveBtn').classList.toggle('hide', !joined || locked);
   $('arenaBetInput').disabled = joined || locked;
-  var canAdd = joined && !locked && (st.phase==='waiting' || st.phase==='countdown');
+  var canAdd = joined && !locked && ['idle','waiting','countdown'].indexOf(st.phase)>=0;
   var addRow=$('arenaAddRow'); if(addRow) addRow.classList.toggle('hide', !canAdd);
   var addInput=$('arenaAddInput'); if(addInput) addInput.disabled = !canAdd;
+  var quick=$('arenaQuickRow'); if(quick) quick.classList.toggle('hide', !canAdd);
   $('arenaHist').innerHTML = (st.history&&st.history.length)
     ? st.history.map(function(h){ return '<div style="padding:5px 0;border-bottom:1px solid rgba(255,255,255,.06)">'+safe(h.name)+' · '+safe(h.reward)+'</div>'; }).join('')
     : 'Пока нет завершённых раундов';
@@ -7974,6 +8136,10 @@ function arenaLeave(){
     ARA.state=j.state; if(j.balance!=null) setBal(j.balance); renderArena(); toast('Ставка возвращена');
   });
 }
+function arenaAddQuick(v){
+  var inp=$('arenaAddInput'); if(inp) inp.value=v;
+  arenaAdd();
+}
 function arenaAdd(){
   var bet=Math.max(1,num($('arenaAddInput').value));
   api('arena_add',{bet:bet}).then(function(j){
@@ -7985,8 +8151,8 @@ function arenaAdd(){
 /* ============ темы и обои ============ */
 var THEMES = [
   {key:'obsidian', name:'Обсидиан', a1:'#d8b46a', a2:'#8f6a2a', a3:'#ffe6b0'},
-  {key:'iphone',   name:'iPhone',   a1:'#0a84ff', a2:'#5e5ce6', a3:'#64d2ff'},
-  {key:'android',  name:'Android',  a1:'#7c4dff', a2:'#00bfa6', a3:'#ff4081'},
+  {key:'iphone',   name:'Стекло iOS', a1:'#0a84ff', a2:'#5e5ce6', a3:'#64d2ff'},
+  {key:'android',  name:'Стекло Android', a1:'#7c4dff', a2:'#00bfa6', a3:'#ff4081'},
   {key:'ruby',     name:'Рубин',    a1:'#ff5470', a2:'#b3123b', a3:'#ff8a5c'},
   {key:'ice',      name:'Лёд',      a1:'#7fdcff', a2:'#2f7fd8', a3:'#b6f2ff'},
   {key:'emerald',  name:'Изумруд',  a1:'#4ce39a', a2:'#12855c', a3:'#9dffcf'},
@@ -8000,6 +8166,7 @@ var store = {
 };
 function applyTheme(){
   var key = store.get('rubin_theme') || SERVER_THEME || 'obsidian';
+  if(THEMES.every(function(x){ return x.key !== key; })) key = 'obsidian';
   var wall = store.get('rubin_wall') || '';
   var t = THEMES.filter(function(x){ return x.key===key; })[0] || THEMES[0];
   var rs = document.documentElement.style;
@@ -9889,12 +10056,12 @@ def _nft_watch_card(seed: int, title: str, model: str, background: str,
 
 
 GMINES_PALETTES = {
-    "Чёрный бархат": {"bg": (10, 10, 12), "ink": (246, 242, 232), "accent": (216, 180, 106)},
-    "Обсидиан": {"bg": (27, 36, 48), "ink": (245, 248, 255), "accent": (120, 190, 255)},
-    "Дым": {"bg": (239, 228, 207), "ink": (35, 32, 28), "accent": (180, 40, 60)},
-    "Нуар": {"bg": (18, 201, 232), "ink": (255, 255, 255), "accent": (0, 80, 120)},
-    "Оникс": {"bg": (14, 58, 58), "ink": (235, 255, 250), "accent": (80, 220, 190)},
-    "Полночь": {"bg": (26, 42, 90), "ink": (240, 245, 255), "accent": (120, 160, 255)},
+    "Чёрный бархат": {"bg": (8, 8, 10), "ink": (246, 242, 232), "accent": (216, 180, 106)},
+    "Обсидиан": {"bg": (10, 12, 18), "ink": (245, 248, 255), "accent": (120, 190, 255)},
+    "Дым": {"bg": (14, 14, 16), "ink": (240, 238, 234), "accent": (196, 168, 132)},
+    "Нуар": {"bg": (6, 8, 12), "ink": (240, 244, 252), "accent": (70, 130, 200)},
+    "Оникс": {"bg": (8, 12, 12), "ink": (235, 250, 246), "accent": (80, 220, 190)},
+    "Полночь": {"bg": (9, 12, 26), "ink": (238, 242, 255), "accent": (120, 160, 255)},
 }
 
 
@@ -9921,17 +10088,16 @@ def _nft_symbol_tile(kind: str, size: int, color) -> Image.Image:
             r = size * .13
             x, y = c + dx * size, c + dy * size
             d.ellipse((x - r, y - r, x + r, y + r), fill=color)
+    elif kind == "star":
+        for ang in (0, 45, 90, 135):
+            a = math.radians(ang)
+            dx, dy = math.cos(a) * size * .34, math.sin(a) * size * .34
+            d.line((c - dx, c - dy, c + dx, c + dy), fill=color, width=max(2, size // 15))
     elif kind == "snow":
         for ang in (0, 60, 120):
             a = math.radians(ang)
-            dx, dy = math.cos(a) * size * .36, math.sin(a) * size * .36
-            d.line((c - dx, c - dy, c + dx, c + dy), fill=color, width=max(2, size // 14))
-            for side in (-1, 1):
-                b = math.radians(ang + side * 35)
-                d.line((c + dx * .55, c + dy * .55,
-                        c + dx * .55 + math.cos(b) * size * .16,
-                        c + dy * .55 + math.sin(b) * size * .16),
-                       fill=color, width=max(2, size // 16))
+            dx, dy = math.cos(a) * size * .30, math.sin(a) * size * .30
+            d.line((c - dx, c - dy, c + dx, c + dy), fill=color, width=max(2, size // 16))
     elif kind == "gamepad":
         d.rounded_rectangle((c - size * .42, c - size * .20, c + size * .42, c + size * .24),
                             radius=size * .14, fill=color)
@@ -10026,13 +10192,11 @@ def _nft_card_character(fig, sealed: bool = False):
 
 def _nft_brand(im, ink):
     d = ImageDraw.Draw(im, "RGBA")
-    f = _nft_font(True, 46)
-    text = "RUBIN"
-    d.text((42, 30), text, font=f, fill=ink + (245,))
+    f = _nft_font(True, 48)
+    text = "GMines"
+    d.text((44, 28), text, font=f, fill=ink + (250,))
     tw = d.textlength(text, font=f)
-    sx = 42 + int(tw) - 4
-    d.polygon(_nft_star_points(sx, 26, 15, 4, 4, -90), fill=ink + (245,))
-    d.text((44, 86), "NFT COLLECTION", font=_nft_font(False, 15), fill=ink + (145,))
+    d.polygon(_nft_star_points(44 + int(tw) - 6, 22, 13, 4, 5, -90), fill=ink + (250,))
 
 
 def _nft_number_band(im, seed: int, ink, band):
@@ -10072,13 +10236,19 @@ def _nft_gmines_card(seed: int, title: str, model: str, background: str, rarity:
     w, h = 1300, 680
     pal = _nft_palette(background, seed)
     bg, ink, accent = pal["bg"], pal["ink"], pal["accent"]
-    im = Image.new("RGB", (w, h), bg).convert("RGBA")
+    im = _nft_premium_bg(w, h, accent, rarity, seed)
 
-    mask = Image.radial_gradient("L").resize((w, h), Image.BILINEAR)
-    dark = mask.point(lambda v: int((v / 255) ** 2 * 34))
-    black = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    black.putalpha(dark)
-    im = Image.alpha_composite(im, black)
+    # фотореалистичная дымка у пола — без геометрии и узоров
+    rnd = random.Random(int(seed) * 2654435761 + 7)
+    floor = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    fd = ImageDraw.Draw(floor, "RGBA")
+    for _ in range(6):
+        fx, fy = rnd.randint(-100, w + 100), rnd.randint(int(h * .55), h + 40)
+        fr = rnd.randint(180, 420)
+        fd.ellipse((fx - fr, fy - fr // 3, fx + fr, fy + fr // 3),
+                   fill=(255, 255, 255, rnd.randint(2, 6)))
+    floor = floor.filter(ImageFilter.GaussianBlur(60))
+    im = Image.alpha_composite(im, floor)
 
     kind = _nft_kind("", title)
     if kind == "blob":
@@ -11775,8 +11945,11 @@ def upg_coins(uid: int, bet: int, mult: float) -> dict:
     return {"ok": True, "win": False, "chance": chance, "pool": upg_pool()}
 
 
-def upg_chance(n: dict, bet: int = 0) -> int:
-    return min(88, UPG_CHANCE.get(n["rarity"], 30) + min(10, max(0, int(bet)) // 100_000_000))
+def upg_chance(n: dict, bet: int = 0, extra: int = 0) -> int:
+    """Шанс одинаково считается на сервере и на клиенте (eChance в веб-аппе).
+    extra — сколько NFT дополнительно поставлено сверх первого (+5% за каждый)."""
+    return min(88, UPG_CHANCE.get(n.get("rarity"), 30) + min(10, max(0, int(bet)) // 100_000_000)
+               + 5 * max(0, int(extra)))
 
 
 def upg_spin(uid: int, ids, bet: int = 0, target: str = "", mode: str = "") -> dict:
@@ -11803,7 +11976,7 @@ def upg_spin(uid: int, ids, bet: int = 0, target: str = "", mode: str = "") -> d
         lot = q("SELECT * FROM nft_archive WHERE id=?", (int(target[2:]),), one=True)
     best = max(rows, key=lambda r: RARITY_IDX.get(r["rarity"], 0))
     stake = sum(nft_value(r) for r in rows) + bet
-    chance = min(88, upg_chance(best, bet) + 5 * (len(rows) - 1))
+    chance = upg_chance(best, bet, len(rows) - 1)
     if bet and not spend(uid, bet):
         return {"ok": False, "err": "Недостаточно RCOIN для бонуса"}
     for r in rows:
@@ -11857,7 +12030,20 @@ def upg_spin(uid: int, ids, bet: int = 0, target: str = "", mode: str = "") -> d
             return {"ok": True, "win": True, "chance": chance, "nft_id": new_id,
                     "name": pick["name"], "rarity": RARITY_NAME.get(pick["rarity"], pick["rarity"]),
                     "url": f"/nft/{new_id}"}
-        # Архив пуст — улучшение выплачивается коинами.
+        # Архив пуст. В режиме «только NFT» выдаём свежую модель с чёрным фоном,
+        # чтобы игрок никогда не получал коины вместо предмета.
+        if mode == "nft":
+            rarity = random.choice(UPGRADE_RARITIES)
+            name, photo = random.choice(nft_pool(rarity))
+            v = nft_variant(random.randint(1, 10_000_000))
+            new_id = make_nft(uid, name, rarity, photo, "Выиграно в апгрейдере",
+                              model=v["model"], background=v["background"])
+            make_nft_image(new_id)
+            x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
+              (uid, ids[0], best["rarity"], "win", chance, now()))
+            return {"ok": True, "win": True, "chance": chance, "nft_id": new_id,
+                    "name": name, "rarity": RARITY_NAME.get(rarity, rarity),
+                    "url": f"/nft/{new_id}"}
         coins = max(int(stake * 1.5), RARITY_BASE.get(best["rarity"], 50_000))
         over = add_coin(uid, coins)
         x("INSERT INTO upg_log(user_id,nft_id,rarity,result,chance,created_at) VALUES(?,?,?,?,?,?)",
